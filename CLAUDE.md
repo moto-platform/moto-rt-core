@@ -1,5 +1,7 @@
 # CLAUDE.md — moto-rt-core
 
+@.claude/PLATFORM-RULES.md
+
 ## What this repo is
 
 The main domain controller firmware running on **STM32H7**. CAN read/write, telemetry collection, logging, sensor fusion, UDS/ISO-TP/bootloader, XCP calibration, cornering safety EKF estimation, context classification, virtual dyno computation, the anomaly score's ESP safety-net rules (see below) — all of it lives here, as separate modules under `features/`.
