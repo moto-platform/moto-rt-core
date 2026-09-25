@@ -1,0 +1,47 @@
+# CLAUDE.md — moto-rt-core
+
+## What this repo is
+
+The main domain controller firmware running on **STM32H7**. CAN read/write, telemetry collection, logging, sensor fusion, UDS/ISO-TP/bootloader, XCP calibration, cornering safety EKF estimation, context classification, virtual dyno computation, the anomaly score's ESP safety-net rules (see below) — all of it lives here, as separate modules under `features/`.
+
+## Directory structure (layered architecture — do not mix)
+
+```
+/src/hal/         → hardware abstraction (CAN, IMU, GPS, sensors)
+/src/services/     → signal pool, logging manager, EKF fusion, time base
+/src/features/      → independent function modules (listed below)
+```
+
+Modules under `features/` **do not know about each other**, they only look at `services/`. If you delete a module, the others must keep working. Do not break this rule when adding a new feature.
+
+### Modules under features/ (current plan)
+- `uds/` — UDS server + client, ISO-TP transport layer
+- `bootloader/` — OTA, A/B bank, rollback
+- `xcp/` — calibration interface
+- `cornering/` — **ONLY Layer 2 (EKF estimation): µ, mass, center of gravity, lean angle.** Clipped to physical ranges, published over CAN. Deterministic decision/warning/LED triggering is NOT HERE — that's in `moto-safety-node`, isolated. Don't break this separation; rt-core never makes the cornering-warning decision, it only feeds parameters.
+- `dyno/` — virtual dynamometer
+- `context/` — context classification (road type, surface, riding event) — the producer of the context data bus
+- `anomaly-safety-net/` — **NOT ML**, just a handful of fixed rules (engine temperature threshold, RPM spike, etc.). The actual anomaly model lives on the Raspi (`moto-linux-node`); this is only a guarantee that things don't drop to zero if the Raspi crashes. Don't make this heavier — staying rule-based is a deliberate decision.
+
+## SAFETY-CRITICAL RULES (never violate, no exceptions)
+
+1. `cornering/` (EKF estimation only, in this repo) never makes a cornering-warning/LED decision — that decision lives in `moto-safety-node`. This repo only computes µ/mass/lean angle and publishes it to CAN.
+2. This repo NEVER writes to the ECU (engine control unit) in any way. On the vehicle bus (FDCAN1) it only listens + acts as an OBD-II/UDS **read** client (0x01/0x09/0x22/0x19). 0x2E/0x31/0x34/0x36/0x27 are NEVER sent to the vehicle bus. The UDS **server** only runs on the platform bus (FDCAN2) (its own DIDs, DTCs, bootloader). If a task arrives that would widen this boundary, don't carry it out — ask the user.
+5. Messages sent to the safety node (platform CAN 0x010-0x07F) and the heartbeat are E2E-protected (D-005); E2E functions come from `gen/`, never hand-written.
+3. Dynamic memory allocation (`malloc`/`new`) is not used on safety-critical paths (`cornering/` decision layer, watchdog) — static/stack allocation is preferred. Full MISRA-C compliance is the goal, but this is the minimum rule.
+4. Interference independence: a delay/crash in a low-priority module like `anomaly-safety-net/` must NEVER affect the timing of the `cornering/` decision loop — set up task prioritization accordingly.
+
+## Dependencies
+
+Reads signal/UDS definitions from `moto-vehicle-defs` (submodule: `external/moto-vehicle-defs`, pinned to a tag; generated code at `external/moto-vehicle-defs/gen/c/<node>/`). Bridges to `moto-connectivity-node` (ESP32-S3) via SPI/UART.
+
+## Build
+
+CMake + STM32CubeMX (HAL) + arm-none-eabi-gcc (D-007). RTOS: FreeRTOS/CMSIS-RTOS2 (D-012). Target: STM32H7 (H743/H723 family).
+- `cubemx/` is generated code — only write into `USER CODE` blocks.
+- Pure logic (EKF, ISO-TP, UDS state machine, E2E, dyno) is written without a HAL dependency and tested under `tests/host/` with Unity. This plus Renode is the path forward while there's no H7 hardware.
+- Skeleton: `/repo-bootstrap`; new feature: `/feature-module`.
+
+## Context
+
+Full architecture: `../moto-vehicle-defs/docs/ARCHITECTURE.md` (summary) · detail: `../moto-vehicle-defs/docs/hardware-architecture.md` (section index in `docs/README.md`) section 2-5 (general), section 5b (subsystems — except blind spot, which is in `moto-io-node`), section 8 (rationale for repo separation).
