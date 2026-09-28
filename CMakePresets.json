@@ -1,0 +1,44 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "host-tests",
+      "displayName": "Host tests (native compiler, Unity + ctest)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/host-tests",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "MOTO_BUILD_HOST_TESTS": "ON",
+        "CMAKE_C_FLAGS": "-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      }
+    },
+    {
+      "name": "target-m7-debug",
+      "displayName": "Cortex-M7 cross build (Debug)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/target-m7-debug",
+      "toolchainFile": "${sourceDir}/cmake/arm-none-eabi.cmake",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "target-m7-release",
+      "displayName": "Cortex-M7 cross build (Release)",
+      "inherits": "target-m7-debug",
+      "binaryDir": "${sourceDir}/build/target-m7-release",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "MinSizeRel" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "host-tests", "configurePreset": "host-tests" },
+    { "name": "target-m7-debug", "configurePreset": "target-m7-debug" },
+    { "name": "target-m7-release", "configurePreset": "target-m7-release" }
+  ],
+  "testPresets": [
+    {
+      "name": "host-tests",
+      "configurePreset": "host-tests",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}
