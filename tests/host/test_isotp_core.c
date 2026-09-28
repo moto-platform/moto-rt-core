@@ -141,7 +141,7 @@ static void test_single_frame_send_with_padding(void)
 
 static void test_seven_bytes_is_still_a_single_frame_eight_is_not(void)
 {
-    uint8_t msg[8];
+    uint8_t msg[8] = {0};
     fill_pattern(msg, 8u, 1u);
     isotp_frame_t out;
     isotp_send(&a, msg, 7u);
@@ -157,7 +157,7 @@ static void test_seven_bytes_is_still_a_single_frame_eight_is_not(void)
 static void test_multi_frame_send_segments_and_wraps_sn(void)
 {
     enum { LEN = 200 };
-    uint8_t msg[LEN];
+    uint8_t msg[LEN] = {0};
     fill_pattern(msg, LEN, 3u);
     isotp_frame_t out;
     TEST_ASSERT_EQUAL(ISOTP_OK, isotp_send(&a, msg, LEN));
@@ -195,7 +195,7 @@ static void test_multi_frame_send_segments_and_wraps_sn(void)
 
 static void test_last_cf_without_padding_is_short(void)
 {
-    uint8_t msg[10];
+    uint8_t msg[10] = {0};
     fill_pattern(msg, 10u, 9u);
     isotp_frame_t out;
     isotp_send(&a, msg, 10u);
@@ -208,7 +208,7 @@ static void test_last_cf_without_padding_is_short(void)
 
 static void test_block_size_waits_for_next_flow_control(void)
 {
-    uint8_t msg[60];
+    uint8_t msg[60] = {0};
     fill_pattern(msg, 60u, 5u);
     isotp_frame_t out;
     isotp_send(&a, msg, 60u);
@@ -227,7 +227,7 @@ static void test_block_size_waits_for_next_flow_control(void)
 
 static void test_st_min_spaces_consecutive_frames(void)
 {
-    uint8_t msg[30];
+    uint8_t msg[30] = {0};
     fill_pattern(msg, 30u, 2u);
     isotp_frame_t out;
     isotp_send(&a, msg, 30u);
@@ -244,7 +244,7 @@ static void test_st_min_spaces_consecutive_frames(void)
 
 static void test_reserved_st_min_is_treated_as_127_ms(void)
 {
-    uint8_t msg[30];
+    uint8_t msg[30] = {0};
     isotp_frame_t out;
     isotp_send(&a, msg, 30u);
     isotp_poll(&a, 0u, &out);
@@ -257,7 +257,7 @@ static void test_reserved_st_min_is_treated_as_127_ms(void)
 
 static void test_missing_flow_control_times_out_n_bs(void)
 {
-    uint8_t msg[20];
+    uint8_t msg[20] = {0};
     isotp_frame_t out;
     isotp_send(&a, msg, 20u);
     isotp_poll(&a, 1000u, &out);
@@ -278,7 +278,7 @@ static void test_missing_flow_control_times_out_n_bs(void)
 
 static void test_n_bs_also_guards_the_fc_after_a_block(void)
 {
-    uint8_t msg[60];
+    uint8_t msg[60] = {0};
     isotp_frame_t out;
     isotp_send(&a, msg, 60u);
     isotp_poll(&a, 0u, &out);
@@ -296,7 +296,7 @@ static void test_fc_wait_restarts_n_bs_until_wft_max(void)
 {
     cfg.wft_max = 2u;
     isotp_init(&a, &cfg, rx_buf_a, BUF_CAP, tx_buf_a, BUF_CAP);
-    uint8_t msg[20];
+    uint8_t msg[20] = {0};
     isotp_frame_t out;
     isotp_send(&a, msg, 20u);
     isotp_poll(&a, 0u, &out);
@@ -317,7 +317,7 @@ static void test_fc_wait_count_resets_after_cts(void)
 {
     cfg.wft_max = 1u;
     isotp_init(&a, &cfg, rx_buf_a, BUF_CAP, tx_buf_a, BUF_CAP);
-    uint8_t msg[60];
+    uint8_t msg[60] = {0};
     isotp_frame_t out;
     isotp_send(&a, msg, 60u);
     isotp_poll(&a, 0u, &out);
@@ -333,7 +333,7 @@ static void test_fc_wait_count_resets_after_cts(void)
 
 static void test_fc_overflow_and_invalid_status_abort_the_transfer(void)
 {
-    uint8_t msg[20];
+    uint8_t msg[20] = {0};
     isotp_frame_t out;
     isotp_n_result_t r;
 
@@ -360,7 +360,7 @@ static void test_unexpected_or_short_fc_is_ignored(void)
     isotp_on_frame(&a, &cts, 0u); /* idle: ignored */
     TEST_ASSERT_FALSE(isotp_poll(&a, 0u, &out));
 
-    uint8_t msg[20];
+    uint8_t msg[20] = {0};
     isotp_send(&a, msg, 20u);
     isotp_poll(&a, 0u, &out);
     const uint8_t short_fc[2] = {0x30u, 0x00u};
@@ -409,7 +409,7 @@ static void test_multi_frame_reception_sends_fc_and_reassembles(void)
     cfg.st_min = 5u;
     isotp_init(&a, &cfg, rx_buf_a, BUF_CAP, tx_buf_a, BUF_CAP);
     enum { LEN = 20 };
-    uint8_t msg[LEN];
+    uint8_t msg[LEN] = {0};
     fill_pattern(msg, LEN, 11u);
 
     const uint8_t ff[8] = {0x10u, LEN, msg[0], msg[1], msg[2], msg[3], msg[4], msg[5]};
