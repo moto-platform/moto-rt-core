@@ -34,4 +34,4 @@ the board is chosen.
 
 ## License
 
-Not decided yet.
+MIT, see `LICENSE` (D-036).
