@@ -7,10 +7,11 @@ Signal, CAN and UDS definitions come only from [moto-vehicle-defs](https://githu
 ## Layout
 
 ```
-src/hal/         hardware abstraction (thin wrappers over the STM32 HAL) -- not yet
-src/services/    signal pool, com, diag, timebase, log -- not yet
-src/features/    independent function modules (uds/ today: the ISO-TP core)
-src/app/         task/loop setup, called from the CubeMX project -- not yet
+src/hal/         HAL-free interfaces (can_port, hal_time); host/ = host platform layer
+                 (in-process bus, SocketCAN, monotonic ms); stm32/ once the board is chosen
+src/services/    timebase, can_if (CAN RX routing); signal pool, com, diag, log -- not yet
+src/features/    independent function modules (uds/: ISO-TP core + link glue)
+src/app/         host/ = moto_rtcore_host SIL program; target task setup -- not yet
 tests/host/      Unity host tests (ctest)
 cmake/           arm-none-eabi toolchain file
 external/        moto-vehicle-defs (generated C in gen/c/rt_core/)
@@ -27,7 +28,11 @@ cmake --preset target-m7-debug && cmake --build --preset target-m7-debug
 # toolchain outside PATH: cmake --preset target-m7-debug -DARM_TOOLCHAIN_DIR=/path/to/bin
 ```
 
-The host tests run with AddressSanitizer and UndefinedBehaviorSanitizer. The target
+The host tests run with AddressSanitizer and UndefinedBehaviorSanitizer. The native
+build also produces `build/host-tests/src/moto_rtcore_host`: rt-core as a host program
+(SIL, D-034). By default it runs against an in-process bus with a simulated CL250 ECU.
+On Linux, `--vcan vcan0` puts the vehicle port on SocketCAN. ctest runs it for 2 s as
+a smoke test. The target
 presets cross-compile the pure logic for Cortex-M7 (`-mcpu=cortex-m7 -mfpu=fpv5-d16
 -mfloat-abi=hard`); the CubeMX project, startup code and linker script are added once
 the board is chosen.
