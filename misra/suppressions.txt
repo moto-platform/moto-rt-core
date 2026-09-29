@@ -4,3 +4,6 @@ misra-c2012-15.5
 misra-c2012-8.7:src/services/can_if.c
 misra-c2012-8.7:src/services/timebase.c
 misra-c2012-8.7:src/features/uds/isotp_link.c
+misra-c2012-8.7:src/features/uds/uds_client.c
+misra-c2012-8.7:src/features/uds/uds_client_core.c
+misra-c2012-8.7:src/services/vehicle_signals.c

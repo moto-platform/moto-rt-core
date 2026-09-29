@@ -164,6 +164,13 @@ bool isotp_take_tx_confirm(isotp_link_t* link, isotp_n_result_t* result);
 /* Receptions that ended in an error since init (diagnostics). */
 uint16_t isotp_rx_error_count(const isotp_link_t* link);
 
+/* True while a segmented reception is running (FF received, waiting for CFs). It ends
+ * with an indication: ISOTP_N_OK, or an error such as ISOTP_N_TIMEOUT_CR. */
+bool isotp_rx_busy(const isotp_link_t* link);
+
+/* True when no message is being sent: isotp_send() would accept a new one. */
+bool isotp_tx_idle(const isotp_link_t* link);
+
 /* STmin byte to milliseconds (§9.6.5.4): 0x00-0x7F ms, 0xF1-0xF9 (100-900 us) rounded up
  * to 1 ms, reserved values treated as 0x7F. Exposed for tests. */
 uint32_t isotp_st_min_to_ms(uint8_t st_min);

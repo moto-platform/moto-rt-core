@@ -182,3 +182,19 @@ uint16_t isotp_link_rx_error_count(const isotp_can_link_t* link)
 {
     return (link != NULL) ? isotp_rx_error_count(&link->iso) : 0u;
 }
+
+bool isotp_link_rx_busy(const isotp_can_link_t* link)
+{
+    return (link != NULL) && link->open && isotp_rx_busy(&link->iso);
+}
+
+bool isotp_link_tx_ready(const isotp_can_link_t* link)
+{
+    return (link != NULL) && link->open && isotp_tx_idle(&link->iso) &&
+           can_if_tx_free(link->addr.port);
+}
+
+uint32_t isotp_link_n_bs_ms(const isotp_can_link_t* link)
+{
+    return ((link != NULL) && link->open) ? (uint32_t)link->iso.cfg.n_bs_ms : 0u;
+}

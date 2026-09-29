@@ -418,3 +418,13 @@ uint16_t isotp_rx_error_count(const isotp_link_t* link)
 {
     return (link == NULL) ? 0u : link->rx_error_count;
 }
+
+bool isotp_rx_busy(const isotp_link_t* link)
+{
+    return (link != NULL) && (link->rx_state == ISOTP_RX_WAIT_CF);
+}
+
+bool isotp_tx_idle(const isotp_link_t* link)
+{
+    return (link != NULL) && (link->tx_state == ISOTP_TX_IDLE);
+}
