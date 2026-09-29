@@ -44,10 +44,24 @@ CMake + STM32CubeMX (HAL) + arm-none-eabi-gcc (D-007). RTOS: FreeRTOS/CMSIS-RTOS
 - Pure logic (EKF, ISO-TP, UDS state machine, E2E, dyno) is written without a HAL dependency and tested under `tests/host/` with Unity. This plus Renode is the path forward while there's no H7 hardware.
 - Skeleton: `/repo-bootstrap`; new feature: `/feature-module`.
 - Commands (CMake >= 3.20 + Ninja; `git submodule update --init` first, defs pinned to `v0.1.0`):
-  - `cmake --preset host-tests && cmake --build --preset host-tests && ctest --preset host-tests` (Unity, ASan + UBSan)
+  - `cmake --preset host-tests && cmake --build --preset host-tests && ctest --preset host-tests` (Unity, ASan + UBSan, plus the 2 s SIL smoke run)
+  - SIL program (D-034): `build/host-tests/src/moto_rtcore_host` (in-process bus + simulated CL250 ECU); on Linux `--vcan vcan0`
   - `cmake --preset target-m7-debug && cmake --build --preset target-m7-debug` (also `target-m7-release`); `-DARM_TOOLCHAIN_DIR=...` if `arm-none-eabi-gcc` is not on PATH
 - The target presets cross-compile only the pure logic (`moto_rtcore_logic`) for Cortex-M7 (flags shared by H743/H723). The board choice decides the CubeMX project (`cubemx/<board>.ioc`), startup and linker script; do not guess it.
-- Current modules: `features/uds/isotp_core` (ISO-TP, Ç2). CI: host tests, both cross builds, cppcheck (blocking: warning/portability/performance; report only: style + MISRA addon).
+- Current modules and layers:
+  - `features/uds/isotp_core` (ISO-TP, Ç2)
+  - `features/uds/isotp_link`: the core on a port + ID pair. `isotp_link_open_vehicle_cl250()` is the only vehicle-port link and takes its IDs and padding from gen/.
+  - `services/timebase`
+  - `services/can_if`: CAN RX routing, plus the **fixed, fail-closed D-020 vehicle-bus guard** that every vehicle frame passes. Never add a bypass.
+  - `hal/can_types.h`, `hal/can_port.h` (services and app only), `hal/hal_time.h`, and the host port `hal/host/`
+- Libraries:
+  - `moto_rtcore_logic` (pure) and `moto_rtcore_fw` (services + feature glue, HAL interfaces only) are also cross-compiled for M7.
+  - `moto_rtcore_hal_host` and `moto_rtcore_host` build natively only.
+- CI:
+  - host tests + SIL smoke, and the SocketCAN test (skipped without `vcan0`)
+  - the layering grep: no `hal/` include under `src/features/`
+  - both cross builds
+  - cppcheck. Blocking: warning / portability / performance. Report only: style + MISRA addon, without the host-only code.
 
 ## Context
 

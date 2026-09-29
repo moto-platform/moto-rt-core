@@ -2,7 +2,9 @@
 
 UDS server (platform bus, FDCAN2) and UDS client (vehicle bus, FDCAN1, the only tester per D-021) on top of an ISO-TP transport layer. Thesis deliverables Ç2 (ISO-TP) and Ç3 (UDS).
 
-Status: only the ISO-TP core exists (`isotp_core.{h,c}`). The glue that binds it to the CAN HAL and the timebase, the UDS server and the UDS client come next.
+Status:
+- Done: the ISO-TP core (`isotp_core.{h,c}`), and the link glue that binds it to a CAN port and an ID pair (`isotp_link.{h,c}`).
+- Next: the UDS server (Ç3) and the UDS client (the vehicle poller).
 
 ## ISO-TP core (`isotp_core.h`)
 
@@ -56,6 +58,65 @@ It is pure logic with no HAL, RTOS or heap, and is tested in `tests/host/test_is
 
 **Requirement IDs.** None yet (Q-006: where requirements live). The tests are named after the behaviour and the ISO clause.
 
-## Proposed HIL scenario (moto-hil-bench, once the host schema exists)
+## ISO-TP link glue (`isotp_link.h`)
 
-`isotp_segmented_did_read`: the simulated ECU answers a 0x22 request with a response longer than 7 bytes, using BS = 2 and STmin = 5 ms. Pass when the complete payload reaches the signal pool, the time between CFs is at least 5 ms, and there is no `N_TIMEOUT_*`. Fault variants: drop a middle CF (expect `ISOTP_N_WRONG_SN` on the next one) or the last CF (expect `ISOTP_N_TIMEOUT_CR` after N_Cr). In both cases the next request must succeed.
+**Responsibility.** Binds one core link to a (port, TX ID, RX ID, format) tuple.
+- It registers the RX ID with `services/can_if`, and takes its time from `services/timebase`.
+- `isotp_link_step()` runs the timers and writes due frames while `can_if_tx_free()`. It writes at most `ISOTP_LINK_MAX_TX_PER_STEP` = 16 frames per call.
+- The same objects run in the host SIL program and on the H7 (D-034).
+
+**Vehicle link.** `isotp_link_open_vehicle_cl250(link, buffers)` is the only way to open a link on `CAN_PORT_VEHICLE`. The generic `isotp_link_open()` refuses that port. Everything comes from `gen/vehicle_cl250.h` (D-019) and cannot be passed in:
+- `VEHICLE_CL250_REQUEST_ID` → `_RESPONSE_ID`, 29-bit
+- 8-byte frames padded with `VEHICLE_CL250_PADDING_BYTE`
+- the ISO default BS, STmin, N_Bs and N_Cr
+
+**D-020 on the vehicle bus**, in two layers (safety review of this change, finding B1):
+1. **Hard guard in `services/can_if`.** It is fixed and fail-closed, and every frame for `CAN_PORT_VEHICLE` passes it, whichever feature sends it. It passes only 29-bit frames on `VEHICLE_CL250_REQUEST_ID`, with DLC `VEHICLE_CL250_FRAME_DLC`, whose bytes pass the generated `vehicle_cl250_frame_allowed()`. Anything else returns `CAN_PORT_ERR_REFUSED` and is counted (`can_if_tx_refused_count()`). Features cannot bypass it: they see only `can_types.h`, and CI fails on a `hal/` include under `src/features/`.
+2. **Early rejects in the vehicle link**, so the caller gets a proper error:
+   - `isotp_link_send()` returns `ISOTP_ERR_ARG` for a service that `vehicle_cl250_request_allowed()` refuses.
+   - It returns `ISOTP_ERR_LENGTH` for a request longer than 7 bytes, which would need a First Frame.
+   - Frames are checked with `vehicle_cl250_frame_allowed()` before `can_if_write()`.
+   - All of these are counted in `isotp_link_tx_refused_count()`.
+
+**Known gap (open question):** the generated frame gate passes Single Frames only, so the vehicle link can never send a Flow Control. A segmented response from the ECU therefore ends in `ISOTP_N_TIMEOUT_CR`.
+- All current CL250 DIDs fit in a Single Frame (at most 5 bytes).
+- 0x19 with more than one DTC, and OBD 0x09 (VIN), pass the request gate but always need several frames, so they will not work in practice.
+- Until this is decided, the Ç3 client must:
+  - treat `ISOTP_N_TIMEOUT_CR` as "service unavailable"
+  - apply `VEHICLE_CL250_DID_SKIP_COOLDOWN_MS`, so one failing request cannot hold the single in-flight slot
+  - wait at least N_Bs after an aborted segmented response
+- Letting FC.CTS through widens the D-020 gate. It needs the user's approval and a versioned moto-vehicle-defs change, reviewed by the safety-reviewer. The reviewer's conditions:
+  - byte-exact FC.CTS with fixed BS/STmin and padding
+  - sent only while a reception is running for an allowed request
+  - a capped FF_DL
+  - tester requests stay Single Frame
+- How that would be split: the `can_if` guard is stateless and would keep only the byte-exact FC match. The "only during an active reception for an allowed request" condition has to be a link-state check in the vehicle link.
+
+**Failure behaviour.**
+- A full TX mailbox leaves frames in the core until the next step; nothing is lost.
+- A frame the port refuses (`can_if_write` ≠ OK) is lost and counted (`isotp_link_tx_error_count()`). The peer then times out.
+- N_As/N_Ar need a TX-complete confirmation from the FDCAN driver and come with the H7 HAL. Until then, a frame accepted by the port counts as sent.
+
+**Memory.** `isotp_can_link_t` plus buffers supplied by the caller (static storage). The link registers itself with `can_if` as the receiver context, so it must have static storage duration.
+
+**Tests.** `tests/host/test_isotp_link.c` runs on the in-process bus with a manual clock. It covers:
+- the CL250 wire format and the gen/ values
+- every gen/ DID answered by the simulated ECU
+- the request and frame gates, including the FC gap
+- other IDs and formats being ignored
+- BS/STmin segmentation over the bus
+- a full mailbox, N_Cr, the per-step bound, and argument checks
+
+## Proposed HIL scenarios (moto-hil-bench, once the host schema exists)
+
+- `isotp_vehicle_segmented_response_refused` (vehicle bus, today's behaviour):
+  - The simulated ECU answers a 0x22 request with a First Frame.
+  - Pass when rt-core sends no Flow Control, the request ends in `ISOTP_N_TIMEOUT_CR` after N_Cr, and the next Single Frame request succeeds.
+  - Do **not** loosen the D-020 gate to make a segmented vehicle response pass; that needs the FC decision above.
+- `isotp_segmented_transfer` (platform bus, e.g. against the future UDS server link):
+  - A message longer than 7 bytes, with BS = 2 and STmin = 5 ms.
+  - Pass when the complete payload arrives, the time between CFs inside a block is at least 5 ms, and there is no `N_TIMEOUT_*`.
+  - Fault variants:
+    - Drop a middle CF: expect `ISOTP_N_WRONG_SN` on the next one.
+    - Drop the last CF: expect `ISOTP_N_TIMEOUT_CR` after N_Cr.
+  - In both cases the next message must succeed.

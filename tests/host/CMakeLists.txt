@@ -7,11 +7,26 @@ FetchContent_Declare(unity
 )
 FetchContent_MakeAvailable(unity)
 
+# moto_host_test(<name> [libraries...]): one Unity executable per test file.
 function(moto_host_test name)
     add_executable(${name} ${name}.c)
-    target_link_libraries(${name} PRIVATE moto_rtcore_logic unity)
+    target_link_libraries(${name} PRIVATE ${ARGN} moto_rtcore_logic unity)
     target_compile_options(${name} PRIVATE -Wall -Wextra -Werror)
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
 moto_host_test(test_isotp_core)
+moto_host_test(test_vbus moto_rtcore_hal_host)
+moto_host_test(test_timebase moto_rtcore_fw moto_rtcore_hal_host)
+moto_host_test(test_can_if moto_rtcore_fw moto_rtcore_hal_host)
+moto_host_test(test_isotp_link moto_rtcore_fw moto_rtcore_sim moto_rtcore_hal_host)
+
+# SocketCAN backend: Linux only; skips (exit 77) when no vcan0 interface exists.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    moto_host_test(test_can_port_socketcan moto_rtcore_hal_host)
+    set_tests_properties(test_can_port_socketcan PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
+# SIL smoke: the host program against the simulated ECU, real time, 2 s.
+add_test(NAME sil_moto_rtcore_host_demo
+         COMMAND moto_rtcore_host --duration-ms 2000 --min-responses 5 --quiet)
