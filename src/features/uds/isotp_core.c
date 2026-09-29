@@ -247,6 +247,8 @@ static bool build_consecutive(isotp_link_t* link, uint32_t now_ms, isotp_frame_t
         if (link->tx_block_left == 0u) {
             link->tx_state = ISOTP_TX_WAIT_FC; /* N_Bs starts now */
         }
+    } else {
+        /* BS = 0: the receiver wants no further FC, keep sending CFs */
     }
     return true;
 }

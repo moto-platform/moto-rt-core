@@ -46,7 +46,7 @@ static void test_frame_reaches_every_other_node_but_not_the_sender(void)
     TEST_ASSERT_TRUE(vbus_attach(&bus, &a));
     TEST_ASSERT_TRUE(vbus_attach(&bus, &b));
     TEST_ASSERT_TRUE(vbus_attach(&bus, &c));
-    const can_frame_t f = frame(0x18DA10F1u, true, 8u, 0x10u);
+    const can_frame_t f = frame(0x1ABCDE01u, true, 8u, 0x10u); /* any 29-bit ID: the bus is protocol-agnostic */
     TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_send(&bus, a, &f));
 
     can_frame_t got;

@@ -1,0 +1,6 @@
+# cppcheck suppressions list for the MISRA C:2012 addon (CI step "MISRA C:2012").
+# Every line is a deviation recorded in misra/README.md; add nothing here without a row there.
+misra-c2012-15.5
+misra-c2012-8.7:src/services/can_if.c
+misra-c2012-8.7:src/services/timebase.c
+misra-c2012-8.7:src/features/uds/isotp_link.c

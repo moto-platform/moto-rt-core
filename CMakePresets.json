@@ -1,6 +1,10 @@
 {
   "version": 3,
-  "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
   "configurePresets": [
     {
       "name": "host-tests",
@@ -14,31 +18,66 @@
       }
     },
     {
+      "name": "host-coverage",
+      "displayName": "Host tests with gcov line/branch coverage (no sanitizers)",
+      "inherits": "host-tests",
+      "binaryDir": "${sourceDir}/build/host-coverage",
+      "cacheVariables": {
+        "CMAKE_C_FLAGS": "--coverage -O0"
+      }
+    },
+    {
       "name": "target-m7-debug",
       "displayName": "Cortex-M7 cross build (Debug)",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/target-m7-debug",
       "toolchainFile": "${sourceDir}/cmake/arm-none-eabi.cmake",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
     },
     {
       "name": "target-m7-release",
       "displayName": "Cortex-M7 cross build (Release)",
       "inherits": "target-m7-debug",
       "binaryDir": "${sourceDir}/build/target-m7-release",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "MinSizeRel" }
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "MinSizeRel"
+      }
     }
   ],
   "buildPresets": [
-    { "name": "host-tests", "configurePreset": "host-tests" },
-    { "name": "target-m7-debug", "configurePreset": "target-m7-debug" },
-    { "name": "target-m7-release", "configurePreset": "target-m7-release" }
+    {
+      "name": "host-tests",
+      "configurePreset": "host-tests"
+    },
+    {
+      "name": "host-coverage",
+      "configurePreset": "host-coverage"
+    },
+    {
+      "name": "target-m7-debug",
+      "configurePreset": "target-m7-debug"
+    },
+    {
+      "name": "target-m7-release",
+      "configurePreset": "target-m7-release"
+    }
   ],
   "testPresets": [
     {
       "name": "host-tests",
       "configurePreset": "host-tests",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "host-coverage",
+      "configurePreset": "host-coverage",
+      "output": {
+        "outputOnFailure": true
+      }
     }
   ]
 }

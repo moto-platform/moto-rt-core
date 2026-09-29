@@ -52,7 +52,7 @@ static void round_trip(uint32_t id, bool ext, uint8_t dlc)
 
 static void test_extended_frame_round_trip(void)
 {
-    round_trip(0x18DA10F1u, true, 8u);
+    round_trip(0x1ABCDE01u, true, 8u); /* any 29-bit ID, not a vehicle ID */
 }
 
 static void test_standard_frame_round_trip(void)
