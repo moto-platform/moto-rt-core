@@ -178,7 +178,7 @@ No vehicle fact lives there. The positive 0x62 check stays in the generated `veh
   - N_As (a TX that is never confirmed) and bus-off recovery (`VEHICLE_CL250_BUS_OFF_BACKOFF_*`, D-030's latch after 5 bus-offs) come with the H7 FDCAN HAL (Ç1).
 - **Counters** (`uds_client_stats()`): requests, reads, timeouts, NRC, response pending, unavailable, skips, unexpected, session starts and losses.
 
-**Memory.** `uds_client_t` is 344 B on the M7: the link, 64 + 8 B of buffers, and the core. It must have static storage duration. `vehicle_signals` adds 81 B. Flash is about 1.7 kB: core 1044 B, glue 428 B, service 192 B (release build, 2026-09-29). There is no heap, and every loop is bounded by the DID count or a frame length.
+**Memory.** `uds_client_t` is 348 B on the M7: the link, 64 + 8 B of buffers, and the core. It must have static storage duration. `vehicle_signals` adds 81 B, and the glue adds 4 B (the foreign-frame counter). Flash is about 2 kB: core 1094 B, glue 622 B, service 252 B (release build, 2026-09-29, after the safety fixes). There is no heap, and every loop is bounded by the DID count or a frame length.
 
 **Integration notes.**
 - Call `uds_client_step()` once per main-loop pass, after `can_if_dispatch(CAN_PORT_VEHICLE, ...)`.
@@ -204,25 +204,21 @@ No vehicle fact lives there. The positive 0x62 check stays in the generated `veh
 | m5 | The latch reason was not exposed | Fixed: `uds_client_fault()` |
 | m6 | `uds_client_sample_t s` was not initialised | Fixed |
 | m7 | A permanent NRC is polled at full rate | Documented (legacy, user decision) |
-| m8 | `moto_rtcore_host --allow-real-bus` is now a full tester | Open: the warning text is to be updated in `main.c` |
+| m8 | `moto_rtcore_host --allow-real-bus` is now a full tester | Fixed: the warning text says so, and the summary prints the fault |
 | — | N_As, bus-off backoff | Deferred to the H7 HAL (Ç1) |
 
+- Checks after the fixes (2026-09-29):
+  - ctest 9/9 (ASan + UBSan)
+  - cppcheck and MISRA clean
+  - coverage 98.2 % lines / 90.0 % branches; only the defensive GATE/BUSY branches in `uds_client.c` are not covered
+  - both M7 cross builds clean
 - The re-review after the fixes is still to run.
 
 **Open items (Ç3, before the PR is merged).**
-1. SIL test `test_sil_unread_sample_stays_stale_across_the_counter_wrap`:
-   - ECU silent, nobody reads, then the clock jumps 2^32 ms. The sample must still be STALE.
-   - It must catch the mutant that drops `vehicle_signals_expire()` from the step.
-2. m8: the `--allow-real-bus` warning in `app/host/main.c` must say the program is a full tester (session, tester present, reads), and the summary line must print `uds_client_fault()`.
-3. After the safety fixes, run again:
-   - ctest (ASan + UBSan)
-   - cppcheck and MISRA
-   - coverage (floors 95 % lines / 80 % branches)
-   - both M7 cross builds
-   - then update the memory figures above from `arm-none-eabi-size`
-4. Re-run safety-reviewer and vss-schema-guardian on the whole branch.
-5. Open the PR. It must note that connectivity-node's poller has to be off while rt-core polls (D-021). Merge only after CI is green and the user approves, then run `/handoff`.
-6. Later:
+1. Done: the counter-wrap SIL test (it catches the mutant without `vehicle_signals_expire()`), m8, and the re-run of every check (see above).
+2. Re-run safety-reviewer and vss-schema-guardian on the whole branch.
+3. Open the PR. It must note that connectivity-node's poller has to be off while rt-core polls (D-021). Merge only after CI is green and the user approves, then run `/handoff`.
+4. Later:
    - move the codes in `uds_iso14229.h` into gen/ (a defs `/signal-change`)
    - N_As and bus-off handling with the H7 FDCAN HAL (Ç1)
 

@@ -248,6 +248,23 @@ static void test_sil_ecu_off_goes_absent_and_stale_then_recovers(void)
     assert_tester_frames_ok();
 }
 
+static void test_sil_unread_sample_stays_stale_across_the_counter_wrap(void)
+{
+    const uint32_t idx = VEHICLE_CL250_IDX_ENGINE_SPEED;
+    run(500u, false);
+    vehicle_signal_sample_t s;
+    TEST_ASSERT_TRUE(vehicle_signals_get(idx, timebase_now_ms(), &s));
+    TEST_ASSERT_EQUAL(VEHICLE_SIGNAL_VALID, s.state);
+    const uint32_t ts = s.timestamp_ms;
+    ecu.silent = true;
+    run(vehicle_cl250_dids[idx].stale_after_ms + 50u, false); /* nobody reads meanwhile */
+    /* Jump to 2^32 ms after the sample, plus 10 ms: the raw age reads 10 ms. */
+    hal_time_host_advance((ts + 10u) - timebase_now_ms());
+    TEST_ASSERT_EQUAL_UINT32(ts + 10u, timebase_now_ms());
+    TEST_ASSERT_TRUE(vehicle_signals_get(idx, timebase_now_ms(), &s));
+    TEST_ASSERT_EQUAL(VEHICLE_SIGNAL_STALE, s.state); /* the client's step expired it */
+}
+
 static void test_sil_session_drop_is_detected_by_nrc_and_reestablished(void)
 {
     run(VEHICLE_CL250_SESSION_RETRY_INTERVAL_MS + 500u, false);
@@ -535,6 +552,7 @@ int main(void)
     RUN_TEST(test_sil_session_first_then_every_did_valid_with_the_gen_formula);
     RUN_TEST(test_sil_every_did_stays_valid_and_tester_present_keeps_its_period);
     RUN_TEST(test_sil_ecu_off_goes_absent_and_stale_then_recovers);
+    RUN_TEST(test_sil_unread_sample_stays_stale_across_the_counter_wrap);
     RUN_TEST(test_sil_session_drop_is_detected_by_nrc_and_reestablished);
     RUN_TEST(test_sil_response_pending_bursts_are_waited_out);
     RUN_TEST(test_sil_endless_response_pending_ends_at_the_gen_max);

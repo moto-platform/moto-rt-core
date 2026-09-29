@@ -151,7 +151,7 @@ int main(int argc, char** argv)
     } else if ((strncmp(opt.vcan, VIRTUAL_IF_PREFIX, strlen(VIRTUAL_IF_PREFIX)) != 0) &&
                !opt.allow_real_bus) {
         fprintf(stderr, "%s is not a virtual CAN interface; pass --allow-real-bus if this is intended "
-                        "(only one tester may be on the vehicle bus, D-021)\n", opt.vcan);
+                        "(this program is a full tester: session control, tester present and reads; only one tester may be on the vehicle bus, D-021)\n", opt.vcan);
         return 2;
     } else if (!can_port_host_bind_socketcan(CAN_PORT_VEHICLE, opt.vcan)) {
         fprintf(stderr, "cannot open SocketCAN interface %s%s\n", opt.vcan,
@@ -194,12 +194,12 @@ int main(int argc, char** argv)
 
     const uds_client_stats_t* st = uds_client_stats(&client);
     printf("moto_rtcore_host: %u reads, %u timeouts, %u NRC (%u pending), %u unavailable, "
-           "%u sessions, %u requests; %u refused, %u TX errors, %u guard refusals%s\n",
+           "%u sessions, %u requests; %u refused, %u TX errors, %u guard refusals, fault %d%s\n",
            (unsigned)st->reads_ok, (unsigned)st->timeouts, (unsigned)st->nrc,
            (unsigned)st->response_pending, (unsigned)st->unavailable, (unsigned)st->session_starts,
            (unsigned)st->requests, (unsigned)isotp_link_tx_refused_count(&client.link),
            (unsigned)isotp_link_tx_error_count(&client.link),
-           (unsigned)can_if_tx_refused_count(CAN_PORT_VEHICLE),
+           (unsigned)can_if_tx_refused_count(CAN_PORT_VEHICLE), (int)uds_client_fault(&client),
            uds_client_failed(&client) ? ", CLIENT FAILED" : "");
     can_port_host_unbind_all();
     if (opt.duration_ms == 0u) {
