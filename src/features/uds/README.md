@@ -209,6 +209,23 @@ No vehicle fact lives there. The positive 0x62 check stays in the generated `veh
 
 - The re-review after the fixes is still to run.
 
+**Open items (Ç3, before the PR is merged).**
+1. SIL test `test_sil_unread_sample_stays_stale_across_the_counter_wrap`:
+   - ECU silent, nobody reads, then the clock jumps 2^32 ms. The sample must still be STALE.
+   - It must catch the mutant that drops `vehicle_signals_expire()` from the step.
+2. m8: the `--allow-real-bus` warning in `app/host/main.c` must say the program is a full tester (session, tester present, reads), and the summary line must print `uds_client_fault()`.
+3. After the safety fixes, run again:
+   - ctest (ASan + UBSan)
+   - cppcheck and MISRA
+   - coverage (floors 95 % lines / 80 % branches)
+   - both M7 cross builds
+   - then update the memory figures above from `arm-none-eabi-size`
+4. Re-run safety-reviewer and vss-schema-guardian on the whole branch.
+5. Open the PR. It must note that connectivity-node's poller has to be off while rt-core polls (D-021). Merge only after CI is green and the user approves, then run `/handoff`.
+6. Later:
+   - move the codes in `uds_iso14229.h` into gen/ (a defs `/signal-change`)
+   - N_As and bus-off handling with the H7 FDCAN HAL (Ç1)
+
 ## Proposed HIL scenarios (moto-hil-bench, once the host schema exists)
 
 - `isotp_vehicle_segmented_response_refused` (vehicle bus, today's behaviour):
