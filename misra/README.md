@@ -1,0 +1,13 @@
+# MISRA C:2012 deviation register
+
+CI runs the cppcheck MISRA addon over the target code (`src/`, without the host-only `hal/host` and `app/host`) and **fails on any finding not listed here**. File- and project-scoped deviations are in `suppressions.txt`; single-line ones are inline `// cppcheck-suppress <rule> ; DEV-xxx: <reason>` comments, and CI rejects any inline suppression without a `DEV-` number. Register, list and comments change together, in the same PR, with a reason.
+
+| ID | Rule (category) | Scope | Reason | Compensating measure |
+|---|---|---|---|---|
+| DEV-001 | 15.5 single point of exit (advisory) | project | Early returns for argument and state checks keep the protocol code flat and readable; a single exit would need flag variables and deeper nesting, which is harder to review. | Early returns are argument/state guards. Each return path is exercised by the host tests (coverage floors in CI); `-Wall -Wextra -Werror` plus cppcheck warning checks are blocking. |
+| DEV-002 | 8.7 no external linkage if used in one unit (advisory) | `services/can_if.c`, `services/timebase.c`, `features/uds/isotp_link.c` | The public module APIs (`isotp_link_*`, `can_if_*`, `timebase_*`) are also called by the host tests and the SIL program, which the addon does not scan, so it sees a single user. | Revisit when the H7 firmware links the modules (after Q-019): drop the deviation for any function that stays file-local. New files get no 8.7 deviation by default. |
+| DEV-003 | 11.5 `void *` to object pointer (advisory) | `features/uds/isotp_link.c`, the `ctx` cast in `on_rx()` only (inline) | `can_if` delivers frames through a `void *ctx` callback (one receiver table for every feature, no heap). The link casts `ctx` back to the `isotp_can_link_t` it registered itself. | `on_rx()` is `static`, so only this file can register it; `ctx` is always the link passed to `can_if_register_rx()`, and NULL is checked before use. |
+
+Baseline at the switch to blocking (2026-09-29, cppcheck 2.22): 53 × 15.5, 16 × 8.7, 1 × 11.5, and one each of 15.7 and 8.9, which were fixed instead of deviated.
+
+**Known gap:** the generated D-020 gates (`external/moto-vehicle-defs/gen/c/rt_core/`) are excluded here (`--suppress=*:*external/*`) and are not MISRA-checked in moto-vehicle-defs either. They are covered by the codegen tests and this repo's guard tests; a MISRA step for `gen/c` belongs in moto-vehicle-defs CI.

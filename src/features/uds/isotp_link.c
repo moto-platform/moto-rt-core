@@ -16,6 +16,7 @@ static void link_count(uint32_t* counter)
 
 static void on_rx(void* ctx, const can_frame_t* frame)
 {
+    // cppcheck-suppress misra-c2012-11.5 ; DEV-003: ctx is the link this file registered
     isotp_can_link_t* link = (isotp_can_link_t*)ctx;
     if ((link == NULL) || !link->open || (frame == NULL)) {
         return;

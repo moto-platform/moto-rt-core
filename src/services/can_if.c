@@ -5,9 +5,6 @@
 
 #include <stddef.h>
 
-/* The CL250 request ID decides the frame format of the tester (29-bit, D-019). */
-static const bool vehicle_tx_extended = (VEHICLE_CL250_REQUEST_ID > CAN_PORT_STD_ID_MAX);
-
 #define SF_DL_MASK 0x0Fu /* ISO 15765-2 Single Frame data length (low nibble of PCI) */
 
 typedef struct {
@@ -107,6 +104,9 @@ uint32_t can_if_dispatch(can_port_id_t port, uint32_t max_frames)
 
 bool can_if_tx_allowed(can_port_id_t port, const can_frame_t* frame)
 {
+    /* The CL250 request ID decides the frame format of the tester (29-bit, D-019). */
+    static const bool vehicle_tx_extended = (VEHICLE_CL250_REQUEST_ID > CAN_PORT_STD_ID_MAX);
+
     if (!port_ok(port) || !can_frame_valid(frame)) {
         return false;
     }

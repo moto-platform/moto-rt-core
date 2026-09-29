@@ -14,8 +14,13 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Show the defs pin
-        run: git -C external/moto-vehicle-defs describe --tags --always
+      # D-003/D-036: consumers pin defs to a release tag, never a branch commit.
+      - name: Defs pin must be a release tag
+        run: |
+          git -C external/moto-vehicle-defs fetch --quiet --depth=1 origin '+refs/tags/*:refs/tags/*'
+          tag=$(git -C external/moto-vehicle-defs tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true)
+          test -n "$tag" || { echo "::error::external/moto-vehicle-defs is not pinned to a vX.Y.Z release tag"; exit 1; }
+          echo "defs pin: $tag"
 
       - name: Install toolchains
         run: |
@@ -40,6 +45,18 @@ jobs:
           cmake --preset host-tests
           cmake --build --preset host-tests
           ctest --preset host-tests
+
+      # Coverage of the target code (host-only hal/host and app/host excluded).
+      # Floors, measured 2026-09-29: 97 % lines / 87 % branches (clang); raise them as tests grow.
+      - name: Coverage (gcov + gcovr, floors 95 % lines / 80 % branches)
+        run: |
+          pipx install gcovr >/dev/null
+          cmake --preset host-coverage
+          cmake --build --preset host-coverage
+          ctest --preset host-coverage
+          gcovr -r . --filter 'src/' --exclude 'src/hal/host/' --exclude 'src/app/host/' \
+            --exclude-unreachable-branches --exclude-throw-branches \
+            --print-summary --fail-under-line 95 --fail-under-branch 80 build/host-coverage
 
       - name: Cortex-M7 cross build (Debug + Release)
         run: |
@@ -71,12 +88,17 @@ jobs:
             --error-exitcode=1 --inline-suppr --suppress=missingIncludeSystem \
             -I src -I external/moto-vehicle-defs/gen/c/rt_core src
 
-      # Report only for now: style findings and the MISRA C:2012 addon (rule numbers
-      # without rule texts). Made blocking once the baseline is clean. Host-only code
-      # (hal/host, app/host: POSIX, stdio) is not target firmware and is left out.
-      - name: Static analysis (cppcheck style + MISRA addon, report)
-        continue-on-error: true
+      # Blocking: cppcheck style + the MISRA C:2012 addon (rule numbers without rule
+      # texts). Deviations are recorded in misra/README.md and listed in
+      # misra/suppressions.txt. Host-only code (hal/host, app/host: POSIX, stdio) is not
+      # target firmware and is left out.
+      - name: Static analysis (cppcheck style + MISRA C:2012, blocking)
         run: |
+          if grep -rn 'cppcheck-suppress' src | grep -v 'DEV-[0-9]'; then
+            echo "::error::inline cppcheck suppressions must name a deviation (DEV-xxx) from misra/README.md"
+            exit 1
+          fi
           cppcheck --std=c11 --enable=style --addon=misra --inline-suppr \
+            --error-exitcode=1 --suppressions-list=misra/suppressions.txt \
             --suppress=missingIncludeSystem '--suppress=*:*external/*' -i src/hal/host -i src/app/host \
             -I src -I external/moto-vehicle-defs/gen/c/rt_core src
