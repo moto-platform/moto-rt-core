@@ -102,6 +102,18 @@ uint32_t isotp_link_tx_refused_count(const isotp_can_link_t* link);
 
 uint16_t isotp_link_rx_error_count(const isotp_can_link_t* link);
 
+/* True while a segmented reception is running on the link (see isotp_rx_busy()). */
+bool isotp_link_rx_busy(const isotp_can_link_t* link);
+
+/* True when a new message can go out at once: the link is open, sends nothing, and the
+ * port has a free TX mailbox. A client that waits for this never queues a request
+ * behind a stuck one (e.g. while no node ACKs on the bus). */
+bool isotp_link_tx_ready(const isotp_can_link_t* link);
+
+/* The N_Bs the link was opened with (ms; 0 if the link is not open). A client uses it
+ * as its estimate of how long the peer waits for a Flow Control that never comes. */
+uint32_t isotp_link_n_bs_ms(const isotp_can_link_t* link);
+
 #ifdef __cplusplus
 }
 #endif

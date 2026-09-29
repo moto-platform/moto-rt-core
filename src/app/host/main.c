@@ -7,18 +7,21 @@
  *                  Interfaces not named vcan* need --allow-real-bus: a second tester
  *                  next to a real rt-core on the bike would break D-021.
  *
- * The loop is a transport smoke demo, not the UDS client (Ç3): it reads the gen/ DIDs
- * round-robin with 0x22 over the vehicle ISO-TP link, one request in flight, and
- * prints the decoded values. Every request passes the generated D-020 gates.
+ * The loop runs the UDS client (features/uds/uds_client, Ç3), the single read-only
+ * vehicle tester: extended session, tester present, and the gen/ DIDs polled
+ * round-robin into services/vehicle_signals. Every request passes the generated D-020
+ * gates and the can_if guard. Once a second it prints the signal table.
  *
- * Exit code with --duration-ms: 0 if at least --min-responses answers were decoded.
+ * Exit code with --duration-ms: 0 if at least --min-responses DID reads were decoded and
+ * the client did not latch as failed.
  */
 #include "app/host/sim_ecu.h"
-#include "features/uds/isotp_link.h"
+#include "features/uds/uds_client.h"
 #include "hal/host/can_port_host.h"
 #include "hal/host/hal_time_host.h"
 #include "services/can_if.h"
 #include "services/timebase.h"
+#include "services/vehicle_signals.h"
 #include "vehicle_cl250.h"
 
 #include <signal.h>
@@ -28,9 +31,7 @@
 
 #define LOOP_PERIOD_MS 1u
 #define RX_PER_PASS 32u
-#define LINK_BUF 256u
-#define UDS_SID_RDBI 0x22u
-#define UDS_POSITIVE_OFFSET 0x40u
+#define PRINT_PERIOD_MS 1000u
 #define VIRTUAL_IF_PREFIX "vcan"
 
 static volatile sig_atomic_t stop_requested;
@@ -45,7 +46,6 @@ typedef struct {
     const char* vcan;
     uint32_t duration_ms; /* 0 = until Ctrl-C */
     uint32_t min_responses;
-    uint32_t gap_ms;      /* pause between requests */
     int quiet;
     int allow_real_bus;
 } options_t;
@@ -54,7 +54,7 @@ static void usage(void)
 {
     fprintf(stderr,
             "usage: moto_rtcore_host [--vcan IF] [--duration-ms N] [--min-responses N]\n"
-            "                        [--gap-ms N] [--quiet] [--allow-real-bus]\n");
+            "                        [--quiet] [--allow-real-bus]\n");
 }
 
 static int parse_u32(const char* s, uint32_t* out)
@@ -73,7 +73,6 @@ static int parse_args(int argc, char** argv, options_t* o)
     o->vcan = NULL;
     o->duration_ms = 0u;
     o->min_responses = 1u;
-    o->gap_ms = 100u;
     o->quiet = 0;
     o->allow_real_bus = 0;
     for (int i = 1; i < argc; i++) {
@@ -86,8 +85,6 @@ static int parse_args(int argc, char** argv, options_t* o)
             i++;
         } else if ((strcmp(a, "--min-responses") == 0) && (v != NULL) &&
                    parse_u32(v, &o->min_responses)) {
-            i++;
-        } else if ((strcmp(a, "--gap-ms") == 0) && (v != NULL) && parse_u32(v, &o->gap_ms)) {
             i++;
         } else if (strcmp(a, "--quiet") == 0) {
             o->quiet = 1;
@@ -102,9 +99,34 @@ static int parse_args(int argc, char** argv, options_t* o)
 
 static vbus_t bus;
 static sim_ecu_t ecu;
-static isotp_can_link_t vehicle;
-static uint8_t vehicle_rx[LINK_BUF];
-static uint8_t vehicle_tx[LINK_BUF];
+static uds_client_t client;
+
+static const char* state_name(vehicle_signal_state_t st)
+{
+    switch (st) {
+    case VEHICLE_SIGNAL_VALID:
+        return "VALID";
+    case VEHICLE_SIGNAL_STALE:
+        return "STALE";
+    default:
+        return "none";
+    }
+}
+
+static void print_signals(uint32_t now, uint32_t start)
+{
+    printf("%8u ms  session %s, ECU %s\n", (unsigned)timebase_elapsed_ms(now, start),
+           uds_client_session_up(&client) ? "up" : "down",
+           vehicle_signals_ecu_present() ? "present" : "absent");
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        vehicle_signal_sample_t s;
+        if (vehicle_signals_get(i, now, &s)) {
+            printf("            DID 0x%04X  raw %6u  %10.3f  age %5u ms  %s\n",
+                   (unsigned)vehicle_cl250_dids[i].did, (unsigned)s.raw, (double)s.physical,
+                   (unsigned)s.age_ms, state_name(s.state));
+        }
+    }
+}
 
 int main(int argc, char** argv)
 {
@@ -125,6 +147,7 @@ int main(int argc, char** argv)
             fprintf(stderr, "virtual bus setup failed\n");
             return 1;
         }
+        ecu.require_session = true; /* reads need the extended session, like the CL250 */
     } else if ((strncmp(opt.vcan, VIRTUAL_IF_PREFIX, strlen(VIRTUAL_IF_PREFIX)) != 0) &&
                !opt.allow_real_bus) {
         fprintf(stderr, "%s is not a virtual CAN interface; pass --allow-real-bus if this is intended "
@@ -137,21 +160,17 @@ int main(int argc, char** argv)
     }
 
     can_if_init();
-    if (isotp_link_open_vehicle_cl250(&vehicle, vehicle_rx, LINK_BUF, vehicle_tx, LINK_BUF) != ISOTP_OK) {
+    vehicle_signals_init();
+    if (uds_client_open(&client) != ISOTP_OK) {
         fprintf(stderr, "vehicle ISO-TP link setup failed\n");
         return 1;
     }
-    printf("moto_rtcore_host: vehicle link 0x%08X -> 0x%08X on %s\n",
+    printf("moto_rtcore_host: UDS client 0x%08X -> 0x%08X on %s\n",
            (unsigned)VEHICLE_CL250_REQUEST_ID, (unsigned)VEHICLE_CL250_RESPONSE_ID,
            simulated ? "in-process bus + simulated CL250 ECU" : opt.vcan);
 
     const uint32_t start = timebase_now_ms();
-    uint32_t responses = 0u;
-    uint32_t failures = 0u;
-    uint32_t did_idx = 0u;
-    int in_flight = 0;
-    uint32_t sent_at = start;
-    uint32_t idle_since = start;
+    uint32_t printed_at = start;
 
     while (!stop_requested) {
         const uint32_t now = timebase_now_ms();
@@ -164,67 +183,27 @@ int main(int argc, char** argv)
             sim_ecu_step(&ecu, now);
             (void)can_if_dispatch(CAN_PORT_VEHICLE, RX_PER_PASS);
         }
+        uds_client_step(&client);
 
-        isotp_n_result_t res;
-        uint16_t len = 0u;
-        if (isotp_link_take_rx(&vehicle, &res, &len)) {
-            const vehicle_cl250_did_t* e = &vehicle_cl250_dids[did_idx];
-            const uint8_t* d = isotp_link_rx_data(&vehicle);
-            float value = 0.0f;
-            if ((res == ISOTP_N_OK) && (len >= 3u) &&
-                (d[0] == (uint8_t)(UDS_SID_RDBI + UDS_POSITIVE_OFFSET)) &&
-                (d[1] == (uint8_t)(e->did >> 8u)) && (d[2] == (uint8_t)(e->did & 0xFFu)) &&
-                vehicle_cl250_decode(e, &d[3], (size_t)len - 3u, &value)) {
-                responses++;
-                if (!opt.quiet) {
-                    printf("%8u ms  DID 0x%04X = %.2f\n", (unsigned)timebase_elapsed_ms(now, start),
-                           (unsigned)e->did, (double)value);
-                }
-            } else {
-                failures++;
-                printf("%8u ms  DID 0x%04X: no valid answer (N_Result %d, %u bytes)\n",
-                       (unsigned)timebase_elapsed_ms(now, start), (unsigned)e->did, (int)res,
-                       (unsigned)len);
-            }
-            if (res == ISOTP_N_OK) {
-                isotp_link_rx_release(&vehicle);
-            }
-            in_flight = 0;
-            idle_since = now;
-            did_idx = (did_idx + 1u) % VEHICLE_CL250_DID_COUNT;
+        if (!opt.quiet && timebase_expired(now, printed_at, PRINT_PERIOD_MS)) {
+            print_signals(now, start);
+            printed_at = now;
         }
-        if (isotp_link_take_tx_confirm(&vehicle, &res) && (res != ISOTP_N_OK)) {
-            printf("request TX failed: N_Result %d\n", (int)res);
-        }
-
-        if (in_flight && timebase_expired(now, sent_at, VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS)) {
-            failures++;
-            printf("%8u ms  DID 0x%04X: response timeout\n", (unsigned)timebase_elapsed_ms(now, start),
-                   (unsigned)vehicle_cl250_dids[did_idx].did);
-            in_flight = 0;
-            idle_since = now;
-            did_idx = (did_idx + 1u) % VEHICLE_CL250_DID_COUNT;
-        }
-        if (!in_flight && timebase_expired(now, idle_since, opt.gap_ms)) {
-            const uint16_t did = vehicle_cl250_dids[did_idx].did;
-            const uint8_t req[3] = {UDS_SID_RDBI, (uint8_t)(did >> 8u), (uint8_t)(did & 0xFFu)};
-            if (isotp_link_send(&vehicle, req, (uint16_t)sizeof req) == ISOTP_OK) {
-                in_flight = 1;
-                sent_at = now;
-            }
-        }
-
-        isotp_link_step(&vehicle);
         hal_time_host_sleep_ms(LOOP_PERIOD_MS);
     }
 
-    printf("moto_rtcore_host: %u responses, %u failures, %u refused, %u TX errors, %u guard refusals\n",
-           (unsigned)responses, (unsigned)failures, (unsigned)isotp_link_tx_refused_count(&vehicle),
-           (unsigned)isotp_link_tx_error_count(&vehicle),
-           (unsigned)can_if_tx_refused_count(CAN_PORT_VEHICLE));
+    const uds_client_stats_t* st = uds_client_stats(&client);
+    printf("moto_rtcore_host: %u reads, %u timeouts, %u NRC (%u pending), %u unavailable, "
+           "%u sessions, %u requests; %u refused, %u TX errors, %u guard refusals%s\n",
+           (unsigned)st->reads_ok, (unsigned)st->timeouts, (unsigned)st->nrc,
+           (unsigned)st->response_pending, (unsigned)st->unavailable, (unsigned)st->session_starts,
+           (unsigned)st->requests, (unsigned)isotp_link_tx_refused_count(&client.link),
+           (unsigned)isotp_link_tx_error_count(&client.link),
+           (unsigned)can_if_tx_refused_count(CAN_PORT_VEHICLE),
+           uds_client_failed(&client) ? ", CLIENT FAILED" : "");
     can_port_host_unbind_all();
     if (opt.duration_ms == 0u) {
         return 0;
     }
-    return (responses >= opt.min_responses) ? 0 : 1;
+    return ((st->reads_ok >= opt.min_responses) && !uds_client_failed(&client)) ? 0 : 1;
 }

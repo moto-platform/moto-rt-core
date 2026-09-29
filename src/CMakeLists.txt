@@ -2,11 +2,14 @@
 # and cross-compiled for the Cortex-M7. Nothing here may include HAL/RTOS headers.
 add_library(moto_rtcore_logic STATIC
     features/uds/isotp_core.c
+    features/uds/uds_client_core.c
     hal/can_frame.c
 )
 target_include_directories(moto_rtcore_logic PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
+# The UDS client core uses the generated DID table, parser and timings (pure C too).
+target_link_libraries(moto_rtcore_logic PUBLIC moto_defs_gen)
 target_compile_options(moto_rtcore_logic PRIVATE ${MOTO_WARNINGS})
 
 # Generated moto-vehicle-defs code for this node (D-003): the CL250 DID table and the
@@ -22,7 +25,9 @@ target_include_directories(moto_defs_gen PUBLIC ${MOTO_DEFS_GEN})
 add_library(moto_rtcore_fw STATIC
     services/timebase.c
     services/can_if.c
+    services/vehicle_signals.c
     features/uds/isotp_link.c
+    features/uds/uds_client.c
 )
 target_link_libraries(moto_rtcore_fw PUBLIC moto_rtcore_logic moto_defs_gen)
 target_compile_options(moto_rtcore_fw PRIVATE ${MOTO_WARNINGS})
