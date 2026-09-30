@@ -10,9 +10,11 @@ Signal, CAN and UDS definitions come only from [moto-vehicle-defs](https://githu
 src/hal/         HAL-free interfaces (can_port, hal_time); host/ = host platform layer
                  (in-process bus, SocketCAN, monotonic ms); stm32/ once the board is chosen
 src/services/    timebase, can_if (CAN RX routing + D-020 vehicle guard), vehicle_signals
-                 (last sample per DID); signal pool, com, diag, log -- not yet
+                 (last sample per DID), diag (DTC memory + vehicle-tester status);
+                 signal pool, com, log -- not yet
 src/features/    independent function modules (uds/: ISO-TP core + link glue, UDS client =
-                 the CL250 vehicle poller; UDS server -- not yet)
+                 the CL250 vehicle poller, UDS server = rt-core's diagnostics on the
+                 platform bus only)
 src/app/         host/ = moto_rtcore_host SIL program; target task setup -- not yet
 tests/host/      Unity host tests (ctest)
 cmake/           arm-none-eabi toolchain file
@@ -33,9 +35,10 @@ cmake --preset target-m7-debug && cmake --build --preset target-m7-debug
 The host tests run with AddressSanitizer and UndefinedBehaviorSanitizer. The native
 build also produces `build/host-tests/src/moto_rtcore_host`: rt-core as a host program
 (SIL, D-034). It runs the UDS client against an in-process bus with a simulated CL250
-ECU and prints the signal table once a second.
+ECU and prints the signal table once a second. The UDS server answers on a separate
+in-process platform bus; `--uds-scenario` drives a scripted diagnostic session against it.
 On Linux, `--vcan vcan0` puts the vehicle port on SocketCAN. ctest runs it for 2 s as
-a smoke test. The target
+a smoke test and once with `--uds-scenario`. The target
 presets cross-compile the pure logic for Cortex-M7 (`-mcpu=cortex-m7 -mfpu=fpv5-d16
 -mfloat-abi=hard`); the CubeMX project, startup code and linker script are added once
 the board is chosen.
