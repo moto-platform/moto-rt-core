@@ -28,7 +28,9 @@
 extern "C" {
 #endif
 
-#define CAN_IF_MAX_RECEIVERS 8u
+/* Vehicle: link RX + 2 physical + 2 functional request-ID watches (D-039, D-040);
+ * platform: UDS server physical + functional; room for the SIL tester and growth. */
+#define CAN_IF_MAX_RECEIVERS 12u
 
 typedef void (*can_if_rx_fn)(void* ctx, const can_frame_t* frame);
 

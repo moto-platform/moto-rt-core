@@ -11,19 +11,20 @@
  */
 #include "app/host/sim_ecu.h"
 #include "features/uds/uds_client.h"
-#include "features/uds/uds_iso14229.h"
 #include "hal/host/can_port_host.h"
 #include "hal/host/hal_time_host.h"
+#include "platform_uds.h"
 #include "services/can_if.h"
+#include "services/diag.h"
 #include "services/timebase.h"
 #include "services/vehicle_signals.h"
+#include "uds_iso14229.h"
 #include "vehicle_cl250.h"
 
 #include <string.h>
 #include <unity.h>
 
 #define SNIFF_MAX 16384u
-#define NRC_REQUEST_OUT_OF_RANGE 0x31u /* ISO 14229-1 Annex A.1 */
 
 static vbus_t bus;
 static uint8_t node_vehicle, node_sniff;
@@ -47,6 +48,7 @@ void setUp(void)
     TEST_ASSERT_TRUE(sim_ecu_init(&ecu, &bus));
     ecu.require_session = true;
     can_if_init();
+    diag_init(timebase_now_ms());
     vehicle_signals_init();
     memset(&client, 0, sizeof client);
     TEST_ASSERT_EQUAL(ISOTP_OK, uds_client_open(&client));
@@ -320,7 +322,7 @@ static void test_sil_nrc_on_one_did_leaves_the_others_valid(void)
 {
     ecu.nrc_enabled = true;
     ecu.nrc_did = VEHICLE_CL250_DID_THROTTLE_POS;
-    ecu.nrc_code = NRC_REQUEST_OUT_OF_RANGE;
+    ecu.nrc_code = UDS_NRC_REQUEST_OUT_OF_RANGE;
     run(3000u, false);
     const uint32_t now = timebase_now_ms();
     for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
@@ -546,6 +548,105 @@ static void test_open_and_getters_handle_bad_arguments(void)
     TEST_ASSERT_EQUAL_UINT32(ISOTP_DEFAULT_N_BS_MS, isotp_link_n_bs_ms(&client.link));
 }
 
+/* ------------------------------------------------------------------------- */
+/* Functional watch, diagnostics (D-039, D-040)                               */
+/* ------------------------------------------------------------------------- */
+
+static void inject_on_watch_id(uint32_t i)
+{
+    can_frame_t f;
+    memset(&f, 0, sizeof f);
+    f.id = vehicle_cl250_functional_watch[i].id;
+    f.extended = vehicle_cl250_functional_watch[i].extended;
+    f.dlc = 8u;
+    const uint8_t read_rpm[8] = {0x03u, UDS_SID_READ_DATA_BY_IDENTIFIER,
+                                 (uint8_t)(VEHICLE_CL250_DID_ENGINE_SPEED >> 8u),
+                                 (uint8_t)(VEHICLE_CL250_DID_ENGINE_SPEED & 0xFFu),
+                                 0xAAu, 0xAAu, 0xAAu, 0xAAu};
+    memcpy(f.data, read_rpm, 8u);
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_send(&bus, node_sniff, &f)); /* a generic OBD dongle */
+}
+
+static void test_sil_a_frame_on_every_functional_watch_id_latches_the_client(void)
+{
+    TEST_ASSERT_GREATER_THAN_UINT32(0u, VEHICLE_CL250_FUNCTIONAL_WATCH_COUNT);
+    for (uint32_t i = 0u; i < VEHICLE_CL250_FUNCTIONAL_WATCH_COUNT; i++) {
+        if (i > 0u) {
+            tearDown(); /* a fresh client for the next watch ID */
+            setUp();
+        }
+        run(500u, false);
+        TEST_ASSERT_FALSE(uds_client_failed(&client));
+        inject_on_watch_id(i);
+        run(1u, false);
+        TEST_ASSERT_TRUE(uds_client_failed(&client));
+        TEST_ASSERT_EQUAL(UDS_CLIENT_FAULT_FOREIGN_TESTER, uds_client_fault(&client));
+        const uint32_t mark = sniff_count;
+        run(3000u, false);
+        for (uint32_t k = mark; k < sniff_count; k++) {
+            TEST_ASSERT_FALSE(is_tester(&sniffed[k])); /* fail-closed: nothing more is sent */
+        }
+    }
+}
+
+static void test_sil_a_latch_is_reported_to_diag_and_clearing_never_releases_it(void)
+{
+    const uint8_t failed = (uint8_t)(UDS_DTC_STATUS_TEST_FAILED & PLATFORM_UDS_DTC_STATUS_AVAILABILITY_MASK);
+    run(500u, false);
+    TEST_ASSERT_EQUAL_HEX8(0u, diag_dtc_status(PLATFORM_UDS_DTC_IDX_VEHICLE_TESTER_LATCHED));
+    TEST_ASSERT_FALSE(diag_vehicle_tester(timebase_now_ms()).latched);
+    TEST_ASSERT_EQUAL_UINT8(PLATFORM_UDS_VEHICLE_TESTER_STATUS_FAULT_NONE, diag_vehicle_tester(timebase_now_ms()).fault);
+
+    inject_on_watch_id(0u);
+    run(2u, false);
+    TEST_ASSERT_EQUAL_HEX8(failed, (uint8_t)(diag_dtc_status(PLATFORM_UDS_DTC_IDX_VEHICLE_TESTER_LATCHED) & failed));
+    TEST_ASSERT_TRUE(diag_vehicle_tester(timebase_now_ms()).latched);
+    TEST_ASSERT_EQUAL_UINT8(PLATFORM_UDS_VEHICLE_TESTER_STATUS_FAULT_FOREIGN_TESTER,
+                            diag_vehicle_tester(timebase_now_ms()).fault);
+
+    /* a UDS 0x14 clear: the client's next pass reports the still-active latch again */
+    diag_dtc_clear_all();
+    TEST_ASSERT_EQUAL_HEX8(0u, diag_dtc_status(PLATFORM_UDS_DTC_IDX_VEHICLE_TESTER_LATCHED));
+    uds_client_step(&client);
+    TEST_ASSERT_EQUAL_HEX8(failed, (uint8_t)(diag_dtc_status(PLATFORM_UDS_DTC_IDX_VEHICLE_TESTER_LATCHED) & failed));
+    TEST_ASSERT_TRUE(uds_client_failed(&client));
+    TEST_ASSERT_EQUAL(UDS_CLIENT_FAULT_FOREIGN_TESTER, uds_client_fault(&client));
+    TEST_ASSERT_TRUE(diag_vehicle_tester(timebase_now_ms()).latched);
+}
+
+static void test_sil_ecu_comm_lost_dtc_needs_the_absence_timeout_since_open(void)
+{
+    const uint8_t failed = (uint8_t)(UDS_DTC_STATUS_TEST_FAILED & PLATFORM_UDS_DTC_STATUS_AVAILABILITY_MASK);
+    const uint8_t confirmed = (uint8_t)(UDS_DTC_STATUS_CONFIRMED_DTC & PLATFORM_UDS_DTC_STATUS_AVAILABILITY_MASK);
+    ecu.silent = true; /* the ECU never answers */
+    run(VEHICLE_CL250_ECU_ABSENT_TIMEOUT_MS, false); /* steps at open + 0 .. TIMEOUT - 1 */
+    TEST_ASSERT_EQUAL_HEX8(0u, diag_dtc_status(PLATFORM_UDS_DTC_IDX_VEHICLE_ECU_COMM_LOST));
+    TEST_ASSERT_FALSE(diag_vehicle_tester(timebase_now_ms()).ecu_present);
+    run(1u, false); /* the step at open + TIMEOUT */
+    TEST_ASSERT_EQUAL_HEX8(failed, (uint8_t)(diag_dtc_status(PLATFORM_UDS_DTC_IDX_VEHICLE_ECU_COMM_LOST) & failed));
+    TEST_ASSERT_EQUAL_HEX8(confirmed, (uint8_t)(diag_dtc_status(PLATFORM_UDS_DTC_IDX_VEHICLE_ECU_COMM_LOST) & confirmed));
+    TEST_ASSERT_FALSE(uds_client_failed(&client)); /* absence is not a latch */
+
+    /* the ECU is back: the active bit clears, the confirmed bit stays */
+    ecu.silent = false;
+    sim_ecu_drop_session(&ecu);
+    run(VEHICLE_CL250_SESSION_RETRY_INTERVAL_MS + 200u, false);
+    TEST_ASSERT_TRUE(uds_client_ecu_present(&client));
+    TEST_ASSERT_TRUE(diag_vehicle_tester(timebase_now_ms()).ecu_present);
+    const uint8_t st = diag_dtc_status(PLATFORM_UDS_DTC_IDX_VEHICLE_ECU_COMM_LOST);
+    TEST_ASSERT_EQUAL_HEX8(0u, (uint8_t)(st & failed));
+    TEST_ASSERT_EQUAL_HEX8(confirmed, (uint8_t)(st & confirmed));
+}
+
+static void test_sil_an_answering_ecu_never_sets_the_comm_lost_dtc(void)
+{
+    run(VEHICLE_CL250_ECU_ABSENT_TIMEOUT_MS + 2000u, false);
+    TEST_ASSERT_EQUAL_HEX8(0u, diag_dtc_status(PLATFORM_UDS_DTC_IDX_VEHICLE_ECU_COMM_LOST));
+    TEST_ASSERT_TRUE(diag_vehicle_tester(timebase_now_ms()).ecu_present);
+    TEST_ASSERT_TRUE(diag_vehicle_tester(timebase_now_ms()).session_up);
+    TEST_ASSERT_FALSE(diag_vehicle_tester(timebase_now_ms()).latched);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -566,5 +667,9 @@ int main(void)
     RUN_TEST(test_sil_a_second_tester_on_the_fallback_id_latches_the_client);
     RUN_TEST(test_open_fails_closed_without_room_for_the_foreign_watch);
     RUN_TEST(test_open_and_getters_handle_bad_arguments);
+    RUN_TEST(test_sil_a_frame_on_every_functional_watch_id_latches_the_client);
+    RUN_TEST(test_sil_a_latch_is_reported_to_diag_and_clearing_never_releases_it);
+    RUN_TEST(test_sil_ecu_comm_lost_dtc_needs_the_absence_timeout_since_open);
+    RUN_TEST(test_sil_an_answering_ecu_never_sets_the_comm_lost_dtc);
     return UNITY_END();
 }

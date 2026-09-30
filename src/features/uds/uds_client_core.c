@@ -1,6 +1,6 @@
 #include "features/uds/uds_client_core.h"
 
-#include "features/uds/uds_iso14229.h"
+#include "uds_iso14229.h"
 
 #include <stddef.h>
 

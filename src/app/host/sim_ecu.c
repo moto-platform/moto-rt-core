@@ -1,19 +1,11 @@
 #include "app/host/sim_ecu.h"
 
-#include "features/uds/uds_iso14229.h"
+#include "uds_iso14229.h"
 #include "vehicle_cl250.h"
 
 #include <stddef.h>
 
-/* ISO 14229-1 codes only the ECU side needs (host-only simulator). */
-#define UDS_POSITIVE_OFFSET 0x40u
-#define UDS_SUPPRESS_POS_RSP 0x80u
-#define UDS_NRC_SERVICE_NOT_SUPPORTED 0x11u
-#define UDS_NRC_SUBFUNCTION_NOT_SUPPORTED 0x12u
-#define UDS_NRC_INCORRECT_LENGTH 0x13u
-#define UDS_NRC_REQUEST_OUT_OF_RANGE 0x31u
-#define UDS_SESSION_DEFAULT 0x01u
-/* P2server 50 ms, P2*server 5000 ms (in 10 ms units) in the session response. */
+/* The simulated CL250's own P2server 50 ms, P2*server 5000 ms (in 10 ms units) in the session response. */
 #define SIM_P2_HI 0x00u
 #define SIM_P2_LO 0x32u
 #define SIM_P2STAR_HI 0x01u
@@ -79,7 +71,7 @@ static uint16_t read_answer(const sim_ecu_t* ecu, const vehicle_cl250_did_t* e,
                             const uint8_t* req, uint32_t now_ms, uint8_t* out)
 {
     uint32_t raw = synthetic_raw(e, now_ms);
-    out[0] = (uint8_t)(UDS_SID_READ_DATA_BY_IDENTIFIER + UDS_POSITIVE_OFFSET);
+    out[0] = (uint8_t)(UDS_SID_READ_DATA_BY_IDENTIFIER + UDS_POSITIVE_RESPONSE_OFFSET);
     out[1] = req[1];
     out[2] = req[2];
     for (uint8_t i = 0u; i < e->length; i++) {
@@ -100,7 +92,7 @@ static uint16_t answer_read(sim_ecu_t* ecu, const uint8_t* req, uint16_t len, ui
 {
     ecu->reads++;
     if (len != 3u) {
-        return negative(out, req[0], UDS_NRC_INCORRECT_LENGTH);
+        return negative(out, req[0], UDS_NRC_INCORRECT_MESSAGE_LENGTH_OR_INVALID_FORMAT);
     }
     if (ecu->require_session && !ecu->extended) {
         return negative(out, req[0], UDS_NRC_SERVICE_NOT_SUPPORTED_IN_ACTIVE_SESSION);
@@ -132,14 +124,14 @@ static uint16_t answer(sim_ecu_t* ecu, const uint8_t* req, uint16_t len, uint32_
 {
     const uint8_t sid = req[0];
     const uint8_t sub = (len >= 2u) ? (uint8_t)(req[1] & 0x7Fu) : 0u;
-    const bool suppress = (len >= 2u) && ((req[1] & UDS_SUPPRESS_POS_RSP) != 0u);
+    const bool suppress = (len >= 2u) && ((req[1] & UDS_SUPPRESS_POS_RSP_BIT) != 0u);
     if (sid == UDS_SID_READ_DATA_BY_IDENTIFIER) {
         return answer_read(ecu, req, len, now_ms, out);
     }
     if (sid == VEHICLE_CL250_SESSION_SID) {
         ecu->session_requests++;
         if (len != 2u) {
-            return negative(out, sid, UDS_NRC_INCORRECT_LENGTH);
+            return negative(out, sid, UDS_NRC_INCORRECT_MESSAGE_LENGTH_OR_INVALID_FORMAT);
         }
         if ((sub != VEHICLE_CL250_SESSION_SUBFUNCTION) && (sub != UDS_SESSION_DEFAULT)) {
             return negative(out, sid, UDS_NRC_SUBFUNCTION_NOT_SUPPORTED);
@@ -148,7 +140,7 @@ static uint16_t answer(sim_ecu_t* ecu, const uint8_t* req, uint16_t len, uint32_
         if (suppress) {
             return 0u;
         }
-        out[0] = (uint8_t)(sid + UDS_POSITIVE_OFFSET);
+        out[0] = (uint8_t)(sid + UDS_POSITIVE_RESPONSE_OFFSET);
         out[1] = sub;
         out[2] = SIM_P2_HI;
         out[3] = SIM_P2_LO;
@@ -159,7 +151,7 @@ static uint16_t answer(sim_ecu_t* ecu, const uint8_t* req, uint16_t len, uint32_
     if (sid == VEHICLE_CL250_TESTER_PRESENT_SID) {
         ecu->tester_presents++;
         if (len != 2u) {
-            return negative(out, sid, UDS_NRC_INCORRECT_LENGTH);
+            return negative(out, sid, UDS_NRC_INCORRECT_MESSAGE_LENGTH_OR_INVALID_FORMAT);
         }
         if (sub != 0u) {
             return negative(out, sid, UDS_NRC_SUBFUNCTION_NOT_SUPPORTED);
@@ -167,7 +159,7 @@ static uint16_t answer(sim_ecu_t* ecu, const uint8_t* req, uint16_t len, uint32_
         if (suppress) {
             return 0u;
         }
-        out[0] = (uint8_t)(sid + UDS_POSITIVE_OFFSET);
+        out[0] = (uint8_t)(sid + UDS_POSITIVE_RESPONSE_OFFSET);
         out[1] = sub;
         return 2u;
     }

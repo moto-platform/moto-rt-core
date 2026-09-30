@@ -7,7 +7,8 @@ Status:
   - the ISO-TP core (`isotp_core.{h,c}`)
   - the link glue that binds it to a CAN port and an ID pair (`isotp_link.{h,c}`)
   - the UDS client, the CL250 vehicle poller (`uds_client.{h,c}`, `uds_client_core.{h,c}`, Ç3)
-- Next: the UDS server on the platform bus (Ç3).
+  - the UDS server on the platform bus (`uds_server.{h,c}`, `uds_server_core.{h,c}`, Ç3, D-040)
+- ISO 14229 codes come from gen/ `uds_iso14229.h` (moto-vehicle-defs v0.2.0, D-040); the server contract (IDs, timing, services, DIDs, DTCs) from gen/ `platform_uds.h`.
 
 ## ISO-TP core (`isotp_core.h`)
 
@@ -123,12 +124,7 @@ It is pure logic with no HAL, RTOS or heap, and is tested in `tests/host/test_is
 
 Every request still passes `vehicle_cl250_request_allowed()` in the link and the `can_if` guard. It never sends 0x19 or OBD 0x09, which need multi-frame responses (Q-020).
 
-**Temporary header.** `uds_iso14229.h` holds the generic ISO 14229-1 codes that gen/ does not provide yet (user decision, 2026-09-29):
-- the 0x22 request SID
-- the 0x7F negative response
-- NRC 0x78, 0x7E and 0x7F
-
-No vehicle fact lives there. The positive 0x62 check stays in the generated `vehicle_cl250_parse_response()`. Remove the header once moto-vehicle-defs generates these codes.
+**ISO codes.** The generic ISO 14229-1 codes (0x22, 0x7F, NRC 0x78/0x7E/0x7F) come from the generated `uds_iso14229.h` (D-040). The temporary local header of D-039 is gone. The positive 0x62 check stays in the generated `vehicle_cl250_parse_response()`.
 
 **Inputs.**
 - The link's `N_USData.indication`.
@@ -168,20 +164,24 @@ No vehicle fact lives there. The positive 0x62 check stays in the generated `veh
 - **Fail-closed latch** (`uds_client_fault()` reports the first reason). The client sends nothing more until it is opened again, and its session reads down:
   - `UDS_CLIENT_FAULT_GATE`: the link refused a request (the D-020 gate or the Single Frame length). Only a bug can cause it.
   - `UDS_CLIENT_FAULT_GUARD`: the `can_if` vehicle guard refused any frame.
-  - `UDS_CLIENT_FAULT_FOREIGN_TESTER`: a frame on `VEHICLE_CL250_REQUEST_ID` or `VEHICLE_CL250_FALLBACK_REQUEST_ID`. The controller never receives its own frames, so this is a second tester (D-021, same as connectivity-node, D-030). `uds_client_open()` refuses to run without this watch (`ISOTP_ERR_ARG` when `can_if` has no room).
+  - `UDS_CLIENT_FAULT_FOREIGN_TESTER`: a frame on `VEHICLE_CL250_REQUEST_ID`, `VEHICLE_CL250_FALLBACK_REQUEST_ID` or one of the OBD functional request IDs in `vehicle_cl250_functional_watch[]` (0x7DF, 0x18DB33F1; Q-021 → D-040, watch-only, never sent). The controller never receives its own frames, so this is a second tester, for example a generic OBD dongle (D-021, same as connectivity-node, D-030). `uds_client_open()` refuses to run without these watches (`ISOTP_ERR_ARG` when `can_if` has no room).
   - The FC.CTS that the link drops for a segmented response is expected, and does not latch.
 - **Sticky STALE.** `vehicle_signals_expire()` runs every step. Once a sample is STALE it stays STALE until the next write, so the 32-bit ms counter wrapping (about 49.7 days) cannot make an old value VALID. ECU presence also needs a new answer after absence.
 - **Known limits.**
   - A First Frame with FF_DL above `UDS_CLIENT_RX_BUF` (64) is dropped silently by the core. The request ends by timeout and counts towards the skip limit. No CL250 DID does this.
   - Each segmented response stops polling for about N_Cr + N_Bs (about 2 s), so every DID goes STALE. This is the cost of the Q-020 deferral.
   - A DID answered with a permanent NRC (for example 0x31) is polled at its full rate. This is legacy behaviour, and the schedule bounds it.
-  - The foreign-tester watch covers the two physical request IDs from gen/. A generic OBD dongle that uses functional addressing (0x7DF, or 0x18DB33F1 for 29-bit) is not seen. Those IDs belong in defs (`/signal-change`) before rt-core can watch them.
   - `uds_client_core_not_sent()` clears only the pending slot. The dropped request's schedule stays advanced, so a dropped tester present waits one full period. The path is defensive: `tx_ready` already requires the link to be idle.
-  - On the H7, the FDCAN acceptance filters must pass `VEHICLE_CL250_REQUEST_ID` and `VEHICLE_CL250_FALLBACK_REQUEST_ID`. Otherwise the foreign-tester watch is deaf. This is an Ç1 HAL requirement, checked on target by `uds_client_foreign_tester`.
+  - On the H7, the FDCAN acceptance filters must pass `VEHICLE_CL250_REQUEST_ID`, `VEHICLE_CL250_FALLBACK_REQUEST_ID` and every `vehicle_cl250_functional_watch[]` ID. Otherwise the foreign-tester watch is deaf. This is an Ç1 HAL requirement, checked on target by `uds_client_foreign_tester`.
   - N_As (a TX that is never confirmed) and bus-off recovery (`VEHICLE_CL250_BUS_OFF_BACKOFF_*`, D-030's latch after 5 bus-offs) come with the H7 FDCAN HAL (Ç1).
 - **Counters** (`uds_client_stats()`): requests, reads, timeouts, NRC, response pending, unavailable, skips, unexpected, session starts and losses.
+- **Diagnostics (D-040).** Every step reports to `services/diag`, level-triggered:
+  - DTC `VEHICLE_ECU_COMM_LOST` (U0100-00): the ECU is absent, counted only once `ECU_ABSENT_TIMEOUT_MS` has passed since open (a sticky flag, so the ms counter wrap cannot disarm it).
+  - DTC `VEHICLE_TESTER_LATCHED` (U3000-00): the latch.
+  - The 0xFD00 status: ECU present, session up, latched, latch reason (gen/ values).
+  - A 0x14 clear on the platform bus resets the DTC records only. The next step sets them again while the condition lasts, and the latch is never released by it.
 
-**Memory.** `uds_client_t` is 348 B on the M7: the link, 64 + 8 B of buffers, and the core. It must have static storage duration. `vehicle_signals` adds 81 B, and the glue adds 4 B (the foreign-frame counter). Flash is about 2 kB: core 1094 B, glue 622 B, service 252 B (release build, 2026-09-29, after the safety fixes). There is no heap, and every loop is bounded by the DID count or a frame length.
+**Memory.** `uds_client_t` is 356 B on the M7 (348 B before the D-040 diagnostics): the link, 64 + 8 B of buffers, and the core. It must have static storage duration. `vehicle_signals` adds 81 B, and the glue adds 4 B (the foreign-frame counter). Flash is about 2 kB: core 1094 B, glue 622 B, service 252 B (release build, 2026-09-29, after the safety fixes). There is no heap, and every loop is bounded by the DID count or a frame length.
 
 **Integration notes.**
 - Call `uds_client_step()` once per main-loop pass, after `can_if_dispatch(CAN_PORT_VEHICLE, ...)`.
@@ -221,11 +221,139 @@ No vehicle fact lives there. The positive 0x62 check stays in the generated `veh
     - MINOR-1: presence did not age out while latched. Fixed: the absence check runs before the latch return; tested.
     - MINOR-2, MINOR-3, MINOR-4 (functional addressing, `not_sent` schedule, H7 filters): documented under known limits.
 
-**Follow-ups.** The client is merged (rt-core#5 and #6). What remains:
-- Move the codes in `uds_iso14229.h` into gen/ with a defs `/signal-change`, then delete the header (D-039).
-- Q-021: functional request IDs in defs, so the foreign-tester watch covers generic OBD dongles.
-- N_As, bus-off backoff and FDCAN filters that pass both request IDs: the H7 HAL (Ç1).
+**Follow-ups.** The client is merged (rt-core#5 and #6); the ISO codes and Q-021 are done (D-040). What remains:
+- N_As, bus-off backoff and FDCAN filters that pass the request and watch IDs: the H7 HAL (Ç1).
 - A platform-bus republisher that reads `services/vehicle_signals` and maps NONE/STALE to INVALID (speed E2E to safety-node, D-021).
+
+## UDS server, platform bus (`uds_server.h`, `uds_server_core.h`)
+
+**Responsibility.** rt-core's own diagnostic server on the platform bus (FDCAN2), for a workshop tool, the Raspi or the HIL host (Ç3, D-040). It serves rt-core's DIDs and DTCs. It never opens, reads or writes the vehicle bus: the link is opened with `isotp_link_open()`, which refuses `CAN_PORT_VEHICLE`, and nothing was added to the vehicle port or the `can_if` guard (D-020, D-037).
+- `uds_server_core` is the pure state machine: no HAL, services or RTOS, time passed in, data through a provider table. Tested in `tests/host/test_uds_server_core.c`.
+- `uds_server` is the glue: the platform ISO-TP link, the functional receiver, `services/timebase`, and the providers (`services/diag`, `services/vehicle_signals`). Tested end to end in `tests/host/test_uds_server.c`, and in SIL by `moto_rtcore_host --uds-scenario`.
+- It never includes `uds_client.h`. The client publishes its state through `services/diag`, so either module can be removed without breaking the other (architecture-guard, 2026-09-30).
+
+**Addressing and transport** (all from gen/ `platform_uds.h`):
+- physical `PLATFORM_UDS_PHYS_REQUEST_ID` (0x710) → `PLATFORM_UDS_PHYS_RESPONSE_ID` (0x718), 11-bit, segmented in both directions, padding `PLATFORM_UDS_PADDING_BYTE`, BS / STmin / N_Bs / N_Cr from gen/, requests up to `PLATFORM_UDS_RX_BUFFER` (64) bytes (longer: FC.OVFLW)
+- functional `PLATFORM_UDS_FUNCTIONAL_REQUEST_ID` (0x7DF): Single Frames only (a functional First Frame is dropped), answered physically on 0x718
+
+**Services** (ISO 14229-1 clause; sessions from gen/):
+
+| SID | Service | Sessions | Notes |
+|---|---|---|---|
+| 0x10 | DiagnosticSessionControl (10.2) | default, extended | 0x01 / 0x03. 0x02 programming → NRC 0x12 until the bootloader (Ç5). The answer carries P2 (1 ms units) and P2* (10 ms units) from gen/. suppressPosRsp honoured |
+| 0x3E | TesterPresent (10.6) | default, extended | zeroSubFunction; suppressPosRsp honoured |
+| 0x22 | ReadDataByIdentifier (11.2) | default, extended | 1 to `PLATFORM_UDS_MAX_READ_DIDS` (4) DIDs, answered in request order. Unknown DIDs are left out; NRC 0x31 only if none is known |
+| 0x19 | ReadDTCInformation (12.3) | default, extended | 0x01 count, 0x02 by status mask, 0x0A supported DTCs. Status masked by the availability mask 0x09. 0x19 has no suppressPosRsp bit, so 0x81 and above get NRC 0x12 |
+| 0x14 | ClearDiagnosticInformation (12.2) | **extended only** | group 0xFFFFFF only, else NRC 0x31. Clears rt-core's RAM DTC records, never the UDS client latch, never anything on the vehicle |
+
+**DIDs:**
+- 0xF186 active session, served by the core
+- 0xF189 SW version: `MOTO_RTCORE_VERSION` = the CMake project version, NUL-padded to 12 bytes
+- 0xFD00 vehicle-tester status: byte 0 = ECU present / session up / latched bits, byte 1 = latch reason
+- 0xFD01 uptime in seconds since `uds_server_open()`
+- 0xFD10–0xFD14 the five CL250 samples from `services/vehicle_signals`: [state 0 NONE / 1 VALID / 2 STALE][age ms, big-endian, saturates at 0xFFFF, 0xFFFF for NONE][raw, big-endian]
+
+**DTCs** (`services/diag`, RAM only until the H7 flash driver, D-040):
+- 0xC10000 U0100-00, CL250 ECU communication lost
+- 0xF00000 U3000-00, vehicle UDS client latched
+
+**NRC order** (clause 7.5):
+- 0x11 service not supported
+- 0x7F service not in the active session
+- 0x13 too short for a sub-function
+- 0x12 sub-function not supported
+- 0x13 wrong length
+- 0x31 request out of range
+- 0x22 conditions not correct (a provider failed)
+- 0x14 response too long (not reachable with the gen/ sizes; kept as a guard)
+
+**Functional requests.** NRC 0x11, 0x12, 0x31, 0x7E and 0x7F are not sent (gen/ `platform_uds_nrc_suppressed_functional()`, clause 7.5), and suppressPosRsp is honoured. NRC 0x78 is sent as for a physical request. Once a 0x78 went out, the final answer is always sent, even with suppressPosRsp or a functionally suppressed NRC, because the tester is waiting for it. A functional request is taken only while the server is idle: nothing pending, no answer queued, no physical reception or transmission running. Otherwise it is dropped and counted (`uds_server_glue_stats()`).
+
+**Timing** (ISO 14229-2, values from gen/):
+- **P2.** The answer is built in the same `uds_server_step()` as the request. In SIL the worst request-to-first-frame time was 2 ms, against a P2 of 50 ms.
+- **P2\*.** A provider may answer PENDING, for example a future flash-backed clear. The request then gets NRC 0x78 at once and again every P2\* / 2. When the provider is ready, the final answer follows. If it is still pending P2\* after the request arrived, the request ends with NRC 0x10, so one request cannot hold the server.
+- **Busy.** While a request is pending, a new physical request gets NRC 0x21, a functional one is dropped, and 0x3E 80 only restarts S3.
+- **S3.** A non-default session with no request for `PLATFORM_UDS_S3_SERVER_MS` falls back to the default session. Every request restarts S3; a pending request holds it.
+
+**Failure behaviour.**
+- An empty request, one longer than the receive buffer, or a failed reception (N_Cr, wrong SN) gets no answer and is counted.
+- **Queued answer.**
+  - While the link is busy (`ISOTP_ERR_BUSY`), the answer stays queued and is retried every pass (`tx_busy`). S3 keeps running meanwhile (`uds_server_core_tick()`).
+  - It is dropped once it is P2\*server old (`tx_expired`), so the glue never delivers a stale answer later.
+  - An answer the link already accepted (frames in the core or the mailbox) can still go out late after a bus stall until N_As exists (Ç1 FDCAN HAL; safety re-review MINOR-B).
+  - A functional request that arrives while an answer is queued is dropped and counted, never run late (safety re-review MINOR-A).
+  - Any other link error drops it at once (`tx_failed`), as does a failed N_USData.confirm.
+- **Vehicle-tester status is fail-safe** (safety review MAJOR-1). `services/diag` stamps the client's status. If none has come since boot, or the last one is older than `PLATFORM_UDS_VEHICLE_TESTER_STATUS_MAX_AGE_MS` (500 ms):
+  - 0xFD00 reads FAULT = NOT_RUNNING (4) with every flag clear.
+  - `diag_supervise()`, called by the server every pass, fails U3000-00.
+  - The stale flag is sticky until a new status arrives, so the ms wrap cannot revive an old one.
+  - A client that failed to open or stopped therefore never looks healthy.
+- A provider that fails gives NRC 0x22.
+- If a gen/ DID has no source here, or its layout changes (for example the vehicle sample length), reading it gives NRC 0x22 rather than a guessed value.
+- **No security access.** There is no 0x27 yet. The extended session is the only barrier before 0x14, and it clears RAM DTC records only. Treat the platform bus as unauthenticated: nothing reachable from the Raspi or the phone may assume a tester was authenticated.
+
+**Memory.**
+- M7 RAM: `uds_server_t` is 468 B (link, 64 B rx, 57 B tx, core with a 64 B request copy, 57 B answer buffer). `services/diag` is 12 B.
+- M7 flash (release, 2026-09-30, after the safety fixes): core 1396 B, glue 1030 B, diag 304 B, gen tables 270 B, `isotp_single_frame()` about 40 B.
+- `CAN_IF_MAX_RECEIVERS` went from 8 to 12:
+  - vehicle: the link, 2 physical and 2 functional watches
+  - platform: the server's physical and functional receivers
+  - room for the SIL tester and for growth
+- No heap. Every loop is bounded by a gen/ table size or the request length.
+
+**Integration.**
+- Call `diag_init(now)` as the last setup step before the main loop (the opens do not use `diag`). Then, every pass, run `uds_client_step()` **before** `uds_server_step()`, and `uds_server_step()` after `can_if_dispatch(CAN_PORT_PLATFORM, ...)`.
+  - Why the order matters (safety re-review MINOR-C): the client's first status must arrive before `diag_supervise()` runs.
+  - If the server ran first and more than `PLATFORM_UDS_VEHICLE_TESTER_STATUS_MAX_AGE_MS` passed between `diag_init()` and the first pass, U3000-00 would be confirmed at every boot.
+  - That error is in the fail-safe direction, but it is a false fault.
+- **Ç1 requirement, one comms task** (safety review MINOR-3):
+  - `can_if`, `services/diag`, `services/vehicle_signals`, `uds_client` and `uds_server` run in the same FreeRTOS task.
+  - Every `can_if_register_rx()` happens before the scheduler starts.
+  - If this is ever split, those services need a critical section or a snapshot. Otherwise the 0xFD00 status, a sample, or the one-pass 0x14 window can tear.
+- **Ç1 requirement, FDCAN2 queueing** (safety review MINOR-4):
+  - One pass can queue up to 9 server frames (First Frame + 8 CF at STmin 0), about 2.5 ms at 500 kbit/s. That is well inside the 3 × 20 ms E2E timeout, but it is a priority inversion.
+  - FDCAN2 TX must use the Tx-Queue (priority) mode, or keep dedicated TX buffers for the safety range 0x010-0x08F.
+  - The RX filters must route 0x700-0x7FF to FIFO1 and the safety range and heartbeats to FIFO0.
+  - The FDCAN2 filters must pass 0x710 and 0x7DF.
+
+**Known limits.**
+- 0xFD01 uptime wraps to 0 after about 49.7 days (32-bit ms / 1000). It is informational only. The server and glue counters also wrap; they are not saturating like `can_if`'s.
+- **The functional watch IDs are not verified on the CL250** (safety review MINOR-7). OEM traffic on 0x7DF or 0x18DB33F1 would latch the client at boot. The latch is fail-closed, so this costs availability, not safety. Include both IDs in the Q-001 listen-only probe before the first rt-core ride (D-040), and log the unrouted and watch counters in the first on-bike session.
+- **No 0x27 yet.** This is acceptable while 0x14 only clears RAM DTCs. Before the DTC memory becomes flash-backed (0x14 flash wear), or before 0x10 02, 0x11, 0x2E, 0x31 or 0x34-0x37 are offered, 0x27 or an equivalent is mandatory (D-040).
+
+**Requirement IDs.** None yet (Q-006).
+
+**Reviews of the UDS server (2026-09-30).**
+- architecture-guard (plan): OK with changes, all applied.
+  - The server stays in `features/uds`, the DTC store goes in `services/diag`, and the server never includes the client.
+  - DTCs are level-triggered.
+  - A test checks that the vehicle gate still refuses 0x14 and 0x10 02.
+- vss-schema-guardian: CLEAN. Every ID, DID, DTC, SID, NRC and timing comes from gen/. The pin must be a tag before merge: defs v0.2.0.
+- safety-reviewer: no blocker. The vehicle-bus invariant holds: no path from the server or the diag service to `CAN_PORT_VEHICLE`, the gates are byte-identical, and the functional watch is RX-only. Findings and their status:
+
+| ID | Finding | Status |
+|---|---|---|
+| MAJOR-1 | 0xFD00 and the DTCs read "healthy" when the client never opened or stopped | Fixed: defs `FAULT = NOT_RUNNING` + `max_age_ms`; stamped, sticky-stale status in `services/diag`; `diag_supervise()` fails U3000-00; tests |
+| MINOR-1 | A queued answer blocked S3 and the pending expiry and was retried on any error | Fixed: retry on BUSY only, drop after P2\* (`tx_expired`), `uds_server_core_tick()` while queued; tests |
+| MINOR-2 | Functional requests never got NRC 0x78 (ISO sends it) | Fixed: 0x78 for functional too; after a 0x78 the final answer is always sent; tests |
+| MINOR-3 | The single-task assumption is not enforced | Documented as a Ç1 integration requirement (above) |
+| MINOR-4 | FDCAN2 TX/RX queueing could delay safety frames | Documented as a Ç1 HAL requirement (above); HIL `uds_server_bus_flood_isolation` |
+| MINOR-5 | Hand-written SF parsing, `7u`, `12u` | Fixed: `isotp_single_frame()` in the core, `ISOTP_SF_MAX_LEN`, gen `PLATFORM_UDS_DID_<NAME>_LENGTH` |
+| MINOR-6 | 0xF186 assumed a 1-byte record | Fixed: NRC 0x22 if the gen/ length is not 1 |
+| MINOR-7 | Functional watch IDs unverified on the bike | Documented (known limits, D-040 Q-001 probe) |
+| MINOR-8 | The uptime DID and counters wrap | Documented (known limits) |
+| MINOR-9 | The defs pin is not a tag | Pinned to v0.2.0 before merge |
+
+- safety-reviewer re-review of the fixes: no blocker, no major. Every fix above is confirmed. New findings:
+
+| ID | Finding | Status |
+|---|---|---|
+| MINOR-A | A functional request that arrived while an answer was queued stayed held and ran up to P2\* late | Fixed: dropped and counted; test |
+| MINOR-B | "A dead bus never delivers a stale answer" holds for the glue queue only; the link's accepted frames wait for N_As | Documented; HIL `uds_server_bus_off_recovery` depends on N_As (Ç1) |
+| MINOR-C | The boot grace depends on the client-before-server step order | Documented (integration) |
+
+- Checks after the fixes: see the PR description (ctest, coverage, MISRA, cross builds, SIL).
+
 
 ## Proposed HIL scenarios (moto-hil-bench, once the host schema exists)
 
@@ -257,3 +385,28 @@ No vehicle fact lives there. The positive 0x62 check stays in the generated `veh
     - the ECU is reported absent after `VEHICLE_CL250_ECU_ABSENT_TIMEOUT_MS`
     - while absent only 0x10 03 (every `SESSION_RETRY_INTERVAL_MS`) and 0x3E 80 go out
     - after power-on the session is re-established and every DID is VALID within `SESSION_RETRY_INTERVAL_MS` + 1 s
+- `uds_server_platform_session` (platform bus, UDS server; the SIL `--uds-scenario` script on the bench):
+  - The HIL host is the tester on 0x710 / 0x7DF, and rt-core polls the live ECU model on the vehicle bus at the same time.
+  - Pass when:
+    - every answer's first frame comes within P2 (50 ms)
+    - 0x14 is refused in the default session and accepted in the extended one
+    - functional NRCs 0x11 / 0x12 / 0x31 / 0x7E / 0x7F never appear
+    - the session drops to default within S3 + 1 loop period
+    - no frame appears on the vehicle bus except the client's gen/ requests
+- `uds_server_vehicle_status` (both buses):
+  - Unplug the vehicle DLC for 10 s.
+  - Pass when 0xFD00 reports the ECU absent, U0100-00 is testFailed and confirmed after `ECU_ABSENT_TIMEOUT_MS`, and after reconnecting testFailed clears while confirmed stays until 0x14.
+- `uds_server_no_client`: rt-core boots with the vehicle client failed to open. Pass when 0xFD00 reads NOT_RUNNING at once, and U3000-00 is testFailed within `PLATFORM_UDS_VEHICLE_TESTER_STATUS_MAX_AGE_MS` + one loop.
+- `uds_server_bus_flood_isolation`:
+  - The tester floods 0x710 / 0x7DF at 100 % load and requests segmented 0x22 reads at STmin 0, while rt-core sends 0x020-0x022 E2E frames.
+  - Pass when safety-node sees no E2E timeout or counter jump, and the client's poll schedule is unchanged.
+- `uds_server_port_mapping` (first H7 bring-up):
+  - The platform tester exercises every server service.
+  - Pass when the vehicle bus carries only 29-bit 0x18DA10F1 frames that pass the gate. This catches an FDCAN1/FDCAN2 swap.
+- `uds_server_bus_off_recovery` (needs N_As from the Ç1 FDCAN HAL):
+  - Platform bus-off for 10 s in the extended session.
+  - Pass when, after recovery, no stale answer appears, the session is default, and new requests are answered.
+- `uds_server_dongle_latch` (both buses):
+  - A frame on 0x7DF on the vehicle bus.
+  - Pass when the client latches with `FOREIGN_TESTER`, 0xFD00 reports latched with reason 3, U3000-00 is testFailed, and after 0x14 it is testFailed again within one loop while the client stays silent.
+

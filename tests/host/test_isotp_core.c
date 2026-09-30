@@ -699,6 +699,86 @@ static void test_null_arguments_are_harmless(void)
     TEST_ASSERT_EQUAL_UINT16(0u, isotp_rx_error_count(NULL));
 }
 
+/* ------------------------------------------------------------------------- */
+/* isotp_single_frame (functional addressing, §9.6.2)                         */
+/* ------------------------------------------------------------------------- */
+
+static void test_single_frame_check_accepts_every_valid_sf_dl_at_dlc_8(void)
+{
+    for (uint8_t n = 1u; n <= ISOTP_SF_MAX_LEN; n++) {
+        const uint8_t d[8] = {n, 1, 2, 3, 4, 5, 6, 7};
+        uint8_t len = 0xEEu;
+        TEST_ASSERT_TRUE(isotp_single_frame(d, 8u, &len));
+        TEST_ASSERT_EQUAL_UINT8(n, len);
+    }
+}
+
+static void test_single_frame_check_accepts_a_short_dlc_when_sf_dl_is_dlc_minus_one(void)
+{
+    for (uint8_t dlc = 2u; dlc <= ISOTP_CAN_DL; dlc++) {
+        const uint8_t d[8] = {(uint8_t)(dlc - 1u), 1, 2, 3, 4, 5, 6, 7};
+        uint8_t len = 0u;
+        TEST_ASSERT_TRUE(isotp_single_frame(d, dlc, &len));
+        TEST_ASSERT_EQUAL_UINT8(dlc - 1u, len);
+    }
+}
+
+static void test_single_frame_check_rejects_sf_dl_zero_or_above_seven(void)
+{
+    uint8_t len = 0u;
+    const uint8_t zero[8] = {0x00u, 1, 2, 3, 4, 5, 6, 7};
+    const uint8_t eight[8] = {0x08u, 1, 2, 3, 4, 5, 6, 7};
+    const uint8_t fifteen[8] = {0x0Fu, 1, 2, 3, 4, 5, 6, 7};
+    TEST_ASSERT_FALSE(isotp_single_frame(zero, 8u, &len));
+    TEST_ASSERT_FALSE(isotp_single_frame(eight, 8u, &len));
+    TEST_ASSERT_FALSE(isotp_single_frame(fifteen, 8u, &len));
+}
+
+static void test_single_frame_check_rejects_sf_dl_that_does_not_fit_the_dlc(void)
+{
+    uint8_t len = 0u;
+    for (uint8_t dlc = 2u; dlc <= ISOTP_CAN_DL; dlc++) {
+        const uint8_t d[8] = {dlc, 1, 2, 3, 4, 5, 6, 7}; /* SF_DL == DLC: one byte too many */
+        if (dlc <= ISOTP_SF_MAX_LEN) {
+            TEST_ASSERT_FALSE(isotp_single_frame(d, dlc, &len));
+        }
+    }
+    const uint8_t seven_in_three[8] = {0x07u, 1, 2, 3, 4, 5, 6, 7};
+    TEST_ASSERT_FALSE(isotp_single_frame(seven_in_three, 3u, &len));
+}
+
+static void test_single_frame_check_rejects_other_pci_types(void)
+{
+    uint8_t len = 0u;
+    const uint8_t ff[8] = {0x10u, 0x09u, 1, 2, 3, 4, 5, 6};
+    const uint8_t cf[8] = {0x21u, 1, 2, 3, 4, 5, 6, 7};
+    const uint8_t flow[8] = {0x30u, 0, 0, 0, 0, 0, 0, 0};
+    const uint8_t reserved[8] = {0x41u, 1, 2, 3, 4, 5, 6, 7};
+    TEST_ASSERT_FALSE(isotp_single_frame(ff, 8u, &len));
+    TEST_ASSERT_FALSE(isotp_single_frame(cf, 8u, &len));
+    TEST_ASSERT_FALSE(isotp_single_frame(flow, 8u, &len));
+    TEST_ASSERT_FALSE(isotp_single_frame(reserved, 8u, &len));
+}
+
+static void test_single_frame_check_rejects_bad_dlc_and_null_arguments(void)
+{
+    uint8_t len = 0u;
+    const uint8_t d[16] = {0x01u, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+    TEST_ASSERT_FALSE(isotp_single_frame(d, 0u, &len));
+    TEST_ASSERT_FALSE(isotp_single_frame(d, 1u, &len));
+    TEST_ASSERT_FALSE(isotp_single_frame(d, ISOTP_CAN_DL + 1u, &len));
+    TEST_ASSERT_FALSE(isotp_single_frame(NULL, 8u, &len));
+    TEST_ASSERT_FALSE(isotp_single_frame(d, 8u, NULL));
+}
+
+static void test_single_frame_check_leaves_len_untouched_on_rejection(void)
+{
+    uint8_t len = 0x5Au;
+    const uint8_t zero[8] = {0x00u, 1, 2, 3, 4, 5, 6, 7};
+    TEST_ASSERT_FALSE(isotp_single_frame(zero, 8u, &len));
+    TEST_ASSERT_EQUAL_UINT8(0x5Au, len);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -736,5 +816,12 @@ int main(void)
     RUN_TEST(test_loopback_all_lengths_and_flow_parameters);
     RUN_TEST(test_full_duplex_request_and_response_on_one_link_pair);
     RUN_TEST(test_null_arguments_are_harmless);
+    RUN_TEST(test_single_frame_check_accepts_every_valid_sf_dl_at_dlc_8);
+    RUN_TEST(test_single_frame_check_accepts_a_short_dlc_when_sf_dl_is_dlc_minus_one);
+    RUN_TEST(test_single_frame_check_rejects_sf_dl_zero_or_above_seven);
+    RUN_TEST(test_single_frame_check_rejects_sf_dl_that_does_not_fit_the_dlc);
+    RUN_TEST(test_single_frame_check_rejects_other_pci_types);
+    RUN_TEST(test_single_frame_check_rejects_bad_dlc_and_null_arguments);
+    RUN_TEST(test_single_frame_check_leaves_len_untouched_on_rejection);
     return UNITY_END();
 }
