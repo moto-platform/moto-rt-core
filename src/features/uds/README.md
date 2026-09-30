@@ -221,13 +221,11 @@ No vehicle fact lives there. The positive 0x62 check stays in the generated `veh
     - MINOR-1: presence did not age out while latched. Fixed: the absence check runs before the latch return; tested.
     - MINOR-2, MINOR-3, MINOR-4 (functional addressing, `not_sent` schedule, H7 filters): documented under known limits.
 
-**Open items (Ç3, before the PR is merged).**
-1. Done: the counter-wrap SIL test (it catches the mutant without `vehicle_signals_expire()`), m8, and the re-run of every check (see above).
-2. Done: the safety-reviewer and vss-schema-guardian re-reviews (see above).
-3. PR moto-platform/moto-rt-core#5. It must note that connectivity-node's poller has to be off while rt-core polls (D-021). Merge only after CI is green and the user approves, then run `/handoff`.
-4. Later:
-   - move the codes in `uds_iso14229.h` into gen/ (a defs `/signal-change`)
-   - N_As and bus-off handling with the H7 FDCAN HAL (Ç1)
+**Follow-ups.** The client is merged (rt-core#5 and #6). What remains:
+- Move the codes in `uds_iso14229.h` into gen/ with a defs `/signal-change`, then delete the header (D-039).
+- Q-021: functional request IDs in defs, so the foreign-tester watch covers generic OBD dongles.
+- N_As, bus-off backoff and FDCAN filters that pass both request IDs: the H7 HAL (Ç1).
+- A platform-bus republisher that reads `services/vehicle_signals` and maps NONE/STALE to INVALID (speed E2E to safety-node, D-021).
 
 ## Proposed HIL scenarios (moto-hil-bench, once the host schema exists)
 
