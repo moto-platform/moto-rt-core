@@ -936,6 +936,32 @@ static void test_a_blocked_tx_queue_drops_the_answer_after_p2_star_but_s3_still_
     TEST_ASSERT_EQUAL_HEX8(UDS_SESSION_DEFAULT, got[3]);
 }
 
+/* Safety re-review MINOR-A: a functional request that arrives while an answer waits for
+ * the link is dropped and counted, never run seconds later. */
+static void test_a_functional_request_while_an_answer_is_queued_is_dropped_not_run_late(void)
+{
+    vbus_set_tx_blocked(&bus_platform, node_dut, true);
+    const uint8_t a[] = {UDS_SID_READ_DATA_BY_IDENTIFIER,
+                         DID_BYTES(PLATFORM_UDS_DID_ACTIVE_DIAGNOSTIC_SESSION)};
+    const uint8_t b[] = {UDS_SID_TESTER_PRESENT, UDS_TESTER_PRESENT_ZERO_SUBFUNCTION};
+    const uint8_t f[] = {UDS_SID_DIAGNOSTIC_SESSION_CONTROL, UDS_SESSION_EXTENDED};
+    have_got = false;
+    TEST_ASSERT_EQUAL(ISOTP_OK, isotp_send(&tester, a, sizeof a));
+    pump(5u); /* A's answer sits in the link */
+    TEST_ASSERT_EQUAL(ISOTP_OK, isotp_send(&tester, b, sizeof b));
+    pump(5u); /* B's answer waits in the glue queue */
+    const uint32_t dropped = uds_server_glue_stats(&server)->functional_dropped;
+    const uint32_t taken = uds_server_glue_stats(&server)->functional_taken;
+    send_functional_sf(f, (uint8_t)sizeof f);
+    pump(3000u);
+    TEST_ASSERT_EQUAL_UINT32(dropped + 1u, uds_server_glue_stats(&server)->functional_dropped);
+    vbus_set_tx_blocked(&bus_platform, node_dut, false);
+    pump(PLATFORM_UDS_P2_STAR_SERVER_MAX_MS);
+    TEST_ASSERT_EQUAL_UINT32(taken, uds_server_glue_stats(&server)->functional_taken);
+    TEST_ASSERT_EQUAL_UINT8(UDS_SESSION_DEFAULT, uds_server_session(&server));
+    extra_messages = 0u; /* A's and B's late answers are not under test here */
+}
+
 static void test_functional_single_frame_with_a_short_dlc_is_accepted(void)
 {
     const uint8_t sf[4] = {3u, UDS_SID_READ_DATA_BY_IDENTIFIER,
@@ -1117,6 +1143,7 @@ int main(void)
     RUN_TEST(test_without_a_client_the_tester_status_reads_not_running_and_the_dtc_fails);
     RUN_TEST(test_a_status_that_stops_being_written_goes_stale_in_the_did_and_the_dtc);
     RUN_TEST(test_a_blocked_tx_queue_drops_the_answer_after_p2_star_but_s3_still_runs);
+    RUN_TEST(test_a_functional_request_while_an_answer_is_queued_is_dropped_not_run_late);
     RUN_TEST(test_functional_single_frame_with_a_short_dlc_is_accepted);
     RUN_TEST(test_functional_frame_with_dlc_zero_is_dropped);
     RUN_TEST(test_an_extended_format_frame_on_the_functional_id_is_not_routed_or_answered);

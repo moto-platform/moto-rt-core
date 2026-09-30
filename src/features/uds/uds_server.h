@@ -28,8 +28,10 @@
  *
  * Queued answers: an answer the link cannot take yet (ISOTP_ERR_BUSY) is retried on the
  * next pass; S3 keeps running meanwhile. It is dropped (tx_expired) once it is
- * P2*server old, so a dead bus never delivers a stale answer later. Any other link
- * error drops it at once (tx_failed).
+ * P2*server old, so the glue never delivers a stale answer later. Any other link
+ * error drops it at once (tx_failed). An answer the link has already accepted can
+ * still go out late after a bus stall until N_As exists (Ç1 FDCAN HAL). A functional
+ * request that arrives while an answer is queued is dropped, never run late.
  *
  * Every pass also runs diag_supervise(): a missing or stale vehicle-tester status fails
  * VEHICLE_TESTER_LATCHED and reads NOT_RUNNING in 0xFD00 (fail-safe, D-040).
@@ -75,8 +77,9 @@ typedef struct {
 } uds_server_t;
 
 /* Opens the physical link on CAN_PORT_PLATFORM and registers the functional receiver.
- * can_if_init() and diag_init() must have run. ISOTP_ERR_ARG if a receiver cannot be
- * registered (the server then stays closed), ISOTP_ERR_BUSY if already open. */
+ * can_if_init() must have run; call diag_init() just before the main loop. ISOTP_ERR_ARG
+ * if a receiver cannot be registered (the server then stays closed), ISOTP_ERR_BUSY if
+ * already open. */
 isotp_status_t uds_server_open(uds_server_t* server);
 
 void uds_server_step(uds_server_t* server);

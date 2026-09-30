@@ -218,7 +218,13 @@ static void take_request(uds_server_t* server, uint32_t now)
     isotp_n_result_t res = ISOTP_N_OK;
     uint16_t len = 0u;
     if (server->rsp_len != 0u) {
-        return; /* the answer to the last request is still queued */
+        /* The answer to the last request is still queued. A physical request waits in
+         * the link; a functional one is dropped, never run late (arbitration rule). */
+        if (server->func_len != 0u) {
+            server->stats.functional_dropped++;
+            server->func_len = 0u;
+        }
+        return;
     }
     if (isotp_link_take_rx(&server->link, &res, &len)) {
         if (res == ISOTP_N_OK) {

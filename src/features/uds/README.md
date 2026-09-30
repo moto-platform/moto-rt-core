@@ -279,7 +279,9 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
 - An empty request, one longer than the receive buffer, or a failed reception (N_Cr, wrong SN) gets no answer and is counted.
 - **Queued answer.**
   - While the link is busy (`ISOTP_ERR_BUSY`), the answer stays queued and is retried every pass (`tx_busy`). S3 keeps running meanwhile (`uds_server_core_tick()`).
-  - It is dropped once it is P2\*server old (`tx_expired`), so a dead bus never delivers a stale answer later.
+  - It is dropped once it is P2\*server old (`tx_expired`), so the glue never delivers a stale answer later.
+  - An answer the link already accepted (frames in the core or the mailbox) can still go out late after a bus stall until N_As exists (Ç1 FDCAN HAL; safety re-review MINOR-B).
+  - A functional request that arrives while an answer is queued is dropped and counted, never run late (safety re-review MINOR-A).
   - Any other link error drops it at once (`tx_failed`), as does a failed N_USData.confirm.
 - **Vehicle-tester status is fail-safe** (safety review MAJOR-1). `services/diag` stamps the client's status. If none has come since boot, or the last one is older than `PLATFORM_UDS_VEHICLE_TESTER_STATUS_MAX_AGE_MS` (500 ms):
   - 0xFD00 reads FAULT = NOT_RUNNING (4) with every flag clear.
@@ -300,7 +302,10 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
 - No heap. Every loop is bounded by a gen/ table size or the request length.
 
 **Integration.**
-- Call `diag_init(now)` before `uds_client_open()` / `uds_server_open()`, then `uds_server_step()` once per pass after `can_if_dispatch(CAN_PORT_PLATFORM, ...)`.
+- Call `diag_init(now)` as the last setup step before the main loop (the opens do not use `diag`). Then, every pass, run `uds_client_step()` **before** `uds_server_step()`, and `uds_server_step()` after `can_if_dispatch(CAN_PORT_PLATFORM, ...)`.
+  - Why the order matters (safety re-review MINOR-C): the client's first status must arrive before `diag_supervise()` runs.
+  - If the server ran first and more than `PLATFORM_UDS_VEHICLE_TESTER_STATUS_MAX_AGE_MS` passed between `diag_init()` and the first pass, U3000-00 would be confirmed at every boot.
+  - That error is in the fail-safe direction, but it is a false fault.
 - **Ç1 requirement, one comms task** (safety review MINOR-3):
   - `can_if`, `services/diag`, `services/vehicle_signals`, `uds_client` and `uds_server` run in the same FreeRTOS task.
   - Every `can_if_register_rx()` happens before the scheduler starts.
@@ -337,7 +342,15 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
 | MINOR-6 | 0xF186 assumed a 1-byte record | Fixed: NRC 0x22 if the gen/ length is not 1 |
 | MINOR-7 | Functional watch IDs unverified on the bike | Documented (known limits, D-040 Q-001 probe) |
 | MINOR-8 | The uptime DID and counters wrap | Documented (known limits) |
-| MINOR-9 | The defs pin is not a tag | Pin moves to v0.2.0 before merge |
+| MINOR-9 | The defs pin is not a tag | Pinned to v0.2.0 before merge |
+
+- safety-reviewer re-review of the fixes: no blocker, no major. Every fix above is confirmed. New findings:
+
+| ID | Finding | Status |
+|---|---|---|
+| MINOR-A | A functional request that arrived while an answer was queued stayed held and ran up to P2\* late | Fixed: dropped and counted; test |
+| MINOR-B | "A dead bus never delivers a stale answer" holds for the glue queue only; the link's accepted frames wait for N_As | Documented; HIL `uds_server_bus_off_recovery` depends on N_As (Ç1) |
+| MINOR-C | The boot grace depends on the client-before-server step order | Documented (integration) |
 
 - Checks after the fixes: see the PR description (ctest, coverage, MISRA, cross builds, SIL).
 
@@ -390,7 +403,7 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
 - `uds_server_port_mapping` (first H7 bring-up):
   - The platform tester exercises every server service.
   - Pass when the vehicle bus carries only 29-bit 0x18DA10F1 frames that pass the gate. This catches an FDCAN1/FDCAN2 swap.
-- `uds_server_bus_off_recovery`:
+- `uds_server_bus_off_recovery` (needs N_As from the Ç1 FDCAN HAL):
   - Platform bus-off for 10 s in the extended session.
   - Pass when, after recovery, no stale answer appears, the session is default, and new requests are answered.
 - `uds_server_dongle_latch` (both buses):
