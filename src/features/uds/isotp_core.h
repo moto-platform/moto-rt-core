@@ -175,6 +175,12 @@ bool isotp_tx_idle(const isotp_link_t* link);
  * to 1 ms, reserved values treated as 0x7F. Exposed for tests. */
 uint32_t isotp_st_min_to_ms(uint8_t st_min);
 
+/* Single Frame check for a receiver outside a link (e.g. functional addressing, which
+ * carries Single Frames only, §9.6.2): true if `data` (dlc bytes) is a Single Frame with
+ * SF_DL 1..ISOTP_SF_MAX_LEN that fits the DLC; *len is then SF_DL and the payload
+ * starts at data[1]. */
+bool isotp_single_frame(const uint8_t* data, uint8_t dlc, uint8_t* len);
+
 #ifdef __cplusplus
 }
 #endif

@@ -15,13 +15,18 @@
  *   - the link refuses a request (D-020 request gate or Single Frame length): a bug,
  *     since the core builds its requests from gen/            -> UDS_CLIENT_FAULT_GATE
  *   - the can_if vehicle guard refuses any frame (counter up) -> UDS_CLIENT_FAULT_GUARD
- *   - a frame appears on the ECU request IDs (29-bit, or the 11-bit fallback): our own
- *     frames are never received back, so it is a second tester (D-021)
+ *   - a frame appears on the ECU request IDs (29-bit, or the 11-bit fallback) or on the
+ *     OBD functional request IDs (gen/ functional watch, Q-021/D-040): our own frames
+ *     are never received back, so it is a second tester (D-021)
  *                                                             -> UDS_CLIENT_FAULT_FOREIGN_TESTER
  * Not a fault: a request the link cannot take because it is busy (dropped, retried on
  * schedule; the client waits for isotp_link_tx_ready() anyway), and the FC.CTS the link
  * drops for a segmented response (Q-020).
  * The values then go STALE in services/vehicle_signals; it expires them every step.
+ *
+ * Diagnostics (D-040): every step reports the DTCs VEHICLE_ECU_COMM_LOST and
+ * VEHICLE_TESTER_LATCHED (level-triggered) and the 0xFD00 status to services/diag, which
+ * the platform UDS server reads. The server never includes this header.
  *
  * Republishing the values on the platform bus is not part of this module: readers use
  * services/vehicle_signals.h.
@@ -59,11 +64,13 @@ typedef struct {
     uint32_t guard_refused_seen;
     uint32_t foreign_seen;
     uds_client_fault_t fault;
+    uint32_t open_ms;
+    bool absence_armed; /* ECU_ABSENT_TIMEOUT_MS since open: absence is a DTC */
     bool open;
 } uds_client_t;
 
 /* Opens the vehicle link (isotp_link_open_vehicle_cl250), registers the foreign-tester
- * watch on both ECU request IDs and resets the core. can_if_init() must have run.
+ * watch on both ECU request IDs and the functional watch IDs, and resets the core. can_if_init() must have run.
  * Returns the link's status, or ISOTP_ERR_ARG if the watch cannot be registered (the
  * client then stays closed: it never polls without the watch). */
 isotp_status_t uds_client_open(uds_client_t* client);

@@ -23,6 +23,9 @@ moto_host_test(test_isotp_link moto_rtcore_fw moto_rtcore_sim moto_rtcore_hal_ho
 moto_host_test(test_uds_client_core)
 moto_host_test(test_vehicle_signals moto_rtcore_fw)
 moto_host_test(test_uds_client moto_rtcore_fw moto_rtcore_sim moto_rtcore_hal_host)
+moto_host_test(test_uds_server_core)
+moto_host_test(test_diag moto_rtcore_fw)
+moto_host_test(test_uds_server moto_rtcore_fw moto_rtcore_sim moto_rtcore_hal_host)
 
 # SocketCAN backend: Linux only; skips (exit 77) when no vcan0 interface exists.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -33,3 +36,8 @@ endif()
 # SIL smoke: the host program against the simulated ECU, real time, 2 s.
 add_test(NAME sil_moto_rtcore_host_demo
          COMMAND moto_rtcore_host --duration-ms 2000 --min-responses 20 --quiet)
+
+# SIL: the UDS server on the platform bus, driven end to end by the scripted tester
+# (session, multi-frame reads, DTCs, functional requests, P2 check, S3 expiry; ~6 s).
+add_test(NAME sil_moto_rtcore_host_uds_server
+         COMMAND moto_rtcore_host --uds-scenario --quiet)

@@ -12,14 +12,24 @@
  * round-robin into services/vehicle_signals. Every request passes the generated D-020
  * gates and the can_if guard. Once a second it prints the signal table.
  *
+ * The platform port is always an in-process bus. rt-core's UDS server (features/uds/
+ * uds_server, Ç3, D-040) answers there on the gen/ physical and functional IDs; it never
+ * touches the vehicle port. With --uds-scenario a scripted tester (app/host/sim_tester)
+ * runs a full diagnostic session against it and the program exits when it is done.
+ *
  * Exit code with --duration-ms: 0 if at least --min-responses DID reads were decoded and
- * the client did not latch as failed.
+ * the client did not latch as failed. With --uds-scenario: 0 if every scenario step
+ * passed and the client did not latch.
  */
 #include "app/host/sim_ecu.h"
+#include "app/host/sim_tester.h"
 #include "features/uds/uds_client.h"
+#include "features/uds/uds_server.h"
+#include "platform_uds.h"
 #include "hal/host/can_port_host.h"
 #include "hal/host/hal_time_host.h"
 #include "services/can_if.h"
+#include "services/diag.h"
 #include "services/timebase.h"
 #include "services/vehicle_signals.h"
 #include "vehicle_cl250.h"
@@ -48,13 +58,14 @@ typedef struct {
     uint32_t min_responses;
     int quiet;
     int allow_real_bus;
+    int uds_scenario;
 } options_t;
 
 static void usage(void)
 {
     fprintf(stderr,
             "usage: moto_rtcore_host [--vcan IF] [--duration-ms N] [--min-responses N]\n"
-            "                        [--quiet] [--allow-real-bus]\n");
+            "                        [--quiet] [--allow-real-bus] [--uds-scenario]\n");
 }
 
 static int parse_u32(const char* s, uint32_t* out)
@@ -75,6 +86,7 @@ static int parse_args(int argc, char** argv, options_t* o)
     o->min_responses = 1u;
     o->quiet = 0;
     o->allow_real_bus = 0;
+    o->uds_scenario = 0;
     for (int i = 1; i < argc; i++) {
         const char* a = argv[i];
         const char* v = (i + 1 < argc) ? argv[i + 1] : NULL;
@@ -90,6 +102,8 @@ static int parse_args(int argc, char** argv, options_t* o)
             o->quiet = 1;
         } else if (strcmp(a, "--allow-real-bus") == 0) {
             o->allow_real_bus = 1;
+        } else if (strcmp(a, "--uds-scenario") == 0) {
+            o->uds_scenario = 1;
         } else {
             return 0;
         }
@@ -98,8 +112,11 @@ static int parse_args(int argc, char** argv, options_t* o)
 }
 
 static vbus_t bus;
+static vbus_t platform_bus;
 static sim_ecu_t ecu;
+static sim_tester_t tester;
 static uds_client_t client;
+static uds_server_t server;
 
 static const char* state_name(vehicle_signal_state_t st)
 {
@@ -159,10 +176,24 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    uint8_t platform_node = 0u;
+    vbus_init(&platform_bus);
+    if (!vbus_attach(&platform_bus, &platform_node) ||
+        !can_port_host_bind_vbus(CAN_PORT_PLATFORM, &platform_bus, platform_node) ||
+        (opt.uds_scenario && !sim_tester_init(&tester, &platform_bus, timebase_now_ms()))) {
+        fprintf(stderr, "platform bus setup failed\n");
+        return 1;
+    }
+
     can_if_init();
     vehicle_signals_init();
+    diag_init(timebase_now_ms());
     if (uds_client_open(&client) != ISOTP_OK) {
         fprintf(stderr, "vehicle ISO-TP link setup failed\n");
+        return 1;
+    }
+    if (uds_server_open(&server) != ISOTP_OK) {
+        fprintf(stderr, "platform UDS server setup failed\n");
         return 1;
     }
     printf("moto_rtcore_host: UDS client 0x%08X -> 0x%08X on %s\n",
@@ -185,6 +216,16 @@ int main(int argc, char** argv)
         }
         uds_client_step(&client);
 
+        (void)can_if_dispatch(CAN_PORT_PLATFORM, RX_PER_PASS);
+        if (opt.uds_scenario) {
+            sim_tester_step(&tester, now);
+            if (sim_tester_finished(&tester)) {
+                break;
+            }
+            (void)can_if_dispatch(CAN_PORT_PLATFORM, RX_PER_PASS);
+        }
+        uds_server_step(&server);
+
         if (!opt.quiet && timebase_expired(now, printed_at, PRINT_PERIOD_MS)) {
             print_signals(now, start);
             printed_at = now;
@@ -201,7 +242,21 @@ int main(int argc, char** argv)
            (unsigned)isotp_link_tx_error_count(&client.link),
            (unsigned)can_if_tx_refused_count(CAN_PORT_VEHICLE), (int)uds_client_fault(&client),
            uds_client_failed(&client) ? ", CLIENT FAILED" : "");
+    const uds_server_stats_t* ss = uds_server_stats(&server);
+    printf("moto_rtcore_host: UDS server %u requests, %u positive, %u negative, %u suppressed, "
+           "%u S3 timeouts\n",
+           (unsigned)ss->requests, (unsigned)ss->positive, (unsigned)ss->negative,
+           (unsigned)ss->suppressed, (unsigned)ss->s3_timeouts);
     can_port_host_unbind_all();
+    if (opt.uds_scenario) {
+        const int ok = sim_tester_passed(&tester) && !uds_client_failed(&client);
+        printf("moto_rtcore_host: UDS scenario %u/%u steps, worst first-frame latency %u ms "
+               "(P2 %u ms): %s%s%s\n",
+               (unsigned)tester.steps_passed, (unsigned)sim_tester_step_count(),
+               (unsigned)tester.max_latency_ms, (unsigned)PLATFORM_UDS_P2_SERVER_MAX_MS,
+               ok ? "PASS" : "FAIL", (tester.reason[0] != '\0') ? ": " : "", tester.reason);
+        return ok ? 0 : 1;
+    }
     if (opt.duration_ms == 0u) {
         return 0;
     }

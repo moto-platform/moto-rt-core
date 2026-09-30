@@ -9,13 +9,13 @@
  * Section numbers refer to ISO 14229-1:2020. No requirement IDs yet (Q-006).
  */
 #include "features/uds/uds_client_core.h"
-#include "features/uds/uds_iso14229.h"
+#include "uds_iso14229.h"
 #include "vehicle_cl250.h"
 
 #include <string.h>
 #include <unity.h>
 
-#define POS_OFFSET 0x40u               /* positive response SID = request SID + 0x40 */
+#define POS_OFFSET UDS_POSITIVE_RESPONSE_OFFSET
 #define HOLD_MS ISOTP_DEFAULT_N_BS_MS  /* the vehicle link's N_Bs (ISO default) */
 #define LOG_MAX 4096u
 

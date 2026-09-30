@@ -268,6 +268,20 @@ uint32_t isotp_st_min_to_ms(uint8_t st_min)
     return ST_MIN_RESERVED_MS;
 }
 
+bool isotp_single_frame(const uint8_t* data, uint8_t dlc, uint8_t* len)
+{
+    if ((data == NULL) || (len == NULL) || (dlc < 2u) || (dlc > ISOTP_CAN_DL) ||
+        ((uint8_t)(data[0] >> 4u) != PCI_SF)) {
+        return false;
+    }
+    const uint8_t n = (uint8_t)(data[0] & 0x0Fu);
+    if ((n == 0u) || (n > ISOTP_SF_MAX_LEN) || (n >= dlc)) {
+        return false;
+    }
+    *len = n;
+    return true;
+}
+
 void isotp_default_config(isotp_config_t* cfg)
 {
     if (cfg == NULL) {
