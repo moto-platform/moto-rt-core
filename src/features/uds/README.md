@@ -175,6 +175,9 @@ No vehicle fact lives there. The positive 0x62 check stays in the generated `veh
   - A First Frame with FF_DL above `UDS_CLIENT_RX_BUF` (64) is dropped silently by the core. The request ends by timeout and counts towards the skip limit. No CL250 DID does this.
   - Each segmented response stops polling for about N_Cr + N_Bs (about 2 s), so every DID goes STALE. This is the cost of the Q-020 deferral.
   - A DID answered with a permanent NRC (for example 0x31) is polled at its full rate. This is legacy behaviour, and the schedule bounds it.
+  - The foreign-tester watch covers the two physical request IDs from gen/. A generic OBD dongle that uses functional addressing (0x7DF, or 0x18DB33F1 for 29-bit) is not seen. Those IDs belong in defs (`/signal-change`) before rt-core can watch them.
+  - `uds_client_core_not_sent()` clears only the pending slot. The dropped request's schedule stays advanced, so a dropped tester present waits one full period. The path is defensive: `tx_ready` already requires the link to be idle.
+  - On the H7, the FDCAN acceptance filters must pass `VEHICLE_CL250_REQUEST_ID` and `VEHICLE_CL250_FALLBACK_REQUEST_ID`. Otherwise the foreign-tester watch is deaf. This is an Ç1 HAL requirement, checked on target by `uds_client_foreign_tester`.
   - N_As (a TX that is never confirmed) and bus-off recovery (`VEHICLE_CL250_BUS_OFF_BACKOFF_*`, D-030's latch after 5 bus-offs) come with the H7 FDCAN HAL (Ç1).
 - **Counters** (`uds_client_stats()`): requests, reads, timeouts, NRC, response pending, unavailable, skips, unexpected, session starts and losses.
 
@@ -212,12 +215,16 @@ No vehicle fact lives there. The positive 0x62 check stays in the generated `veh
   - cppcheck and MISRA clean
   - coverage 98.2 % lines / 90.0 % branches; only the defensive GATE/BUSY branches in `uds_client.c` are not covered
   - both M7 cross builds clean
-- The re-review after the fixes is still to run.
+- Re-review after the fixes (2026-09-30):
+  - vss-schema-guardian: CLEAN.
+  - safety-reviewer: every fix confirmed, no blocker. Four new MINOR findings:
+    - MINOR-1: presence did not age out while latched. Fixed: the absence check runs before the latch return; tested.
+    - MINOR-2, MINOR-3, MINOR-4 (functional addressing, `not_sent` schedule, H7 filters): documented under known limits.
 
 **Open items (Ç3, before the PR is merged).**
 1. Done: the counter-wrap SIL test (it catches the mutant without `vehicle_signals_expire()`), m8, and the re-run of every check (see above).
-2. Re-run safety-reviewer and vss-schema-guardian on the whole branch.
-3. Open the PR. It must note that connectivity-node's poller has to be off while rt-core polls (D-021). Merge only after CI is green and the user approves, then run `/handoff`.
+2. Done: the safety-reviewer and vss-schema-guardian re-reviews (see above).
+3. PR moto-platform/moto-rt-core#5. It must note that connectivity-node's poller has to be off while rt-core polls (D-021). Merge only after CI is green and the user approves, then run `/handoff`.
 4. Later:
    - move the codes in `uds_iso14229.h` into gen/ (a defs `/signal-change`)
    - N_As and bus-off handling with the H7 FDCAN HAL (Ç1)

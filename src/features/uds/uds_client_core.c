@@ -98,12 +98,12 @@ bool uds_client_core_poll(uds_client_core_t* c, uint32_t now_ms, bool rx_busy, b
         return false;
     }
     *len = 0u;
-    if (c->failed) {
-        return false;
-    }
     if (c->ecu_seen && !uds_client_core_ecu_present(c, now_ms)) {
         c->ecu_seen = false; /* absent: presence needs a new answer, also across a wrap */
         lose_session(c);     /* an ECU that came back is in its default session */
+    }
+    if (c->failed) {
+        return false; /* presence still ages out above, also while latched */
     }
 
     if (c->pending != UDS_CLIENT_REQ_NONE) {
