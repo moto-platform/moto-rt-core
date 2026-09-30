@@ -657,6 +657,8 @@ static void test_latch_stops_the_core_until_init(void)
     for (uint32_t t = 0u; t < 20000u; t += 7u) {
         TEST_ASSERT_EQUAL(K_NONE, poll_at(t));
     }
+    /* Presence still ages out while latched, so the 2^32 wrap cannot bring it back. */
+    TEST_ASSERT_FALSE(uds_client_core_ecu_present(&c, 0u));
     uds_client_core_init(&c, HOLD_MS); /* only init clears it */
     TEST_ASSERT_FALSE(uds_client_core_failed(&c));
 }
