@@ -43,7 +43,7 @@ CMake + STM32CubeMX (HAL) + arm-none-eabi-gcc (D-007). RTOS: FreeRTOS/CMSIS-RTOS
 - `cubemx/` is generated code — only write into `USER CODE` blocks.
 - Pure logic (EKF, ISO-TP, UDS state machine, E2E, dyno) is written without a HAL dependency and tested under `tests/host/` with Unity. This plus Renode is the path forward while there's no H7 hardware.
 - Skeleton: `/repo-bootstrap`; new feature: `/feature-module`.
-- Commands (CMake >= 3.20 + Ninja; `git submodule update --init` first, defs pinned to `v0.1.0`):
+- Commands (CMake >= 3.20 + Ninja; `git submodule update --init` first, defs pinned to `v0.2.0`):
   - `cmake --preset host-tests && cmake --build --preset host-tests && ctest --preset host-tests` (Unity, ASan + UBSan, plus the 2 s SIL smoke run)
   - SIL program (D-034): `build/host-tests/src/moto_rtcore_host` (in-process bus + simulated CL250 ECU); on Linux `--vcan vcan0`
   - `cmake --preset target-m7-debug && cmake --build --preset target-m7-debug` (also `target-m7-release`); `-DARM_TOOLCHAIN_DIR=...` if `arm-none-eabi-gcc` is not on PATH
