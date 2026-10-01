@@ -223,7 +223,7 @@ void uds_client_core_not_sent(uds_client_core_t* c)
             c->did[c->pending_idx].requested = c->prev_requested;
         }
         if (c->stats.requests < UINT32_MAX) {
-            c->stats.requests--; /* a saturated counter stays saturated */
+            c->stats.requests--; /* saturated stays saturated (may over-count by one) */
         }
         c->pending = UDS_CLIENT_REQ_NONE; /* tester present never held it */
         c->last = UDS_CLIENT_LAST_NONE;
@@ -235,6 +235,7 @@ void uds_client_core_latch(uds_client_core_t* c)
     if (c != NULL) {
         c->failed = true;
         c->pending = UDS_CLIENT_REQ_NONE;
+        c->last = UDS_CLIENT_LAST_NONE; /* nothing left for not_sent to undo */
         lose_session(c);
     }
 }

@@ -151,7 +151,7 @@ void uds_client_step(uds_client_t* client)
                              isotp_link_tx_ready(&client->link), req, &len)) {
         const isotp_status_t st = isotp_link_send(&client->link, req, len);
         if (st == ISOTP_ERR_BUSY) {
-            uds_client_core_not_sent(&client->core); /* a read is due again at once */
+            uds_client_core_not_sent(&client->core); /* its schedule is restored */
         } else if (st != ISOTP_OK) {
             latch(client, UDS_CLIENT_FAULT_GATE); /* D-020 gate or length: a bug */
         } else {

@@ -1289,6 +1289,55 @@ static void test_a_request_the_link_could_not_take_is_dropped_without_a_latch(vo
     TEST_ASSERT_EQUAL_UINT32(after, stats()->requests);
 }
 
+/* A read times out and, in the same poll, the next DID's read is refused: the timeout
+ * stands, and only the refused read is undone. */
+static void test_not_sent_after_a_timeout_in_the_same_poll_keeps_the_timeout(void)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t rpm = VEHICLE_CL250_IDX_ENGINE_SPEED;
+    const uint32_t base = VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS;
+    bring_up(0u);
+    all_requested_at(0u);
+    c.did[speed].requested = false;
+    TEST_ASSERT_EQUAL(K_READ, poll_at(0u));
+    TEST_ASSERT_EQUAL_UINT32(speed, req_idx());
+    all_requested_at(base);
+    c.did[speed].last_request_ms = 0u;
+    c.did[rpm].last_request_ms = 7u; /* due at base, with an earlier schedule */
+    TEST_ASSERT_EQUAL(K_READ, poll_skip_tp(base));
+    TEST_ASSERT_EQUAL_UINT32(rpm, req_idx());
+    uds_client_core_not_sent(&c);
+    TEST_ASSERT_EQUAL_UINT32(base, c.did[speed].last_request_ms);
+    TEST_ASSERT_EQUAL_UINT8(1u, c.did[speed].consecutive_timeouts);
+    TEST_ASSERT_EQUAL_UINT32(7u, c.did[rpm].last_request_ms);
+}
+
+static void test_a_refused_session_retry_keeps_the_earlier_attempt(void)
+{
+    const uint32_t retry = VEHICLE_CL250_SESSION_RETRY_INTERVAL_MS;
+    uds_client_core_init(&c, HOLD_MS);
+    TEST_ASSERT_EQUAL(K_SESSION, poll_at(0u));
+    nrc(1u, VEHICLE_CL250_SESSION_SID, 0x22u); /* conditionsNotCorrect: still down */
+    TEST_ASSERT_EQUAL(K_SESSION, poll_skip_tp(retry));
+    uds_client_core_not_sent(&c);
+    TEST_ASSERT_TRUE(c.session_tried);
+    TEST_ASSERT_EQUAL_UINT32(0u, c.session_tried_ms); /* due again at once, not at 2x */
+    TEST_ASSERT_EQUAL(K_SESSION, poll_skip_tp(retry + 1u));
+}
+
+static void test_not_sent_after_a_latch_does_nothing(void)
+{
+    bring_up(0u);
+    TEST_ASSERT_EQUAL(K_READ, poll_at(0u));
+    const uint32_t idx = req_idx();
+    const uint32_t sent = stats()->requests;
+    uds_client_core_latch(&c);
+    uds_client_core_not_sent(&c);
+    TEST_ASSERT_EQUAL_UINT32(sent, stats()->requests);
+    TEST_ASSERT_EQUAL_UINT32(0u, c.did[idx].last_request_ms);
+    TEST_ASSERT_TRUE(c.did[idx].requested);
+}
+
 /* E-6 n2: a dropped tester present keeps its period, like a read (m7). */
 static void test_a_tester_present_the_link_could_not_take_is_due_again_at_once(void)
 {
@@ -1426,6 +1475,9 @@ int main(void)
     RUN_TEST(test_a_request_the_link_could_not_take_is_dropped_without_a_latch);
     RUN_TEST(test_a_tester_present_the_link_could_not_take_is_due_again_at_once);
     RUN_TEST(test_a_session_request_the_link_could_not_take_is_retried_at_once);
+    RUN_TEST(test_not_sent_after_a_timeout_in_the_same_poll_keeps_the_timeout);
+    RUN_TEST(test_a_refused_session_retry_keeps_the_earlier_attempt);
+    RUN_TEST(test_not_sent_after_a_latch_does_nothing);
     RUN_TEST(test_ecu_presence_needs_a_new_answer_after_absence);
     RUN_TEST(test_schedule_is_wrap_safe);
     RUN_TEST(test_null_arguments_are_harmless);
