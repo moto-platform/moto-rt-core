@@ -7,7 +7,10 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-latest
+    # Pinned, like the cppcheck cache key below. A normal run takes about 1 min; one apt
+    # hang held "Install toolchains" for 16 min, so the job and that step are bounded.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       # moto-vehicle-defs is public (D-033), so the submodule needs no extra secret.
       - uses: actions/checkout@v4
@@ -23,11 +26,42 @@ jobs:
           echo "defs pin: $tag"
 
       - name: Install toolchains
+        timeout-minutes: 10
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ninja-build gcc-arm-none-eabi libnewlib-arm-none-eabi cppcheck
+          sudo apt-get install -y --no-install-recommends ninja-build gcc-arm-none-eabi libnewlib-arm-none-eabi
           cmake --version | head -1
           arm-none-eabi-gcc --version | head -1
+
+      # The blocking MISRA step needs a fixed cppcheck: Ubuntu's apt cppcheck (2.13) misses
+      # findings that 2.22 reports (15.6 on misra/canary.c). Same build as moto-vehicle-defs.
+      - name: Restore cppcheck 2.22.0
+        id: cppcheck
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/cppcheck
+          key: cppcheck-2.22.0-ubuntu-24.04
+
+      - name: Build cppcheck 2.22.0
+        if: steps.cppcheck.outputs.cache-hit != 'true'
+        timeout-minutes: 10
+        run: |
+          git clone --quiet --depth 1 --branch 2.22.0 https://github.com/danmar/cppcheck.git "$RUNNER_TEMP/cppcheck-src"
+          cmake -S "$RUNNER_TEMP/cppcheck-src" -B "$RUNNER_TEMP/cppcheck-build" -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$RUNNER_TEMP/cppcheck-build" -j "$(nproc)"
+          cp -r "$RUNNER_TEMP/cppcheck-build/bin" ~/cppcheck
+
+      - name: Save cppcheck 2.22.0
+        if: steps.cppcheck.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/cppcheck
+          key: cppcheck-2.22.0-ubuntu-24.04
+
+      - name: Use cppcheck 2.22.0
+        run: |
+          echo "$HOME/cppcheck" >> "$GITHUB_PATH"
+          "$HOME/cppcheck/cppcheck" --version
 
       # Best effort: the SocketCAN backend test skips (ctest exit 77) without vcan0.
       - name: Virtual CAN interface vcan0
@@ -94,6 +128,12 @@ jobs:
       # target firmware and is left out.
       - name: Static analysis (cppcheck style + MISRA C:2012, blocking)
         run: |
+          # Canary: a missing or broken addon must not pass as a clean run.
+          out=$(cppcheck --std=c11 --enable=style --addon=misra --quiet --suppress=missingIncludeSystem \
+            --template='{id}' misra/canary.c 2>&1)
+          for id in 10.8 15.6 17.7; do
+            echo "$out" | grep -qx "misra-c2012-$id" || { echo "::error::the MISRA addon did not report $id on misra/canary.c"; exit 1; }
+          done
           if grep -rn 'cppcheck-suppress' src | grep -v 'DEV-[0-9]'; then
             echo "::error::inline cppcheck suppressions must name a deviation (DEV-xxx) from misra/README.md"
             exit 1
