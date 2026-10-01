@@ -279,6 +279,11 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
 - MINOR-3, the interim skip of a slow RPM under v0.3.1: documented. MINOR-4: black-box chain test and the long-hold assertion added.
 - NIT-1 (line length), NIT-2 (the count resets on the in-time answer) fixed; NIT-3 (bump steps) recorded above.
 
+**Review of the D-053 bump (ISSUES E-10, 2026-10-02).** vss-schema-guardian: CLEAN (defs v0.3.3). safety-reviewer: no blocker, no MAJOR; the counter changes no request, schedule or latch, `tester_policy` and the gates are unchanged, the new tests fail on a P = B table (checked by mutation: 4 tests).
+- MINOR-1, the counter counts every step, D-053 item 5 says "with `rx_busy` false": documented ("Step margin"), no effect under Q-020; the DECISIONS wording is a defs docs follow-up.
+- MINOR-2, no read-out path: the SIL summary prints both fields; a DID/XCP path is an ISSUES follow-up with the H7.
+- NIT-1 (line length), NIT-2 (the P = B + S pin is documented), NIT-3 (the late answer is taken at the next step), NIT-4 (`rx_busy` / `tx_ready` polls in the counter test) applied.
+
 **Follow-ups.** The client is merged (rt-core#5 and #6); the ISO codes and Q-021 are done (D-040). What remains:
 - N_As, bus-off backoff and FDCAN filters that pass the request and watch IDs: the H7 HAL (Ç1).
 - A platform-bus republisher that reads `services/vehicle_signals` and maps NONE/STALE to INVALID (speed E2E to safety-node, D-021).
