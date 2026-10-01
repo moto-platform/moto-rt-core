@@ -374,7 +374,7 @@ static void test_sil_nrc_on_one_did_leaves_the_others_valid(void)
 /*
  * D-051 (ISSUES E-7): 0xF40D answered after 0x78 at 0, 60 and 120 ms, at 180 ms, later
  * than its 100 ms period. Before D-051 it kept its priority and the 0x78 extension and
- * was due again when its answer landed, so RPM (stale_after_ms 150) was STALE all the
+ * was due again when its answer landed, so RPM (then 50/150 ms) was STALE all the
  * time. Now a late answer makes it faulty: its next reads end at the base timeout and
  * it is skipped after MAX_CONSECUTIVE_TIMEOUTS, so only the fresh attempt after each
  * cooldown holds the slot past RPM's stale_after_ms. Every speed sample is stamped
@@ -415,9 +415,9 @@ static void test_sil_speed_answered_after_its_period_keeps_rpm_fresh_and_its_age
         }
     }
     const uds_client_stats_t* st = uds_client_stats(&client);
-    /* Measured 2026-10-01: RPM STALE 245 of 15000 ms (the fresh attempts), 14897 without
-     * D-051; speed STALE 14460 ms with one sample per fresh attempt (fail-safe), 0 skips
-     * and 82 samples without D-051. */
+    /* Measured 2026-10-01 with defs v0.3.2 (RPM 100/300 ms): RPM STALE 0 of 15000 ms
+     * (245 with v0.3.1's 50/150, 14897 without D-051); speed STALE 14460 ms with one
+     * sample per fresh attempt (fail-safe), 3 skips; 0 skips and 82 samples without D-051. */
     TEST_ASSERT_LESS_OR_EQUAL_UINT32(duration / 20u, rpm_stale_ms);
     TEST_ASSERT_GREATER_THAN_UINT32(0u, st->did_skips);
     TEST_ASSERT_GREATER_THAN_UINT32(0u, speed_samples);

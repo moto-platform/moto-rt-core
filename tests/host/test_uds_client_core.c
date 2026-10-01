@@ -1166,66 +1166,14 @@ static void test_one_lost_speed_answer_costs_one_more_faulty_round(void)
 }
 
 /*
- * ISSUES E-8 (1): 0xF40C answers 70 ms after each request, within the base timeout and
- * without 0x78. With a poll period below the base timeout (defs v0.3.1: 50 ms) it never
- * times out and is due again at once, so as the first normal DID it keeps the later
- * normal DIDs from being read; only slow_answers shows it. D-052 makes defs refuse such
- * a period (RPM at 100 ms); with that table this test is ignored and the seeded one
- * below runs instead. Drop this one when rt-core pins a defs release with D-052.
- */
-static void test_a_slow_rpm_within_the_base_timeout_starves_the_later_normal_dids(void)
-{
-    const uint32_t rpm = VEHICLE_CL250_IDX_ENGINE_SPEED;
-    const uint32_t tps = VEHICLE_CL250_IDX_THROTTLE_POS;
-    const uint32_t answer_ms = 70u;
-    if (vehicle_cl250_dids[rpm].poll_period_ms >= VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS) {
-        TEST_IGNORE_MESSAGE("defs has the D-052 period rule: see the seeded RPM test");
-    }
-    TEST_ASSERT_GREATER_THAN_UINT32(vehicle_cl250_dids[rpm].poll_period_ms, answer_ms);
-    TEST_ASSERT_GREATER_THAN_UINT32(answer_ms, VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS);
-    bring_up(0u);
-    bool rpm_due = false;
-    uint32_t rpm_t = 0u;
-    for (uint32_t t = 0u; t < 2000u; t++) {
-        if (rpm_due && (t == rpm_t)) {
-            TEST_ASSERT_TRUE(answer_read(t, rpm, 1u));
-            rpm_due = false;
-        }
-        kind_t k;
-        while ((k = poll_at(t)) != K_NONE) {
-            if (k != K_READ) {
-                continue;
-            }
-            const uint32_t idx = req_idx();
-            if (log_n < LOG_MAX) {
-                log_buf[log_n].t = t;
-                log_buf[log_n].k = k;
-                log_buf[log_n].idx = idx;
-                log_n++;
-            }
-            if (idx == rpm) {
-                rpm_due = true;
-                rpm_t = t + answer_ms;
-            } else {
-                TEST_ASSERT_TRUE(answer_read(t, idx, 1u));
-            }
-        }
-    }
-    TEST_ASSERT_EQUAL_UINT32(0u, stats()->timeouts);
-    TEST_ASSERT_EQUAL_UINT32(0u, stats()->did_skips);
-    TEST_ASSERT_GREATER_THAN_UINT32(10u, stats()->slow_answers);
-    TEST_ASSERT_EQUAL_UINT32(0u, count_did_reads(tps, 1000u, 2000u));
-}
-
-/*
  * D-052 (ISSUES E-8 (1)): with every poll period at least the base timeout, an RPM that
- * answers 51-99 ms after each request (no 0x78; the original finding) ends its read
- * before it is due again, so the DIDs that are due meanwhile go first and none starves
- * (seeded, 10 x 20 s, the others answering in 1..ASSUMED_ROUND_TRIP_MS ms). Sample age
- * from the stamp. Holding the slot up to 99 ms per read is far beyond
- * ASSUMED_ROUND_TRIP_MS, outside both codegen models, so a DID may go STALE briefly
- * (measured: throttle 35 ms in 200 s, worst age 635 ms of 600; D-052). Ignored until
- * rt-core pins a defs release with D-052.
+ * answers 51-99 ms after each request (no 0x78; the original finding, which starved the
+ * later normal DIDs while RPM was polled at 50 ms) ends its read before it is due again,
+ * so the DIDs that are due meanwhile go first and none starves (seeded, 10 x 20 s, the
+ * others answering in 1..ASSUMED_ROUND_TRIP_MS ms). Sample age from the stamp. Holding
+ * the slot up to 99 ms per read is far beyond ASSUMED_ROUND_TRIP_MS, outside both codegen
+ * models, so a DID may go STALE briefly (measured with defs v0.3.2: throttle 35 ms in
+ * 200 s, worst age 635 ms of 600; D-052).
  */
 static void test_an_rpm_answering_within_the_base_timeout_starves_no_one(void)
 {
@@ -1234,9 +1182,8 @@ static void test_an_rpm_answering_within_the_base_timeout_starves_no_one(void)
     const uint32_t rtt = VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS;
     const uint32_t t0 = 1000u;
     for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
-        if (vehicle_cl250_dids[i].poll_period_ms < base) {
-            TEST_IGNORE_MESSAGE("needs the D-052 defs timing (poll_period_ms >= base timeout)");
-        }
+        /* The D-052 period rule, checked by the defs codegen. */
+        TEST_ASSERT_GREATER_OR_EQUAL_UINT32(base, vehicle_cl250_dids[i].poll_period_ms);
     }
     uint32_t stale_ms[VEHICLE_CL250_DID_COUNT] = {0u};
     for (uint32_t seed = 1u; seed <= 10u; seed++) {
@@ -2190,7 +2137,6 @@ int main(void)
     RUN_TEST(test_a_skip_clears_the_slow_state);
     RUN_TEST(test_a_decoded_answer_at_exactly_its_period_is_in_time);
     RUN_TEST(test_one_lost_speed_answer_costs_one_more_faulty_round);
-    RUN_TEST(test_a_slow_rpm_within_the_base_timeout_starves_the_later_normal_dids);
     RUN_TEST(test_an_rpm_answering_within_the_base_timeout_starves_no_one);
     RUN_TEST(test_ecu_absence_ends_the_fault_state_of_every_did);
     RUN_TEST(test_not_sent_and_latch_keep_the_fault_state);
