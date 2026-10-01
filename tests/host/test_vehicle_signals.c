@@ -3,6 +3,7 @@
  * read time from the generated stale_after_ms (D-025, D-029). No requirement IDs yet
  * (Q-006).
  */
+#include "platform_limits.h"
 #include "services/vehicle_signals.h"
 #include "vehicle_cl250.h"
 
@@ -128,6 +129,27 @@ static void test_init_forgets_samples_and_the_ecu(void)
     TEST_ASSERT_EQUAL(VEHICLE_SIGNAL_NONE, s.state);
 }
 
+/*
+ * D-048 item 2: rt-core never uses a speed sample older than
+ * PLATFORM_LIMIT_VEHICLE_SPEED_MAX_AGE_MS, which equals 0xF40D's stale_after_ms. A
+ * 300 ms sample is still VALID, a 301 ms one is STALE, so the future cornering/ lean
+ * estimate (it may only use VALID speed) cannot take it.
+ */
+static void test_speed_sample_is_valid_at_the_gen_max_age_and_stale_one_ms_later(void)
+{
+    const uint32_t idx = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t max_age = PLATFORM_LIMIT_VEHICLE_SPEED_MAX_AGE_MS;
+    vehicle_signal_sample_t s;
+    TEST_ASSERT_EQUAL_UINT32(vehicle_cl250_dids[idx].stale_after_ms, max_age);
+    TEST_ASSERT_TRUE(vehicle_signals_write(idx, 60u, 60.0f, 1000u));
+    TEST_ASSERT_TRUE(vehicle_signals_get(idx, 1000u + max_age, &s));
+    TEST_ASSERT_EQUAL(VEHICLE_SIGNAL_VALID, s.state);
+    TEST_ASSERT_EQUAL_UINT32(max_age, s.age_ms);
+    TEST_ASSERT_TRUE(vehicle_signals_get(idx, 1000u + max_age + 1u, &s));
+    TEST_ASSERT_EQUAL(VEHICLE_SIGNAL_STALE, s.state);
+    TEST_ASSERT_EQUAL_UINT32(max_age + 1u, s.age_ms);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -139,5 +161,6 @@ int main(void)
     RUN_TEST(test_a_stale_read_also_sticks);
     RUN_TEST(test_out_of_range_index_and_null_are_refused);
     RUN_TEST(test_init_forgets_samples_and_the_ecu);
+    RUN_TEST(test_speed_sample_is_valid_at_the_gen_max_age_and_stale_one_ms_later);
     return UNITY_END();
 }

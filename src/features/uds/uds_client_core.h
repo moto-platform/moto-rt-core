@@ -22,8 +22,11 @@
  *   - Tester present: 0x3E 80 every TESTER_PRESENT_PERIOD_MS, whatever the session
  *     state (verified legacy behaviour). No response is expected, so it never holds
  *     the in-flight slot.
- *   - Reads: round-robin over the DIDs that are due (poll_period_ms since their last
- *     request) and not in skip cooldown. One request in flight.
+ *   - Reads: of the DIDs that are due (poll_period_ms since their last request, or
+ *     since their last timeout) and not in skip cooldown, the lowest gen/ priority value
+ *     first, then table order (D-043). One request in flight. No starvation while each
+ *     request holds the slot for at most ASSUMED_ROUND_TRIP_MS (the ECU's answer plus
+ *     one poll step); a faulty DID can exceed that and the others then go STALE.
  *   - Response timeout RESPONSE_TIMEOUT_BASE_MS; NRC 0x78 for the pending SID restarts
  *     it doubled, up to RESPONSE_TIMEOUT_MAX_MS; a request never waits longer than
  *     RESPONSE_TIMEOUT_MAX_MS in total. The base timeout pauses while a segmented
@@ -37,7 +40,8 @@
  *   - ECU present while any response came within ECU_ABSENT_TIMEOUT_MS.
  *   - No request is produced while the link cannot take one at once (tx_ready false,
  *     e.g. no node ACKs and the mailbox stays full); the timers keep running.
- *   - A request the link could not take is dropped (uds_client_core_not_sent()); only
+ *   - A request the link could not take is dropped (uds_client_core_not_sent()); a read
+ *     is due again at once. Only
  *     uds_client_core_latch() stops the core for good (a D-020 check refused a request,
  *     or a second tester was seen): it sends nothing more until init.
  *
@@ -65,7 +69,7 @@ typedef enum {
 } uds_client_req_kind_t;
 
 typedef struct {
-    uint32_t last_request_ms;
+    uint32_t last_request_ms; /* start of the poll period: last request, or its timeout */
     uint32_t skip_start_ms;
     uint8_t consecutive_timeouts;
     bool requested;   /* last_request_ms is set */
@@ -108,6 +112,8 @@ typedef struct {
     uds_client_req_kind_t pending;
     uint8_t pending_sid;
     uint32_t pending_idx;
+    uint32_t prev_request_ms; /* the pending read's DID schedule before it, for not_sent */
+    bool prev_requested;
     uint32_t sent_ms;         /* start of the total cap */
     uint32_t wait_start_ms;   /* start of the current response timeout */
     uint32_t wait_ms;         /* current response timeout */
@@ -118,7 +124,6 @@ typedef struct {
     bool ecu_seen;
     uint32_t last_response_ms;
 
-    uint32_t rr_next;
     bool failed;
 } uds_client_core_t;
 
@@ -138,7 +143,7 @@ bool uds_client_core_poll(uds_client_core_t* c, uint32_t now_ms, bool rx_busy, b
                           uint8_t* out, uint16_t* len);
 
 /* The request from the last poll did not go out (link busy): it is dropped without a
- * timeout; the DID keeps its schedule. */
+ * timeout, and a read's DID gets its schedule back, so it is due again at once. */
 void uds_client_core_not_sent(uds_client_core_t* c);
 
 /* Stops the core for good (until init): no request, session down, slot free. */

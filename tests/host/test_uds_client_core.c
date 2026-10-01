@@ -187,6 +187,18 @@ static uint32_t count_kind(kind_t k, uint32_t from_t, uint32_t to_t)
     return n;
 }
 
+static uint32_t count_did_reads(uint32_t idx, uint32_t from_t, uint32_t to_t)
+{
+    uint32_t n = 0u;
+    for (uint32_t i = 0u; i < log_n; i++) {
+        if ((log_buf[i].k == K_READ) && (log_buf[i].idx == idx) && (log_buf[i].t >= from_t) &&
+            (log_buf[i].t < to_t)) {
+            n++;
+        }
+    }
+    return n;
+}
+
 /* Between two session attempts only tester present may go out. */
 static void assert_no_session_or_read(uint32_t from, uint32_t to)
 {
@@ -228,9 +240,10 @@ static void test_session_is_retried_at_the_gen_interval_until_positive(void)
     answer_session(retry + 5u);
     TEST_ASSERT_TRUE(uds_client_core_session_up(&c));
     TEST_ASSERT_EQUAL_UINT32(1u, stats()->session_starts);
-    /* Session up: DID reads start at once, in table order. TP stays on its period. */
+    /* Session up: DID reads start at once, the high-priority one first (D-043). TP stays
+     * on its period. */
     TEST_ASSERT_EQUAL(K_READ, poll_at(retry + 5u));
-    TEST_ASSERT_EQUAL_UINT32(VEHICLE_CL250_IDX_ENGINE_SPEED, req_idx());
+    TEST_ASSERT_EQUAL_UINT32(VEHICLE_CL250_IDX_VEHICLE_SPEED, req_idx());
 }
 
 static void test_no_did_is_read_while_the_session_is_down(void)
@@ -307,16 +320,211 @@ static void test_tester_present_every_gen_period_without_holding_the_slot(void)
 /* DID polling                                                                */
 /* ------------------------------------------------------------------------- */
 
-static void test_reads_are_round_robin_in_table_order_when_all_are_due(void)
+/* D-043 order: the lowest gen/ priority value first, then table order. */
+static uint32_t expected_order(uint32_t* order)
 {
+    uint32_t n = 0u;
+    for (uint8_t prio = 0u; prio <= VEHICLE_CL250_PRIORITY_NORMAL; prio++) {
+        for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+            if (vehicle_cl250_dids[i].priority == prio) {
+                order[n] = i;
+                n++;
+            }
+        }
+    }
+    return n;
+}
+
+static void test_speed_is_the_only_high_priority_did_in_gen(void)
+{
+    /* D-048 item 4: 0xF40D high, every other DID normal. */
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        TEST_ASSERT_EQUAL_UINT8((i == VEHICLE_CL250_IDX_VEHICLE_SPEED) ? VEHICLE_CL250_PRIORITY_HIGH
+                                                                       : VEHICLE_CL250_PRIORITY_NORMAL,
+                                vehicle_cl250_dids[i].priority);
+    }
+}
+
+static void test_reads_are_priority_first_then_table_order_when_all_are_due(void)
+{
+    uint32_t order[VEHICLE_CL250_DID_COUNT];
+    TEST_ASSERT_EQUAL_UINT32(VEHICLE_CL250_DID_COUNT, expected_order(order));
+    TEST_ASSERT_EQUAL_UINT32(VEHICLE_CL250_IDX_VEHICLE_SPEED, order[0]);
     bring_up(0u);
     for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
         TEST_ASSERT_EQUAL(K_READ, poll_at(0u));
-        TEST_ASSERT_EQUAL_UINT32(i, req_idx());
+        TEST_ASSERT_EQUAL_UINT32(order[i], req_idx());
         TEST_ASSERT_EQUAL(UDS_CLIENT_REQ_READ, uds_client_core_pending(&c));
-        TEST_ASSERT_TRUE(answer_read(0u, i, 1u));
+        TEST_ASSERT_TRUE(answer_read(0u, order[i], 1u));
     }
     TEST_ASSERT_EQUAL(K_NONE, poll_at(0u)); /* nothing due until the first period ends */
+}
+
+/* Marks every DID as requested at t, so none is due before its period. */
+static void all_requested_at(uint32_t t)
+{
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        c.did[i].requested = true;
+        c.did[i].last_request_ms = t;
+    }
+}
+
+/* The next request at t that is not tester present. */
+static kind_t poll_skip_tp(uint32_t t)
+{
+    kind_t k;
+    do {
+        k = poll_at(t);
+    } while (k == K_TP);
+    return k;
+}
+
+static void test_a_just_due_high_did_goes_before_long_overdue_normal_ones(void)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t period = vehicle_cl250_dids[speed].poll_period_ms;
+    const uint32_t t0 = 1000u; /* < ECU_ABSENT_TIMEOUT_MS: the session stays up */
+    bring_up(0u);
+    all_requested_at(0u); /* the normal DIDs are overdue long before speed is due */
+    c.did[speed].last_request_ms = t0;
+    TEST_ASSERT_EQUAL(K_READ, poll_skip_tp(t0));
+    TEST_ASSERT_TRUE(req_idx() != speed); /* not due yet: a normal one goes */
+    TEST_ASSERT_TRUE(answer_read(t0, req_idx(), 1u));
+    all_requested_at(0u);
+    c.did[speed].last_request_ms = t0;
+    TEST_ASSERT_EQUAL(K_READ, poll_skip_tp(t0 + period));
+    TEST_ASSERT_EQUAL_UINT32(speed, req_idx());
+}
+
+static void test_within_a_class_the_first_due_in_table_order_goes(void)
+{
+    bring_up(0u);
+    all_requested_at(0u);
+    /* Two normal DIDs due, the later table entry overdue for longer: table order wins. */
+    const uint32_t a = VEHICLE_CL250_IDX_ENGINE_SPEED;
+    const uint32_t b = VEHICLE_CL250_IDX_BATTERY_VOLTAGE;
+    TEST_ASSERT_LESS_THAN_UINT32(b, a);
+    c.did[a].requested = false;
+    c.did[b].requested = false;
+    c.did[b].last_request_ms = 0u;
+    TEST_ASSERT_EQUAL(K_READ, poll_at(1u));
+    TEST_ASSERT_EQUAL_UINT32(a, req_idx());
+    TEST_ASSERT_TRUE(answer_read(1u, a, 1u));
+    TEST_ASSERT_EQUAL(K_READ, poll_at(1u));
+    TEST_ASSERT_EQUAL_UINT32(b, req_idx());
+}
+
+/*
+ * The defs codegen bound (yaml_checks.did_sample_gap_bounds, D-043), recomputed from
+ * gen/: non-preemptive fixed priority in the poller's order, one request in flight,
+ * each holding the slot for C = ASSUMED_ROUND_TRIP_MS.
+ *   w = C + sum over the DIDs ordered before idx of (w / P_j + 1) * C
+ *   worst sample gap = P_idx + w + C
+ */
+static uint32_t gap_bound(uint32_t idx)
+{
+    const uint32_t rtt = VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS;
+    const vehicle_cl250_did_t* e = &vehicle_cl250_dids[idx];
+    uint32_t w = rtt;
+    for (uint32_t iter = 0u; iter < 1000u; iter++) {
+        uint32_t next = rtt;
+        for (uint32_t j = 0u; j < VEHICLE_CL250_DID_COUNT; j++) {
+            const vehicle_cl250_did_t* h = &vehicle_cl250_dids[j];
+            if ((h->priority < e->priority) || ((h->priority == e->priority) && (j < idx))) {
+                next += ((w / h->poll_period_ms) + 1u) * rtt;
+            }
+        }
+        if (next == w) {
+            return (uint32_t)e->poll_period_ms + w + rtt;
+        }
+        w = next;
+    }
+    TEST_FAIL_MESSAGE("bound did not converge");
+    return 0u;
+}
+
+static void test_the_gen_table_meets_its_gap_bound(void)
+{
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        TEST_ASSERT_LESS_OR_EQUAL_UINT32(vehicle_cl250_dids[i].stale_after_ms, gap_bound(i));
+    }
+}
+
+static uint32_t rng_state;
+static uint32_t rng_next(void)
+{
+    rng_state = (rng_state * 1103515245u) + 12345u;
+    return rng_state >> 8u;
+}
+
+/*
+ * D-043: no starvation. A fake ECU answers every read after a round trip in
+ * [rtt_min, rtt_max] (seeded); one request is in flight. Every DID's sample gap must
+ * stay within the analytical bound (<= its stale_after_ms). With random_phase, each DID
+ * starts as if requested at a random time within its last period (and answered then).
+ */
+static void run_with_round_trip(uint32_t rtt_min, uint32_t rtt_max, bool random_phase,
+                                uint32_t duration_ms)
+{
+    const uint32_t t0 = 1000u;
+    uint32_t last_sample[VEHICLE_CL250_DID_COUNT];
+    uint32_t bound[VEHICLE_CL250_DID_COUNT];
+    bool answer_due = false;
+    uint32_t answer_t = 0u;
+    uint32_t answer_idx = 0u;
+    bring_up(t0);
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        bound[i] = gap_bound(i);
+        last_sample[i] = t0;
+        if (random_phase) {
+            last_sample[i] = t0 - (rng_next() % vehicle_cl250_dids[i].poll_period_ms);
+            c.did[i].requested = true;
+            c.did[i].last_request_ms = last_sample[i];
+        }
+    }
+    for (uint32_t t = t0; t < (t0 + duration_ms); t++) {
+        if (answer_due && (t == answer_t)) {
+            TEST_ASSERT_TRUE(answer_read(t, answer_idx, 1u));
+            TEST_ASSERT_EQUAL_UINT32(answer_idx, smp.idx);
+            last_sample[answer_idx] = t;
+            answer_due = false;
+        }
+        kind_t k;
+        while ((k = poll_at(t)) != K_NONE) {
+            TEST_ASSERT_TRUE_MESSAGE(k != K_SESSION, "session lost");
+            if (k == K_READ) {
+                TEST_ASSERT_FALSE_MESSAGE(answer_due, "two requests in flight");
+                answer_due = true;
+                answer_idx = req_idx();
+                answer_t = t + rtt_min + (rng_next() % (rtt_max - rtt_min + 1u));
+            }
+        }
+        for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+            TEST_ASSERT_LESS_OR_EQUAL_UINT32_MESSAGE(bound[i], t - last_sample[i],
+                                                     "a DID exceeded its D-043 gap bound");
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->timeouts);
+}
+
+static void test_no_did_starves_with_answers_after_the_gen_assumed_round_trip(void)
+{
+    const uint32_t rtt = VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS;
+    run_with_round_trip(rtt, rtt, false, 20000u);
+}
+
+static void test_no_did_starves_with_answers_after_one_ms(void)
+{
+    run_with_round_trip(1u, 1u, false, 20000u);
+}
+
+static void test_no_did_starves_with_random_phases_and_round_trips(void)
+{
+    for (uint32_t seed = 1u; seed <= 40u; seed++) {
+        setUp();
+        rng_state = seed;
+        run_with_round_trip(1u, VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS, true, 5000u);
+    }
 }
 
 static void test_each_did_is_polled_at_its_gen_period(void)
@@ -354,8 +562,12 @@ static void test_positive_response_gives_raw_and_physical_from_gen(void)
         {VEHICLE_CL250_IDX_COOLANT_TEMP, 0x00u, -40.0f},     /* A-40, lower bound */
         {VEHICLE_CL250_IDX_BATTERY_VOLTAGE, 0xFFFFu, 65.535f}, /* (A*256+B)/1000, max */
     };
+    uint32_t order[VEHICLE_CL250_DID_COUNT];
+    TEST_ASSERT_EQUAL_UINT32(sizeof cases / sizeof cases[0], expected_order(order));
     bring_up(0u);
-    for (uint32_t i = 0u; i < sizeof cases / sizeof cases[0]; i++) {
+    for (uint32_t n = 0u; n < VEHICLE_CL250_DID_COUNT; n++) {
+        const uint32_t i = order[n];
+        TEST_ASSERT_EQUAL_UINT32(i, cases[i].idx); /* cases are in table order */
         TEST_ASSERT_EQUAL(K_READ, poll_at(0u));
         TEST_ASSERT_EQUAL_UINT32(cases[i].idx, req_idx());
         TEST_ASSERT_TRUE(answer_read(0u, cases[i].idx, cases[i].raw));
@@ -370,11 +582,11 @@ static void test_response_for_another_did_or_malformed_is_ignored(void)
 {
     bring_up(0u);
     TEST_ASSERT_EQUAL(K_READ, poll_at(0u));
-    TEST_ASSERT_EQUAL_UINT32(VEHICLE_CL250_IDX_ENGINE_SPEED, req_idx());
-    TEST_ASSERT_FALSE(answer_read(1u, VEHICLE_CL250_IDX_VEHICLE_SPEED, 1u)); /* late/other */
+    TEST_ASSERT_EQUAL_UINT32(VEHICLE_CL250_IDX_VEHICLE_SPEED, req_idx());
+    TEST_ASSERT_FALSE(answer_read(1u, VEHICLE_CL250_IDX_ENGINE_SPEED, 1u)); /* late/other */
     const uint8_t too_short[3] = {(uint8_t)(UDS_SID_READ_DATA_BY_IDENTIFIER + POS_OFFSET),
-                                  (uint8_t)(VEHICLE_CL250_DID_ENGINE_SPEED >> 8u),
-                                  (uint8_t)(VEHICLE_CL250_DID_ENGINE_SPEED & 0xFFu)};
+                                  (uint8_t)(VEHICLE_CL250_DID_VEHICLE_SPEED >> 8u),
+                                  (uint8_t)(VEHICLE_CL250_DID_VEHICLE_SPEED & 0xFFu)};
     TEST_ASSERT_FALSE(indicate(1u, too_short, 3u));
     const uint8_t too_long[8] = {0};
     TEST_ASSERT_FALSE(indicate(1u, too_long, 8u)); /* more than a Single Frame */
@@ -396,11 +608,100 @@ static void test_response_timeout_is_the_gen_base(void)
     const uint32_t base = VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS;
     bring_up(0u);
     TEST_ASSERT_EQUAL(K_READ, poll_at(10u));
+    TEST_ASSERT_EQUAL_UINT32(VEHICLE_CL250_IDX_VEHICLE_SPEED, req_idx());
     TEST_ASSERT_EQUAL(K_NONE, poll_at(10u + base - 1u));
     TEST_ASSERT_EQUAL_UINT32(0u, stats()->timeouts);
-    TEST_ASSERT_EQUAL(K_READ, poll_at(10u + base)); /* timed out, next DID at once */
+    /* 0xF40D timed out: its period restarts, so the next DID goes at once. */
+    TEST_ASSERT_EQUAL(K_READ, poll_at(10u + base));
     TEST_ASSERT_EQUAL_UINT32(1u, stats()->timeouts);
-    TEST_ASSERT_EQUAL_UINT32(VEHICLE_CL250_IDX_VEHICLE_SPEED, req_idx());
+    TEST_ASSERT_EQUAL_UINT32(VEHICLE_CL250_IDX_ENGINE_SPEED, req_idx());
+}
+
+/*
+ * A silent 0xF40D (period = base timeout) must not hold the slot until it is skipped:
+ * after each timeout its period restarts, and the normal DIDs are read in between.
+ */
+static void test_silent_speed_restarts_its_period_and_the_normal_dids_are_still_read(void)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t base = VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS;
+    const uint32_t period = vehicle_cl250_dids[speed].poll_period_ms;
+    bring_up(0u);
+    silent_mask = 1u << speed;
+    uint32_t t = 0u;
+    while (stats()->did_skips == 0u) {
+        drive(t, t + 1u);
+        t++;
+        TEST_ASSERT_LESS_THAN_UINT32(5000u, t);
+    }
+    TEST_ASSERT_EQUAL_UINT32(VEHICLE_CL250_MAX_CONSECUTIVE_TIMEOUTS, stats()->timeouts);
+    uint32_t prev = 0u;
+    uint32_t n = 0u;
+    for (uint32_t i = 0u; i < log_n; i++) {
+        if ((log_buf[i].k != K_READ) || (log_buf[i].idx != speed)) {
+            continue;
+        }
+        if (n > 0u) {
+            /* timed out at prev + base, due again one period later */
+            TEST_ASSERT_EQUAL_UINT32(prev + base + period, log_buf[i].t);
+            for (uint32_t j = 0u; j < VEHICLE_CL250_DID_COUNT; j++) {
+                /* every normal DID with a period up to the gap was read in it */
+                if ((j != speed) && (vehicle_cl250_dids[j].poll_period_ms <= period)) {
+                    TEST_ASSERT_GREATER_THAN_UINT32(0u, count_did_reads(j, prev + base,
+                                                                        log_buf[i].t));
+                }
+            }
+        }
+        prev = log_buf[i].t;
+        n++;
+    }
+    TEST_ASSERT_EQUAL_UINT32(VEHICLE_CL250_MAX_CONSECUTIVE_TIMEOUTS, n);
+    TEST_ASSERT_TRUE(uds_client_core_did_skipped(&c, speed, t));
+    TEST_ASSERT_TRUE(uds_client_core_session_up(&c));
+}
+
+/*
+ * 0xF40D answering NRC 0x78 forever holds the single slot up to RESPONSE_TIMEOUT_MAX_MS
+ * (nothing else is read meanwhile; their samples age to STALE in vehicle_signals).
+ * After the cap the normal DIDs go first; 0xF40D is due again one period after it.
+ */
+static void test_endless_0x78_on_speed_holds_the_slot_up_to_the_cap_then_the_others_go(void)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t max = VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS;
+    const uint32_t period = vehicle_cl250_dids[speed].poll_period_ms;
+    bring_up(0u);
+    TEST_ASSERT_EQUAL(K_READ, poll_at(0u));
+    TEST_ASSERT_EQUAL_UINT32(speed, req_idx());
+    for (uint32_t t = 50u; t < max; t += 50u) {
+        nrc(t, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_RESPONSE_PENDING);
+        TEST_ASSERT_EQUAL(K_NONE, poll_skip_tp(t));
+    }
+    TEST_ASSERT_EQUAL(K_NONE, poll_skip_tp(max - 1u));
+    TEST_ASSERT_EQUAL(K_READ, poll_skip_tp(max)); /* capped: a normal DID at once */
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->timeouts);
+    TEST_ASSERT_TRUE(req_idx() != speed);
+    TEST_ASSERT_TRUE(answer_read(max, req_idx(), 1u));
+    drive(max, max + period);
+    TEST_ASSERT_EQUAL_UINT32(0u, count_did_reads(speed, max, max + period));
+    drive(max + period, max + period + 1u);
+    TEST_ASSERT_EQUAL_UINT32(1u, count_did_reads(speed, max + period, max + period + 1u));
+}
+
+static void test_speed_answer_within_its_gen_period_keeps_the_period_from_the_request(void)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t period = vehicle_cl250_dids[speed].poll_period_ms;
+    bring_up(0u);
+    TEST_ASSERT_EQUAL(K_READ, poll_at(0u));
+    TEST_ASSERT_EQUAL_UINT32(speed, req_idx());
+    TEST_ASSERT_TRUE(answer_read(VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS, speed, 60u));
+    TEST_ASSERT_EQUAL_FLOAT(60.0f, smp.physical);
+    all_requested_at(period - 1u); /* the normal DIDs are not due in this window */
+    c.did[speed].last_request_ms = 0u;
+    TEST_ASSERT_EQUAL(K_NONE, poll_at(period - 1u));
+    TEST_ASSERT_EQUAL(K_READ, poll_at(period));
+    TEST_ASSERT_EQUAL_UINT32(speed, req_idx());
 }
 
 static void test_nrc_0x78_doubles_the_timeout_up_to_the_gen_max_in_total(void)
@@ -438,10 +739,14 @@ static void test_answer_after_response_pending_is_accepted(void)
 {
     bring_up(0u);
     TEST_ASSERT_EQUAL(K_READ, poll_at(0u));
-    nrc(50u, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_RESPONSE_PENDING);
-    TEST_ASSERT_EQUAL(K_NONE, poll_at(149u));
-    TEST_ASSERT_TRUE(answer_read(240u, VEHICLE_CL250_IDX_ENGINE_SPEED, 400u));
+    TEST_ASSERT_EQUAL_UINT32(VEHICLE_CL250_IDX_VEHICLE_SPEED, req_idx());
+    nrc(50u, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_RESPONSE_PENDING); /* wait 200 from 50 */
+    TEST_ASSERT_EQUAL(K_NONE, poll_at(149u)); /* the base would have ended here */
+    TEST_ASSERT_EQUAL(K_NONE, poll_at(249u)); /* one in flight: no normal DID meanwhile */
+    TEST_ASSERT_TRUE(answer_read(249u, VEHICLE_CL250_IDX_VEHICLE_SPEED, 100u));
+    TEST_ASSERT_EQUAL_UINT32(VEHICLE_CL250_IDX_VEHICLE_SPEED, smp.idx);
     TEST_ASSERT_FLOAT_WITHIN(0.001f, 100.0f, smp.physical);
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->response_pending);
     TEST_ASSERT_EQUAL_UINT32(0u, stats()->timeouts);
 }
 
@@ -468,7 +773,7 @@ static void test_other_nrc_ends_the_read_without_a_timeout(void)
     TEST_ASSERT_TRUE(uds_client_core_session_up(&c));
     /* The DID keeps its schedule (legacy): next request is the next DID. */
     TEST_ASSERT_EQUAL(K_READ, poll_at(5u));
-    TEST_ASSERT_EQUAL_UINT32(VEHICLE_CL250_IDX_VEHICLE_SPEED, req_idx());
+    TEST_ASSERT_EQUAL_UINT32(VEHICLE_CL250_IDX_ENGINE_SPEED, req_idx());
 }
 
 static void test_session_nrcs_drop_the_session_and_it_is_reestablished(void)
@@ -496,7 +801,7 @@ static void test_nrc_for_tester_present_never_ends_a_pending_read(void)
     TEST_ASSERT_EQUAL(K_READ, poll_at(0u));
     nrc(3u, VEHICLE_CL250_TESTER_PRESENT_SID, 0x12u); /* subFunctionNotSupported */
     TEST_ASSERT_EQUAL(UDS_CLIENT_REQ_READ, uds_client_core_pending(&c));
-    TEST_ASSERT_TRUE(answer_read(4u, VEHICLE_CL250_IDX_ENGINE_SPEED, 1u));
+    TEST_ASSERT_TRUE(answer_read(4u, VEHICLE_CL250_IDX_VEHICLE_SPEED, 1u));
 }
 
 /* ------------------------------------------------------------------------- */
@@ -550,7 +855,8 @@ static void test_a_success_resets_the_consecutive_timeouts(void)
     for (uint32_t i = 0u; i + 1u < VEHICLE_CL250_MAX_CONSECUTIVE_TIMEOUTS; i++) {
         c.did[idx].consecutive_timeouts++;
     }
-    c.rr_next = idx;
+    all_requested_at(0u);
+    c.did[idx].requested = false; /* only this DID is due */
     TEST_ASSERT_EQUAL(K_READ, poll_at(0u));
     TEST_ASSERT_EQUAL_UINT32(idx, req_idx());
     TEST_ASSERT_TRUE(answer_read(1u, idx, 100u));
@@ -688,8 +994,20 @@ static void test_a_request_the_link_could_not_take_is_dropped_without_a_latch(vo
     TEST_ASSERT_FALSE(uds_client_core_failed(&c));
     TEST_ASSERT_EQUAL(UDS_CLIENT_REQ_NONE, uds_client_core_pending(&c));
     TEST_ASSERT_EQUAL_UINT32(0u, stats()->timeouts);
-    TEST_ASSERT_EQUAL(K_READ, poll_at(1u)); /* the next DID; the dropped one keeps its period */
-    TEST_ASSERT_NOT_EQUAL(idx, req_idx());
+    /* Nothing went out, so the DID's period was not started: it goes again at once. */
+    TEST_ASSERT_EQUAL(K_READ, poll_at(1u));
+    TEST_ASSERT_EQUAL_UINT32(idx, req_idx());
+    TEST_ASSERT_TRUE(answer_read(2u, idx, 1u));
+    /* A dropped read of a DID requested before restores that earlier schedule. */
+    const uint32_t period = vehicle_cl250_dids[idx].poll_period_ms;
+    all_requested_at(1u);
+    TEST_ASSERT_EQUAL(K_READ, poll_skip_tp(1u + period));
+    TEST_ASSERT_EQUAL_UINT32(idx, req_idx());
+    uds_client_core_not_sent(&c);
+    TEST_ASSERT_TRUE(c.did[idx].requested);
+    TEST_ASSERT_EQUAL_UINT32(1u, c.did[idx].last_request_ms);
+    uds_client_core_not_sent(&c); /* nothing pending: harmless */
+    TEST_ASSERT_EQUAL_UINT32(1u, c.did[idx].last_request_ms);
 }
 
 static void test_ecu_presence_needs_a_new_answer_after_absence(void)
@@ -758,11 +1076,21 @@ int main(void)
     RUN_TEST(test_session_answer_with_another_subfunction_is_not_accepted);
     RUN_TEST(test_session_response_pending_extends_the_session_request);
     RUN_TEST(test_tester_present_every_gen_period_without_holding_the_slot);
-    RUN_TEST(test_reads_are_round_robin_in_table_order_when_all_are_due);
+    RUN_TEST(test_speed_is_the_only_high_priority_did_in_gen);
+    RUN_TEST(test_reads_are_priority_first_then_table_order_when_all_are_due);
+    RUN_TEST(test_a_just_due_high_did_goes_before_long_overdue_normal_ones);
+    RUN_TEST(test_within_a_class_the_first_due_in_table_order_goes);
+    RUN_TEST(test_no_did_starves_with_answers_after_the_gen_assumed_round_trip);
+    RUN_TEST(test_no_did_starves_with_answers_after_one_ms);
+    RUN_TEST(test_the_gen_table_meets_its_gap_bound);
+    RUN_TEST(test_no_did_starves_with_random_phases_and_round_trips);
     RUN_TEST(test_each_did_is_polled_at_its_gen_period);
     RUN_TEST(test_positive_response_gives_raw_and_physical_from_gen);
     RUN_TEST(test_response_for_another_did_or_malformed_is_ignored);
     RUN_TEST(test_response_timeout_is_the_gen_base);
+    RUN_TEST(test_silent_speed_restarts_its_period_and_the_normal_dids_are_still_read);
+    RUN_TEST(test_speed_answer_within_its_gen_period_keeps_the_period_from_the_request);
+    RUN_TEST(test_endless_0x78_on_speed_holds_the_slot_up_to_the_cap_then_the_others_go);
     RUN_TEST(test_nrc_0x78_doubles_the_timeout_up_to_the_gen_max_in_total);
     RUN_TEST(test_nrc_0x78_timeout_saturates_at_the_gen_max);
     RUN_TEST(test_answer_after_response_pending_is_accepted);

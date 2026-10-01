@@ -43,7 +43,7 @@ CMake + STM32CubeMX (HAL) + arm-none-eabi-gcc (D-007). RTOS: FreeRTOS/CMSIS-RTOS
 - `cubemx/` is generated code — only write into `USER CODE` blocks.
 - Pure logic (EKF, ISO-TP, UDS state machine, E2E, dyno) is written without a HAL dependency and tested under `tests/host/` with Unity. This plus Renode is the path forward while there's no H7 hardware.
 - Skeleton: `/repo-bootstrap`; new feature: `/feature-module`.
-- Commands (CMake >= 3.20 + Ninja; `git submodule update --init` first, defs pinned to `v0.2.0`):
+- Commands (CMake >= 3.20 + Ninja; `git submodule update --init` first, defs pinned to `v0.3.1`):
   - `cmake --preset host-tests && cmake --build --preset host-tests && ctest --preset host-tests` (Unity, ASan + UBSan, plus the 2 s SIL smoke run and the `--uds-scenario` UDS server run)
   - SIL program (D-034): `build/host-tests/src/moto_rtcore_host` (in-process bus + simulated CL250 ECU); on Linux `--vcan vcan0`
   - `cmake --preset target-m7-debug && cmake --build --preset target-m7-debug` (also `target-m7-release`); `-DARM_TOOLCHAIN_DIR=...` if `arm-none-eabi-gcc` is not on PATH
@@ -51,7 +51,7 @@ CMake + STM32CubeMX (HAL) + arm-none-eabi-gcc (D-007). RTOS: FreeRTOS/CMSIS-RTOS
 - Current modules and layers:
   - `features/uds/isotp_core` (ISO-TP, Ç2)
   - `features/uds/isotp_link`: the core on a port + ID pair. `isotp_link_open_vehicle_cl250()` is the only vehicle-port link and takes its IDs and padding from gen/.
-  - `features/uds/uds_client` + `uds_client_core` (Ç3): the single read-only vehicle tester. It keeps the session (0x10 03, 0x3E 80) and polls the gen/ DIDs into `services/vehicle_signals`. Single Frame responses only (Q-020). Fail-closed latch with a reason (`uds_client_fault()`: gate, guard, or a second tester seen on the request IDs or the gen/ OBD functional watch IDs). ISO 14229 codes come from gen/ `uds_iso14229.h`.
+  - `features/uds/uds_client` + `uds_client_core` (Ç3): the single read-only vehicle tester. It keeps the session (0x10 03, 0x3E 80) and polls the gen/ DIDs into `services/vehicle_signals`, the gen/ `priority` first (D-043). Single Frame responses only (Q-020). Fail-closed latch with a reason (`uds_client_fault()`: gate, guard, or a second tester seen on the request IDs or the gen/ OBD functional watch IDs). ISO 14229 codes come from gen/ `uds_iso14229.h`.
   - `features/uds/uds_server` + `uds_server_core` (Ç3, D-040): rt-core's diagnostic server on the **platform bus only** (0x710/0x718, functional 0x7DF): 0x10 / 0x3E / 0x22 / 0x19 / 0x14, NRCs, P2 / P2* / S3, all from gen/ `platform_uds.h`. It never touches the vehicle port and never includes `uds_client.h`.
   - `services/diag`: DTC memory (RAM, level-triggered) and the vehicle-tester status; written by the client glue, read and cleared by the server.
   - `services/timebase`

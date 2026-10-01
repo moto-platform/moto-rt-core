@@ -56,6 +56,10 @@ static void end_with_timeout(uds_client_core_t* c, uint32_t now_ms)
     count(&c->stats.timeouts);
     if (c->pending == UDS_CLIENT_REQ_READ) {
         uds_client_did_state_t* d = &c->did[c->pending_idx];
+        /* The period restarts now: a silent DID whose period is not longer than the
+         * timeout would otherwise be due again at once and, served first, hold the slot
+         * until it is skipped. */
+        d->last_request_ms = now_ms;
         d->consecutive_timeouts++;
         if (d->consecutive_timeouts >= VEHICLE_CL250_MAX_CONSECUTIVE_TIMEOUTS) {
             skip_did(c, c->pending_idx, now_ms);
@@ -72,23 +76,36 @@ static void lose_session(uds_client_core_t* c)
     }
 }
 
-/* Next due DID (round-robin from rr_next), or false. */
+/*
+ * Next due DID, or false (D-043): the lowest gen/ priority value first, then table
+ * order. The scan always covers the whole table; a strict < keeps the first entry of a
+ * class. No starvation while every request holds the slot for at most
+ * ASSUMED_ROUND_TRIP_MS (ECU answer + one step): the defs codegen (after v0.3.1) and
+ * test_the_gen_table_meets_its_gap_bound bound every DID's sample gap by its
+ * stale_after_ms for this order. A faulty DID can exceed that; the samples then go
+ * STALE in vehicle_signals (README, "Reads").
+ */
 static bool next_read(uds_client_core_t* c, uint32_t now_ms, uint32_t* idx_out)
 {
-    for (uint32_t n = 0u; n < VEHICLE_CL250_DID_COUNT; n++) {
-        const uint32_t idx = (c->rr_next + n) % VEHICLE_CL250_DID_COUNT;
+    bool found = false;
+    uint32_t best = 0u;
+    for (uint32_t idx = 0u; idx < VEHICLE_CL250_DID_COUNT; idx++) {
         uds_client_did_state_t* d = &c->did[idx];
-        if (d->skipped && !expired(now_ms, d->skip_start_ms, VEHICLE_CL250_DID_SKIP_COOLDOWN_MS)) {
-            continue;
+        if (d->skipped && expired(now_ms, d->skip_start_ms, VEHICLE_CL250_DID_SKIP_COOLDOWN_MS)) {
+            d->skipped = false;
         }
-        d->skipped = false;
-        if (!d->requested ||
-            expired(now_ms, d->last_request_ms, (uint32_t)vehicle_cl250_dids[idx].poll_period_ms)) {
-            *idx_out = idx;
-            return true;
+        const bool due = !d->skipped &&
+                         (!d->requested ||
+                          expired(now_ms, d->last_request_ms,
+                                  (uint32_t)vehicle_cl250_dids[idx].poll_period_ms));
+        if (due && (!found || (vehicle_cl250_dids[idx].priority <
+                               vehicle_cl250_dids[best].priority))) {
+            best = idx;
+            found = true;
         }
     }
-    return false;
+    *idx_out = best;
+    return found;
 }
 
 bool uds_client_core_poll(uds_client_core_t* c, uint32_t now_ms, bool rx_busy, bool tx_ready,
@@ -156,9 +173,10 @@ bool uds_client_core_poll(uds_client_core_t* c, uint32_t now_ms, bool rx_busy, b
     out[1] = (uint8_t)(did >> 8u);
     out[2] = (uint8_t)(did & 0xFFu);
     *len = 3u;
+    c->prev_request_ms = c->did[idx].last_request_ms;
+    c->prev_requested = c->did[idx].requested;
     c->did[idx].requested = true;
     c->did[idx].last_request_ms = now_ms;
-    c->rr_next = (idx + 1u) % VEHICLE_CL250_DID_COUNT;
     start_request(c, UDS_CLIENT_REQ_READ, out[0], idx, now_ms);
     return true;
 }
@@ -166,6 +184,11 @@ bool uds_client_core_poll(uds_client_core_t* c, uint32_t now_ms, bool rx_busy, b
 void uds_client_core_not_sent(uds_client_core_t* c)
 {
     if (c != NULL) {
+        if (c->pending == UDS_CLIENT_REQ_READ) {
+            /* Nothing went out: the period must not run from a request never sent. */
+            c->did[c->pending_idx].last_request_ms = c->prev_request_ms;
+            c->did[c->pending_idx].requested = c->prev_requested;
+        }
         c->pending = UDS_CLIENT_REQ_NONE;
     }
 }
