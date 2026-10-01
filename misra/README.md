@@ -10,4 +10,6 @@ CI runs the cppcheck MISRA addon over the target code (`src/`, without the host-
 
 Baseline at the switch to blocking (2026-09-29, cppcheck 2.22): 53 × 15.5, 16 × 8.7, 1 × 11.5, and one each of 15.7 and 8.9, which were fixed instead of deviated.
 
-**Known gap:** the generated D-020 gates (`external/moto-vehicle-defs/gen/c/rt_core/`) are excluded here (`--suppress=*:*external/*`) and are not MISRA-checked in moto-vehicle-defs either. They are covered by the codegen tests and this repo's guard tests; a MISRA step for `gen/c` belongs in moto-vehicle-defs CI.
+CI builds cppcheck 2.22.0, the version of this baseline, and caches it. Before the MISRA step it checks that the addon reports 10.8, 15.6 and 17.7 on `misra/canary.c`. The step used to run Ubuntu's apt cppcheck 2.13, which does not report 15.6 there.
+
+**Generated code:** `external/moto-vehicle-defs/gen/c/rt_core/` (the D-020 gates, E2E) is excluded here (`--suppress=*:*external/*`). It is MISRA-checked, blocking, in moto-vehicle-defs CI since moto-vehicle-defs#16 (D-046 item 2, its own register in `misra/README.md` there). That gate is not in a release yet; this repo pins defs v0.2.0, so the pinned copy predates it.
