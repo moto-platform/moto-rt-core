@@ -105,7 +105,7 @@ static uint16_t answer_read(sim_ecu_t* ecu, const uint8_t* req, uint16_t len, ui
     if (ecu->nrc_enabled && (did == ecu->nrc_did)) {
         return negative(out, req[0], ecu->nrc_code);
     }
-    if (ecu->pending_count > 0u) {
+    if ((ecu->pending_count > 0u) && ((ecu->pending_did == 0u) || (did == ecu->pending_did))) {
         ecu->deferred = true;
         for (uint16_t i = 0u; i < len; i++) {
             ecu->deferred_req[i] = req[i];

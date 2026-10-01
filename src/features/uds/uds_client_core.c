@@ -48,6 +48,7 @@ static void skip_did(uds_client_core_t* c, uint32_t idx, uint32_t now_ms)
     d->skipped = true;
     d->skip_start_ms = now_ms;
     d->consecutive_timeouts = 0u;
+    d->slow = false; /* the fresh attempt after the cooldown gets its priority back */
     count(&c->stats.did_skips);
 }
 
@@ -60,12 +61,28 @@ static void end_with_timeout(uds_client_core_t* c, uint32_t now_ms)
          * timeout would otherwise be due again at once and, served first, hold the slot
          * until it is skipped. */
         d->last_request_ms = now_ms;
+        if (d->consecutive_timeouts == 0u) {
+            d->unanswered_ms = c->sent_ms; /* its answer may still come (D-051) */
+        }
         d->consecutive_timeouts++;
         if (d->consecutive_timeouts >= VEHICLE_CL250_MAX_CONSECUTIVE_TIMEOUTS) {
             skip_did(c, c->pending_idx, now_ms);
         }
     }
     c->pending = UDS_CLIENT_REQ_NONE;
+}
+
+/*
+ * The ECU went absent for longer than RESPONSE_TIMEOUT_MAX_MS, so it will not answer a
+ * read from before: no answer is outstanding and no DID is faulty or slow (D-051).
+ * Otherwise every sample after key-on would be stamped before the absence.
+ */
+static void forget_reads(uds_client_core_t* c)
+{
+    for (uint32_t idx = 0u; idx < VEHICLE_CL250_DID_COUNT; idx++) {
+        c->did[idx].consecutive_timeouts = 0u;
+        c->did[idx].slow = false;
+    }
 }
 
 static void lose_session(uds_client_core_t* c)
@@ -82,10 +99,35 @@ static void lose_session(uds_client_core_t* c)
  * gets no NRC 0x78 extension, so it holds the slot for at most RESPONSE_TIMEOUT_BASE_MS.
  * Priority alone cannot help: one request is in flight, so the hold time starves the
  * others, not the order.
+ * D-051 (E-7): a DID whose last answer came more than its poll_period_ms after its
+ * stamp is faulty the same way, until an answer comes within the period or the skip.
  */
 static bool faulty(const uds_client_core_t* c, uint32_t idx)
 {
-    return c->did[idx].consecutive_timeouts > 0u;
+    return (c->did[idx].consecutive_timeouts > 0u) || c->did[idx].slow;
+}
+
+/*
+ * D-051 (E-7): the earliest time the ECU can have taken the sample that answers the
+ * pending read. An answer carries the DID but no request reference, so after a timeout
+ * it may answer that earlier read: the first one since the last answer.
+ */
+static uint32_t sample_stamp(const uds_client_core_t* c)
+{
+    const uds_client_did_state_t* d = &c->did[c->pending_idx];
+    return (d->consecutive_timeouts > 0u) ? d->unanswered_ms : c->sent_ms;
+}
+
+/* The pending read was answered (decoded, or an NRC other than 0x78). */
+static void read_answered(uds_client_core_t* c, uint32_t now_ms)
+{
+    uds_client_did_state_t* d = &c->did[c->pending_idx];
+    d->slow = (uint32_t)(now_ms - sample_stamp(c)) >
+              (uint32_t)vehicle_cl250_dids[c->pending_idx].poll_period_ms;
+    if (d->slow) {
+        count(&c->stats.slow_answers);
+    }
+    d->consecutive_timeouts = 0u;
 }
 
 static uint8_t poll_priority(const uds_client_core_t* c, uint32_t idx)
@@ -138,6 +180,7 @@ bool uds_client_core_poll(uds_client_core_t* c, uint32_t now_ms, bool rx_busy, b
     if (c->ecu_seen && !uds_client_core_ecu_present(c, now_ms)) {
         c->ecu_seen = false; /* absent: presence needs a new answer, also across a wrap */
         lose_session(c);     /* an ECU that came back is in its default session */
+        forget_reads(c);
     }
     if (c->failed) {
         return false; /* presence still ages out above, also while latched */
@@ -262,7 +305,7 @@ static void on_negative(uds_client_core_t* c, uint32_t now_ms, uint8_t sid, uint
         return;
     }
     if (c->pending == UDS_CLIENT_REQ_READ) {
-        c->did[c->pending_idx].consecutive_timeouts = 0u; /* answered, not a timeout */
+        read_answered(c, now_ms); /* answered, not a timeout */
     }
     c->pending = UDS_CLIENT_REQ_NONE;
 }
@@ -337,7 +380,8 @@ bool uds_client_core_on_indication(uds_client_core_t* c, uint32_t now_ms,
         return false;
     }
     if ((c->pending == UDS_CLIENT_REQ_READ) && parse_read(c, data, len, sample)) {
-        c->did[c->pending_idx].consecutive_timeouts = 0u;
+        sample->stamp_ms = sample_stamp(c);
+        read_answered(c, now_ms);
         c->pending = UDS_CLIENT_REQ_NONE;
         count(&c->stats.reads_ok);
         return true;

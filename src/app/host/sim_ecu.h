@@ -44,6 +44,7 @@ typedef struct {
     bool require_session;       /* 0x22 only in the extended session */
     uint8_t pending_count;      /* answer the next reads with this many NRC 0x78 first */
     uint32_t pending_interval_ms;
+    uint16_t pending_did;       /* 0: every read, else only this DID's reads */
     bool segmented_enabled;     /* answer segmented_did with a First Frame */
     uint16_t segmented_did;
     bool nrc_enabled;           /* answer nrc_did with NRC nrc_code */
