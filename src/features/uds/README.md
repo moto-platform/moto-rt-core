@@ -149,12 +149,24 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
     - The defs codegen checks it from the defs release after v0.3.1 on (`yaml_checks.did_sample_gap_bounds`, Unreleased in v0.3.1). `test_the_gen_table_meets_its_gap_bound` recomputes it from gen/ here, and `test_no_did_starves_*` checks the scheduler against it: 20 ms and 1 ms round trips, plus 40 seeded runs with random phases and round trips of 1-20 ms.
     - `ASSUMED_ROUND_TRIP_MS` must cover the ECU's answer **plus one `uds_client_step()` period** of the target task, since a request holds the slot until the step that sees the answer. The 0.8 polling budget already caps it at 21 ms with today's table, so the D-029 bench measurement (ECU round trip + target step) must re-run `make check` in defs. Tester present (once per `TESTER_PRESENT_PERIOD_MS`) uses one step without holding the slot and is not in the model.
   - After a **timeout** the DID's period restarts at the timeout. Otherwise a silent 0xF40D (period 100 ms = the base timeout) would be due again at once and, served first, hold the slot until it is skipped.
-  - **Fault mode is not covered by the bound.** A faulty high-priority DID still goes first: a silent 0xF40D holds the slot 100 ms of every 200 ms until it is skipped (0xF40C's gap reaches exactly its 150 ms `stale_after_ms`), and endless NRC 0x78 on 0xF40D holds it for `RESPONSE_TIMEOUT_MAX_MS` (2000 ms) per attempt. The normal DIDs then go STALE, the fail-safe result (VALID/STALE is decided by sample age in `services/vehicle_signals`, never by the scheduler). Whether a DID with a recent timeout should drop to the normal class is open (ISSUES E-5).
+  - **Fault mode (D-050, ISSUES E-5).** A DID whose last read timed out (`consecutive_timeouts > 0`) is faulty until it answers or is skipped. Meanwhile it competes in the normal class whatever its gen/ priority, and NRC 0x78 does not extend its read: the read ends `RESPONSE_TIMEOUT_BASE_MS` (100 ms) after it was sent. An answer or the skip gives it its gen/ priority and the 0x78 extension back.
+    - Why the hold time, not only the class: one request is in flight, so a faulty read starves the others by how long it holds the slot. Demotion alone would leave an endless-0x78 0xF40D at 2000 ms per attempt.
+    - Result: after the first failing attempt, a silent 0xF40D or endless NRC 0x78 on it leaves every other DID's request gap within its `stale_after_ms`. For 0xF40C that is its period + the base timeout = 50 + 100 = 150 ms, exactly its `stale_after_ms` (still VALID: STALE needs age > `stale_after_ms`), so round-trip jitter and the target step period come on top. Simulated over 30 s: with a silent 0xF40D RPM is never STALE; with endless 0x78 RPM is STALE about 25 % of the time (the fresh attempts), down from about 63 %.
+    - The 150 ms relies on 0xF40C being the first normal DID in the gen/ table: another normal DID ahead of it would add one round trip. The defs codegen bound covers the nominal case only.
+    - Tests: `test_silent_speed_keeps_the_others_within_stale_after_ms`, `test_endless_0x78_on_speed_keeps_the_others_within_stale_after_ms` (20 ms and 1 ms round trips, 30 s with several skip cycles) and `test_faulty_speed_with_random_round_trips_adds_only_the_jitter` (20 seeded runs, 1-20 ms); each faulty attempt is checked to hold the slot for at most the base timeout.
+  - **Not covered by D-050** (fail-safe: the samples go STALE, since VALID/STALE is decided by sample age in `services/vehicle_signals`, never by the scheduler):
+    - The **fresh attempt**: the first failing read, and the first after each skip cooldown, may hold the slot up to `RESPONSE_TIMEOUT_MAX_MS` (2000 ms) with endless 0x78.
+    - A **slow but answering** high-priority DID (ISSUES E-7): if 0xF40D answers after a 0x78, later than its 100 ms period, it never times out, keeps its priority and the extension, and is due again when its answer lands. Every normal DID then starves with no skip and no counter. An ECU that alternates answers and endless 0x78 keeps clearing the fault state the same way. Nominal "no starvation" assumes the round trip stays within `ASSUMED_ROUND_TRIP_MS`.
+    - A **segmented reception** pauses the base timeout (up to N_Cr), and the abort hold follows; the DID is then skipped, so this happens once per cooldown.
+    - An NRC carries the SID, not the DID. A 0x78 that the ECU keeps sending for a timed-out read extends the next 0x22 read, up to `RESPONSE_TIMEOUT_MAX_MS` from that read's request; that DID is then faulty too (`test_a_late_0x78_extends_the_next_read_only_up_to_the_cap`).
+    - A late positive answer to a timed-out read can be accepted as the answer to the next request of the same DID. Its sample is stamped on arrival, so its age is underestimated by up to one timeout (ISSUES E-7). D-050 makes this more likely, since a faulty read ends after 100 ms.
+    - **Assumption:** a faulty read is abandoned 100 ms after the ECU said "response pending", and a new 0x22 may go out while the ECU is still busy. Whether the CL250 then answers NRC 0x21, ignores it or drops the session is unknown. It stays an assumption until it is seen on the real bus (D-029 bench); a HIL ECU model cannot show it.
 - **Response timeout.**
   - `RESPONSE_TIMEOUT_BASE_MS`.
   - NRC 0x78 for the pending SID restarts it, doubled, up to `RESPONSE_TIMEOUT_MAX_MS` (100 → 200 → 400 → 800 → 1600 → 2000).
   - A request never waits more than `RESPONSE_TIMEOUT_MAX_MS` in total since it was sent, so an ECU that answers 0x78 forever cannot hold the slot. The doubling and this total cap are the legacy rule (`docs/legacy-telemetry-notes.md`).
-- **Skip.** `MAX_CONSECUTIVE_TIMEOUTS` timeouts in a row skip a DID for `DID_SKIP_COOLDOWN_MS`. A decoded answer or an NRC resets the count.
+  - Except for a faulty DID's read (D-050): its 0x78 is counted but restarts nothing, so the read ends `RESPONSE_TIMEOUT_BASE_MS` after it was sent.
+- **Skip.** `MAX_CONSECUTIVE_TIMEOUTS` timeouts in a row skip a DID for `DID_SKIP_COOLDOWN_MS`. A decoded answer, an NRC other than 0x78, or the skip resets the count, and with it the D-050 fault state.
 - **ECU present.** True while any answer (positive or NRC) came within `ECU_ABSENT_TIMEOUT_MS`.
 
 **Failure behaviour.**
@@ -187,7 +199,7 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
   - The 0xFD00 status: ECU present, session up, latched, latch reason (gen/ values).
   - A 0x14 clear on the platform bus resets the DTC records only. The next step sets them again while the condition lasts, and the latch is never released by it.
 
-**Memory.** `uds_client_t` is 356 B on the M7 (348 B before the D-040 diagnostics): the link, 64 + 8 B of buffers, and the core. It must have static storage duration. `vehicle_signals` adds 81 B, and the glue adds 4 B (the foreign-frame counter). Flash is about 2 kB: core 1094 B, glue 622 B, service 252 B (release build, 2026-09-29, after the safety fixes). There is no heap, and every loop is bounded by the DID count or a frame length.
+**Memory.** `uds_client_t` is 356 B on the M7 (348 B before the D-040 diagnostics): the link, 64 + 8 B of buffers, and the core. It must have static storage duration. `vehicle_signals` adds 81 B, and the glue adds 4 B (the foreign-frame counter). Flash is about 2 kB: core 1198 B (1094 B before D-050), glue 622 B, service 252 B (release build; core 2026-10-01, the rest 2026-09-29). There is no heap, and every loop is bounded by the DID count or a frame length.
 
 **Integration notes.**
 - Call `uds_client_step()` once per main-loop pass, after `can_if_dispatch(CAN_PORT_VEHICLE, ...)`.
@@ -226,6 +238,12 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
   - safety-reviewer: every fix confirmed, no blocker. Four new MINOR findings:
     - MINOR-1: presence did not age out while latched. Fixed: the absence check runs before the latch return; tested.
     - MINOR-2, MINOR-3, MINOR-4 (functional addressing, `not_sent` schedule, H7 filters): documented under known limits.
+
+**Review of D-050 (2026-10-01).** vss-schema-guardian: CLEAN (defs v0.3.1). safety-reviewer: no blocker; the fault-state lifecycle, the 150 ms gap and the unchanged traffic were confirmed.
+- MAJOR-1, a slow but answering high-priority DID still starves the others (there before D-050): documented under "Not covered", user decision ISSUES E-7.
+- MINOR-2 (STALE share quantified), MINOR-3 (late 0x78 test, HIL wording), MINOR-4 (segmented exception), MINOR-6 (abandon-after-0x78 assumption): applied here.
+- MINOR-5, late answer credited to the next request: documented, ISSUES E-7.
+- NIT-7 (line length) fixed, NIT-9 (table order) documented. Tests added: the late 0x78 on the next read, and 0x78 on the session request while a DID is faulty.
 
 **Follow-ups.** The client is merged (rt-core#5 and #6); the ISO codes and Q-021 are done (D-040). What remains:
 - N_As, bus-off backoff and FDCAN filters that pass the request and watch IDs: the H7 HAL (Ç1).
@@ -382,6 +400,11 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
 - `uds_client_vehicle_dlc_unplug_replug` (vehicle bus, UDS client, needs the H7 N_As abort):
   - Disconnect CAN_H/L for 2 s and for 10 s.
   - Pass when there is no latch, bus load stays bounded while unplugged, and every DID is VALID within `SESSION_RETRY_INTERVAL_MS` + `stale_after_ms` after reconnecting.
+- `uds_client_vehicle_faulty_speed` (vehicle bus, UDS client, D-050; ISSUES E-6):
+  - The ECU model leaves 0xF40D unanswered for 30 s, then answers NRC 0x78 forever on it for 30 s, then recovers.
+  - Pass when only one request is ever in flight, only `tester_policy` services go out, every other DID stays VALID except in the window of each fresh 0xF40D attempt (and at most a few ms per faulty attempt for 0xF40C, see "Reads"; about 25 % RPM STALE in the endless-0x78 phase), and 0xF40D is VALID within `stale_after_ms` after recovery plus at most one skip cooldown.
+  - Variants: 0xF40D answering after 0x78 at 150-250 ms (ISSUES E-7, today every normal DID starves), and 0x78 sent on the ECU's own clock after the timeout.
+  - This checks rt-core against a model. How the real CL250 behaves needs a capture on the bike.
 - `uds_client_cold_crank_brownout`: the ECU stops ACKing for 200–500 ms. Same pass criteria.
 - `uds_client_foreign_tester`: a second tester sends 0x22 on `VEHICLE_CL250_REQUEST_ID`. Pass when rt-core stops sending within one loop and reports `UDS_CLIENT_FAULT_FOREIGN_TESTER`.
 - `uds_client_vehicle_ecu_off_on` (vehicle bus, UDS client):

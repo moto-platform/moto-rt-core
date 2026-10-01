@@ -26,10 +26,15 @@
  *     since their last timeout) and not in skip cooldown, the lowest gen/ priority value
  *     first, then table order (D-043). One request in flight. No starvation while each
  *     request holds the slot for at most ASSUMED_ROUND_TRIP_MS (the ECU's answer plus
- *     one poll step); a faulty DID can exceed that and the others then go STALE.
+ *     one poll step). A DID whose last read timed out competes in the normal class and
+ *     gets no NRC 0x78 extension until it answers or is skipped (D-050), so after its
+ *     first failing attempt it holds the slot for at most RESPONSE_TIMEOUT_BASE_MS
+ *     (plus N_Cr if a segmented reception starts). A slow but answering DID is not
+ *     faulty (README, "Not covered by D-050").
  *   - Response timeout RESPONSE_TIMEOUT_BASE_MS; NRC 0x78 for the pending SID restarts
- *     it doubled, up to RESPONSE_TIMEOUT_MAX_MS; a request never waits longer than
- *     RESPONSE_TIMEOUT_MAX_MS in total. The base timeout pauses while a segmented
+ *     it doubled (not for a D-050 faulty read), up to RESPONSE_TIMEOUT_MAX_MS; a
+ *     request never waits longer than RESPONSE_TIMEOUT_MAX_MS in total. The base
+ *     timeout pauses while a segmented
  *     reception runs (it ends in N_Cr at the latest); the total cap does not.
  *   - MAX_CONSECUTIVE_TIMEOUTS timeouts in a row skip a DID for DID_SKIP_COOLDOWN_MS.
  *   - Any other NRC for the pending SID ends the request (legacy behaviour): not a
@@ -82,7 +87,7 @@ typedef struct {
     uint32_t reads_ok;          /* DID samples produced */
     uint32_t timeouts;          /* requests that ended without an answer */
     uint32_t nrc;               /* negative responses, any SID and code */
-    uint32_t response_pending;  /* NRC 0x78 that extended the pending request */
+    uint32_t response_pending;  /* NRC 0x78 for the pending SID (not extended if faulty, D-050) */
     uint32_t unavailable;       /* failed receptions (e.g. ISOTP_N_TIMEOUT_CR) */
     uint32_t did_skips;         /* DIDs put into skip cooldown */
     uint32_t unexpected;        /* responses that matched no pending request */

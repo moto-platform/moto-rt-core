@@ -688,6 +688,252 @@ static void test_endless_0x78_on_speed_holds_the_slot_up_to_the_cap_then_the_oth
     TEST_ASSERT_EQUAL_UINT32(1u, count_did_reads(speed, max + period, max + period + 1u));
 }
 
+/* ------------------------------------------------------------------------- */
+/* D-050 (E-5): fault-mode fairness                                           */
+/* ------------------------------------------------------------------------- */
+
+static void test_a_timed_out_high_did_competes_in_the_normal_class_until_it_answers(void)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t rpm = VEHICLE_CL250_IDX_ENGINE_SPEED; /* first normal DID in table order */
+    TEST_ASSERT_LESS_THAN_UINT32(speed, rpm);
+    bring_up(0u);
+    all_requested_at(0u);
+    c.did[speed].consecutive_timeouts = 1u;
+    c.did[speed].requested = false;
+    c.did[rpm].requested = false; /* both due */
+    TEST_ASSERT_EQUAL(K_READ, poll_at(0u));
+    TEST_ASSERT_EQUAL_UINT32(rpm, req_idx()); /* faulty speed: normal class, table order */
+    TEST_ASSERT_TRUE(answer_read(1u, rpm, 1u));
+    TEST_ASSERT_EQUAL(K_READ, poll_at(1u));
+    TEST_ASSERT_EQUAL_UINT32(speed, req_idx());
+    TEST_ASSERT_TRUE(answer_read(2u, speed, 1u)); /* answered: gen/ priority again */
+    TEST_ASSERT_EQUAL_UINT8(0u, c.did[speed].consecutive_timeouts);
+    all_requested_at(0u);
+    c.did[speed].requested = false;
+    c.did[rpm].requested = false;
+    TEST_ASSERT_EQUAL(K_READ, poll_at(2u));
+    TEST_ASSERT_EQUAL_UINT32(speed, req_idx());
+}
+
+static void test_a_skip_gives_a_faulty_did_its_gen_priority_back(void)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t base = VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS;
+    bring_up(0u);
+    all_requested_at(0u);
+    c.did[speed].consecutive_timeouts = (uint8_t)(VEHICLE_CL250_MAX_CONSECUTIVE_TIMEOUTS - 1u);
+    c.did[speed].requested = false;
+    TEST_ASSERT_EQUAL(K_READ, poll_at(0u));
+    TEST_ASSERT_EQUAL_UINT32(speed, req_idx());
+    (void)poll_skip_tp(base); /* the last timeout skips it */
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->did_skips);
+    TEST_ASSERT_EQUAL_UINT8(0u, c.did[speed].consecutive_timeouts);
+    /* After the cooldown it goes before a normal DID that is due at the same time. */
+    const uint32_t back = base + VEHICLE_CL250_DID_SKIP_COOLDOWN_MS;
+    c.last_response_ms = back; /* the other DIDs answered meanwhile: the ECU is present */
+    all_requested_at(back);
+    c.did[speed].requested = false;
+    c.did[VEHICLE_CL250_IDX_ENGINE_SPEED].requested = false;
+    TEST_ASSERT_EQUAL(K_READ, poll_skip_tp(back));
+    TEST_ASSERT_EQUAL_UINT32(speed, req_idx());
+}
+
+static void test_nrc_0x78_does_not_extend_a_faulty_did_read(void)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t base = VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS;
+    bring_up(0u);
+    all_requested_at(0u);
+    c.did[speed].consecutive_timeouts = 1u;
+    c.did[speed].requested = false; /* only speed is due */
+    TEST_ASSERT_EQUAL(K_READ, poll_at(0u));
+    TEST_ASSERT_EQUAL_UINT32(speed, req_idx());
+    nrc(base / 2u, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_RESPONSE_PENDING);
+    nrc(base - 1u, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_RESPONSE_PENDING);
+    TEST_ASSERT_EQUAL_UINT32(2u, stats()->response_pending); /* still counted */
+    TEST_ASSERT_EQUAL_UINT32(base, c.wait_ms);
+    TEST_ASSERT_EQUAL(K_NONE, poll_skip_tp(base - 1u));
+    TEST_ASSERT_EQUAL(UDS_CLIENT_REQ_READ, uds_client_core_pending(&c));
+    (void)poll_skip_tp(base); /* ends at the base timeout from the request */
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->timeouts);
+    TEST_ASSERT_EQUAL_UINT8(2u, c.did[speed].consecutive_timeouts);
+}
+
+static void test_an_answer_after_0x78_on_a_faulty_did_within_the_base_is_accepted(void)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t base = VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS;
+    bring_up(0u);
+    all_requested_at(0u);
+    c.did[speed].consecutive_timeouts = 1u;
+    c.did[speed].requested = false;
+    TEST_ASSERT_EQUAL(K_READ, poll_at(0u));
+    nrc(10u, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_RESPONSE_PENDING);
+    TEST_ASSERT_TRUE(answer_read(base - 1u, speed, 50u));
+    TEST_ASSERT_EQUAL_UINT8(0u, c.did[speed].consecutive_timeouts);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->timeouts);
+}
+
+/*
+ * Known residual (README "Reads"): an NRC carries the SID only, so 0x78 that the ECU
+ * keeps sending for a timed-out 0xF40D extends the next 0x22 read. That read is still
+ * capped at RESPONSE_TIMEOUT_MAX_MS from its request; its DID is then faulty and its
+ * next read gets no extension.
+ */
+static void test_a_late_0x78_extends_the_next_read_only_up_to_the_cap(void)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t rpm = VEHICLE_CL250_IDX_ENGINE_SPEED;
+    const uint32_t base = VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS;
+    const uint32_t max = VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS;
+    const uint8_t sid = UDS_SID_READ_DATA_BY_IDENTIFIER;
+    bring_up(0u);
+    all_requested_at(0u);
+    c.did[speed].consecutive_timeouts = 1u;
+    c.did[speed].requested = false; /* only speed is due */
+    TEST_ASSERT_EQUAL(K_READ, poll_at(0u));
+    TEST_ASSERT_EQUAL_UINT32(speed, req_idx());
+    c.did[rpm].requested = false; /* due when the speed read ends */
+    TEST_ASSERT_EQUAL(K_READ, poll_skip_tp(base));
+    TEST_ASSERT_EQUAL_UINT32(rpm, req_idx());
+    for (uint32_t t = base + 10u; t < (base + max); t += 50u) {
+        nrc(t, sid, UDS_NRC_RESPONSE_PENDING); /* the ECU's clock, meant for speed */
+        TEST_ASSERT_EQUAL(K_NONE, poll_skip_tp(t));
+    }
+    TEST_ASSERT_EQUAL(UDS_CLIENT_REQ_READ, uds_client_core_pending(&c));
+    TEST_ASSERT_EQUAL(K_NONE, poll_skip_tp(base + max - 1u));
+    all_requested_at(base + max); /* nothing else due when the RPM read ends */
+    TEST_ASSERT_EQUAL(K_NONE, poll_skip_tp(base + max)); /* capped from the RPM request */
+    TEST_ASSERT_EQUAL_UINT32(2u, stats()->timeouts);
+    TEST_ASSERT_EQUAL_UINT8(1u, c.did[rpm].consecutive_timeouts);
+    c.did[rpm].requested = false; /* only RPM is due */
+    const uint32_t t1 = base + max + 1u;
+    TEST_ASSERT_EQUAL(K_READ, poll_skip_tp(t1));
+    TEST_ASSERT_EQUAL_UINT32(rpm, req_idx());
+    nrc(t1 + 10u, sid, UDS_NRC_RESPONSE_PENDING);
+    TEST_ASSERT_EQUAL_UINT32(base, c.wait_ms); /* faulty now: no extension */
+    (void)poll_skip_tp(t1 + base);
+    TEST_ASSERT_EQUAL_UINT8(2u, c.did[rpm].consecutive_timeouts);
+}
+
+static void test_0x78_on_the_session_request_still_extends_while_a_did_is_faulty(void)
+{
+    const uint32_t base = VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS;
+    uds_client_core_init(&c, HOLD_MS);
+    c.did[0].consecutive_timeouts = 1u; /* pending_idx is 0 for a session request */
+    TEST_ASSERT_EQUAL(K_SESSION, poll_at(0u));
+    nrc(10u, VEHICLE_CL250_SESSION_SID, UDS_NRC_RESPONSE_PENDING);
+    TEST_ASSERT_EQUAL_UINT32(2u * base, c.wait_ms);
+    TEST_ASSERT_EQUAL(UDS_CLIENT_REQ_SESSION, uds_client_core_pending(&c));
+}
+
+/*
+ * D-050: 0xF40D is silent (endless_0x78 false) or answers NRC 0x78 every 50 ms while
+ * its read is pending (true); every other DID answers after a round trip in
+ * [rtt_min, rtt_max] (seeded). The run covers several skip cycles. Every other DID's
+ * sample gap must stay within its stale_after_ms plus the round-trip jitter, except
+ * across a fresh attempt (0xF40D read with no timeout before it: the first failing
+ * attempt, and the first after each skip cooldown), which may hold the slot up to
+ * RESPONSE_TIMEOUT_MAX_MS. A faulty attempt holds it at most RESPONSE_TIMEOUT_BASE_MS.
+ */
+static void run_with_faulty_speed(bool endless_0x78, uint32_t rtt_min, uint32_t rtt_max,
+                                  uint32_t duration_ms)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t base = VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS;
+    const uint32_t t0 = 1000u;
+    uint32_t last_sample[VEHICLE_CL250_DID_COUNT];
+    bool answer_due = false;
+    uint32_t answer_t = 0u;
+    uint32_t answer_idx = 0u;
+    bool attempt = false;      /* a 0xF40D read is pending */
+    bool attempt_fresh = false;
+    uint32_t attempt_t = 0u;
+    uint32_t fresh_end = 0u;   /* end of the latest fresh attempt */
+    uint32_t faulty_attempts = 0u;
+    bring_up(t0);
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        last_sample[i] = t0;
+    }
+    for (uint32_t t = t0; t < (t0 + duration_ms); t++) {
+        if (answer_due && (t == answer_t)) {
+            TEST_ASSERT_TRUE(answer_read(t, answer_idx, 1u));
+            last_sample[answer_idx] = t;
+            answer_due = false;
+        }
+        if (endless_0x78 && attempt && (t != attempt_t) && (((t - attempt_t) % 50u) == 0u)) {
+            nrc(t, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_RESPONSE_PENDING);
+        }
+        kind_t k;
+        while ((k = poll_at(t)) != K_NONE) {
+            TEST_ASSERT_TRUE_MESSAGE(k != K_SESSION, "session lost");
+            if (attempt && ((uds_client_core_pending(&c) != UDS_CLIENT_REQ_READ) ||
+                            (c.pending_idx != speed) || (k == K_READ))) {
+                attempt = false; /* ended in this poll (timeout) */
+                if (attempt_fresh) {
+                    fresh_end = t;
+                    TEST_ASSERT_LESS_OR_EQUAL_UINT32(VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS,
+                                                     t - attempt_t);
+                } else {
+                    faulty_attempts++;
+                    TEST_ASSERT_LESS_OR_EQUAL_UINT32_MESSAGE(base, t - attempt_t,
+                                                             "a faulty read held the slot");
+                }
+            }
+            if (k == K_READ) {
+                TEST_ASSERT_FALSE_MESSAGE(answer_due, "two requests in flight");
+                if (req_idx() == speed) {
+                    attempt = true;
+                    attempt_fresh = (c.did[speed].consecutive_timeouts == 0u);
+                    attempt_t = t;
+                } else {
+                    answer_due = true;
+                    answer_idx = req_idx();
+                    answer_t = t + rtt_min + (rng_next() % (rtt_max - rtt_min + 1u));
+                }
+            }
+        }
+        for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+            const bool across_fresh =
+                (attempt && attempt_fresh) || (fresh_end > last_sample[i]);
+            if ((i != speed) && !across_fresh) {
+                TEST_ASSERT_LESS_OR_EQUAL_UINT32_MESSAGE(
+                    vehicle_cl250_dids[i].stale_after_ms + (rtt_max - rtt_min),
+                    t - last_sample[i], "a DID went STALE while 0xF40D was faulty");
+            }
+        }
+    }
+    TEST_ASSERT_GREATER_THAN_UINT32(1u, stats()->did_skips); /* several skip cycles */
+    TEST_ASSERT_GREATER_THAN_UINT32(0u, faulty_attempts);
+}
+
+static void test_silent_speed_keeps_the_others_within_stale_after_ms(void)
+{
+    const uint32_t rtt = VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS;
+    run_with_faulty_speed(false, rtt, rtt, 30000u);
+    setUp();
+    run_with_faulty_speed(false, 1u, 1u, 30000u);
+}
+
+static void test_endless_0x78_on_speed_keeps_the_others_within_stale_after_ms(void)
+{
+    const uint32_t rtt = VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS;
+    run_with_faulty_speed(true, rtt, rtt, 30000u);
+    setUp();
+    run_with_faulty_speed(true, 1u, 1u, 30000u);
+}
+
+static void test_faulty_speed_with_random_round_trips_adds_only_the_jitter(void)
+{
+    for (uint32_t seed = 1u; seed <= 20u; seed++) {
+        setUp();
+        rng_state = seed;
+        run_with_faulty_speed((seed % 2u) == 0u, 1u, VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS,
+                              15000u);
+    }
+}
+
 static void test_speed_answer_within_its_gen_period_keeps_the_period_from_the_request(void)
 {
     const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
@@ -1090,6 +1336,15 @@ int main(void)
     RUN_TEST(test_response_timeout_is_the_gen_base);
     RUN_TEST(test_silent_speed_restarts_its_period_and_the_normal_dids_are_still_read);
     RUN_TEST(test_speed_answer_within_its_gen_period_keeps_the_period_from_the_request);
+    RUN_TEST(test_a_timed_out_high_did_competes_in_the_normal_class_until_it_answers);
+    RUN_TEST(test_a_skip_gives_a_faulty_did_its_gen_priority_back);
+    RUN_TEST(test_nrc_0x78_does_not_extend_a_faulty_did_read);
+    RUN_TEST(test_an_answer_after_0x78_on_a_faulty_did_within_the_base_is_accepted);
+    RUN_TEST(test_a_late_0x78_extends_the_next_read_only_up_to_the_cap);
+    RUN_TEST(test_0x78_on_the_session_request_still_extends_while_a_did_is_faulty);
+    RUN_TEST(test_silent_speed_keeps_the_others_within_stale_after_ms);
+    RUN_TEST(test_endless_0x78_on_speed_keeps_the_others_within_stale_after_ms);
+    RUN_TEST(test_faulty_speed_with_random_round_trips_adds_only_the_jitter);
     RUN_TEST(test_endless_0x78_on_speed_holds_the_slot_up_to_the_cap_then_the_others_go);
     RUN_TEST(test_nrc_0x78_doubles_the_timeout_up_to_the_gen_max_in_total);
     RUN_TEST(test_nrc_0x78_timeout_saturates_at_the_gen_max);
