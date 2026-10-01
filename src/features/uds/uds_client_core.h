@@ -47,7 +47,8 @@
  *   - A failed reception (Q-020: a segmented response ends in ISOTP_N_TIMEOUT_CR) means
  *     "service unavailable": the DID goes into skip cooldown at once, and nothing is sent
  *     for the link's N_Bs, so the ECU has given up its segmented send first.
- *   - ECU present while any response came within ECU_ABSENT_TIMEOUT_MS.
+ *   - ECU present while any response came within ECU_ABSENT_TIMEOUT_MS. Absence also
+ *     ends every DID's D-050/D-051 fault state: no read from before it is answered.
  *   - No request is produced while the link cannot take one at once (tx_ready false,
  *     e.g. no node ACKs and the mailbox stays full); the timers keep running.
  *   - A request the link could not take is dropped (uds_client_core_not_sent()); a read
@@ -106,6 +107,7 @@ typedef struct {
     uint32_t unavailable;       /* failed receptions (e.g. ISOTP_N_TIMEOUT_CR) */
     uint32_t did_skips;         /* DIDs put into skip cooldown */
     uint32_t unexpected;        /* responses that matched no pending request */
+    uint32_t slow_answers;      /* answers later than poll_period_ms after their stamp (D-051) */
     uint32_t session_starts;    /* positive session responses */
     uint32_t session_losses;    /* session up -> down */
 } uds_client_stats_t;

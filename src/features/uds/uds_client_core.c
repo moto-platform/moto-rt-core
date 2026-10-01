@@ -72,6 +72,19 @@ static void end_with_timeout(uds_client_core_t* c, uint32_t now_ms)
     c->pending = UDS_CLIENT_REQ_NONE;
 }
 
+/*
+ * The ECU went absent for longer than RESPONSE_TIMEOUT_MAX_MS, so it will not answer a
+ * read from before: no answer is outstanding and no DID is faulty or slow (D-051).
+ * Otherwise every sample after key-on would be stamped before the absence.
+ */
+static void forget_reads(uds_client_core_t* c)
+{
+    for (uint32_t idx = 0u; idx < VEHICLE_CL250_DID_COUNT; idx++) {
+        c->did[idx].consecutive_timeouts = 0u;
+        c->did[idx].slow = false;
+    }
+}
+
 static void lose_session(uds_client_core_t* c)
 {
     if (c->session_up) {
@@ -111,6 +124,9 @@ static void read_answered(uds_client_core_t* c, uint32_t now_ms)
     uds_client_did_state_t* d = &c->did[c->pending_idx];
     d->slow = (uint32_t)(now_ms - sample_stamp(c)) >
               (uint32_t)vehicle_cl250_dids[c->pending_idx].poll_period_ms;
+    if (d->slow) {
+        count(&c->stats.slow_answers);
+    }
     d->consecutive_timeouts = 0u;
 }
 
@@ -164,6 +180,7 @@ bool uds_client_core_poll(uds_client_core_t* c, uint32_t now_ms, bool rx_busy, b
     if (c->ecu_seen && !uds_client_core_ecu_present(c, now_ms)) {
         c->ecu_seen = false; /* absent: presence needs a new answer, also across a wrap */
         lose_session(c);     /* an ECU that came back is in its default session */
+        forget_reads(c);
     }
     if (c->failed) {
         return false; /* presence still ages out above, also while latched */

@@ -1100,6 +1100,188 @@ static void test_a_skip_clears_the_slow_state(void)
     TEST_ASSERT_FALSE(c.did[speed].slow); /* the fresh attempt gets the extension back */
 }
 
+static void test_a_decoded_answer_at_exactly_its_period_is_in_time(void)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t period = vehicle_cl250_dids[speed].poll_period_ms;
+    for (uint32_t late = 0u; late <= 1u; late++) {
+        setUp();
+        bring_up(0u);
+        all_requested_at(0u);
+        c.did[speed].requested = false;
+        TEST_ASSERT_EQUAL(K_READ, poll_at(0u));
+        nrc(10u, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_RESPONSE_PENDING);
+        TEST_ASSERT_TRUE(answer_read(period + late, speed, 60u));
+        TEST_ASSERT_EQUAL(late == 1u, c.did[speed].slow);
+        TEST_ASSERT_EQUAL_UINT32(late, stats()->slow_answers);
+    }
+}
+
+/*
+ * One lost 0xF40D answer, every other answer at once: the next answer is stamped with
+ * the lost read, so it counts as slow (safety review MAJOR-1 on D-051). Speed then
+ * competes as normal for one more round and gets its priority back with the answer
+ * after that. The cost of one lost frame is two degraded rounds.
+ */
+static void test_one_lost_speed_answer_costs_one_more_faulty_round(void)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t rpm = VEHICLE_CL250_IDX_ENGINE_SPEED;
+    const uint32_t base = VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS;
+    const uint32_t period = vehicle_cl250_dids[speed].poll_period_ms;
+    bring_up(0u);
+    silent_mask = 1u << speed;
+    drive(0u, base + 1u); /* the first speed read is lost and times out at base */
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->timeouts);
+    TEST_ASSERT_EQUAL_UINT8(1u, c.did[speed].consecutive_timeouts);
+    silent_mask = 0u;
+    const uint32_t t1 = base + period; /* due again one period after the timeout */
+    drive(base + 1u, t1 + 1u);
+    TEST_ASSERT_EQUAL_UINT32(1u, count_did_reads(speed, t1, t1 + 1u));
+    TEST_ASSERT_TRUE(c.did[speed].slow); /* answered at once, but stamped at 0 */
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->slow_answers);
+    const uint32_t t2 = t1 + period;
+    drive(t1 + 1u, t2 + 1u);
+    uint32_t first = VEHICLE_CL250_DID_COUNT;
+    for (uint32_t i = 0u; i < log_n; i++) {
+        if ((log_buf[i].k == K_READ) && (log_buf[i].t == t2)) {
+            first = log_buf[i].idx;
+            break;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(rpm, first); /* speed still in the normal class */
+    TEST_ASSERT_FALSE(c.did[speed].slow); /* its answer at t2 was in time */
+    const uint32_t t3 = t2 + period;
+    drive(t2 + 1u, t3 + 1u);
+    for (uint32_t i = 0u; i < log_n; i++) {
+        if ((log_buf[i].k == K_READ) && (log_buf[i].t == t3)) {
+            first = log_buf[i].idx;
+            break;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(speed, first); /* its gen/ priority is back */
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->timeouts);
+}
+
+/*
+ * Known limit (README, ISSUES E-8): 0xF40C (normal, period 50 ms < base timeout) that
+ * answers 70 ms after each request, without 0x78, never times out and is due again at
+ * once; as the first normal DID it keeps the later normal DIDs from being read. Only
+ * slow_answers shows it.
+ */
+static void test_a_slow_rpm_within_the_base_timeout_starves_the_later_normal_dids(void)
+{
+    const uint32_t rpm = VEHICLE_CL250_IDX_ENGINE_SPEED;
+    const uint32_t tps = VEHICLE_CL250_IDX_THROTTLE_POS;
+    const uint32_t answer_ms = 70u;
+    TEST_ASSERT_LESS_THAN_UINT32(answer_ms, vehicle_cl250_dids[rpm].poll_period_ms);
+    TEST_ASSERT_GREATER_THAN_UINT32(answer_ms, VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS);
+    bring_up(0u);
+    bool rpm_due = false;
+    uint32_t rpm_t = 0u;
+    for (uint32_t t = 0u; t < 2000u; t++) {
+        if (rpm_due && (t == rpm_t)) {
+            TEST_ASSERT_TRUE(answer_read(t, rpm, 1u));
+            rpm_due = false;
+        }
+        kind_t k;
+        while ((k = poll_at(t)) != K_NONE) {
+            if (k != K_READ) {
+                continue;
+            }
+            const uint32_t idx = req_idx();
+            if (log_n < LOG_MAX) {
+                log_buf[log_n].t = t;
+                log_buf[log_n].k = k;
+                log_buf[log_n].idx = idx;
+                log_n++;
+            }
+            if (idx == rpm) {
+                rpm_due = true;
+                rpm_t = t + answer_ms;
+            } else {
+                TEST_ASSERT_TRUE(answer_read(t, idx, 1u));
+            }
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->timeouts);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->did_skips);
+    TEST_ASSERT_GREATER_THAN_UINT32(10u, stats()->slow_answers);
+    TEST_ASSERT_EQUAL_UINT32(0u, count_did_reads(tps, 1000u, 2000u));
+}
+
+/* An ECU absent longer than RESPONSE_TIMEOUT_MAX_MS answers no read from before. */
+static void test_ecu_absence_ends_the_fault_state_of_every_did(void)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t rpm = VEHICLE_CL250_IDX_ENGINE_SPEED;
+    const uint32_t absent = VEHICLE_CL250_ECU_ABSENT_TIMEOUT_MS;
+    TEST_ASSERT_GREATER_THAN_UINT32(VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS, absent);
+    bring_up(0u);
+    all_requested_at(absent - 1u); /* no read goes out meanwhile */
+    c.did[speed].consecutive_timeouts = 2u;
+    c.did[rpm].slow = true;
+    TEST_ASSERT_EQUAL(K_NONE, poll_skip_tp(absent - 1u));
+    TEST_ASSERT_TRUE(uds_client_core_session_up(&c)); /* still present */
+    TEST_ASSERT_EQUAL_UINT8(2u, c.did[speed].consecutive_timeouts);
+    TEST_ASSERT_TRUE(c.did[rpm].slow);
+    (void)poll_skip_tp(absent);
+    TEST_ASSERT_FALSE(uds_client_core_session_up(&c));
+    TEST_ASSERT_EQUAL_UINT8(0u, c.did[speed].consecutive_timeouts);
+    TEST_ASSERT_FALSE(c.did[rpm].slow);
+}
+
+static void test_not_sent_and_latch_keep_the_fault_state(void)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    bring_up(0u);
+    all_requested_at(0u);
+    c.did[speed].requested = false;
+    c.did[speed].consecutive_timeouts = 1u;
+    c.did[speed].unanswered_ms = 7u;
+    c.did[speed].slow = true;
+    TEST_ASSERT_EQUAL(K_READ, poll_at(10u));
+    TEST_ASSERT_EQUAL_UINT32(speed, req_idx());
+    uds_client_core_not_sent(&c);
+    TEST_ASSERT_EQUAL_UINT8(1u, c.did[speed].consecutive_timeouts);
+    TEST_ASSERT_EQUAL_UINT32(7u, c.did[speed].unanswered_ms);
+    TEST_ASSERT_TRUE(c.did[speed].slow);
+    uds_client_core_latch(&c);
+    TEST_ASSERT_EQUAL_UINT8(1u, c.did[speed].consecutive_timeouts);
+    TEST_ASSERT_EQUAL_UINT32(7u, c.did[speed].unanswered_ms);
+    TEST_ASSERT_TRUE(c.did[speed].slow);
+}
+
+/* Stamps and the slow check across the 32-bit ms wrap. */
+static void test_stamps_and_the_slow_check_are_wrap_safe(void)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t base = VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS;
+    const uint32_t period = vehicle_cl250_dids[speed].poll_period_ms;
+    const uint32_t t0 = UINT32_MAX - 40u;
+    bring_up(t0);
+    all_requested_at(t0);
+    c.did[speed].requested = false;
+    TEST_ASSERT_EQUAL(K_READ, poll_at(t0));
+    TEST_ASSERT_TRUE(answer_read(t0 + period, speed, 60u)); /* after the wrap, in time */
+    TEST_ASSERT_EQUAL_UINT32(t0, smp.stamp_ms);
+    TEST_ASSERT_FALSE(c.did[speed].slow);
+    /* A read before the wrap times out after it; its late answer keeps its stamp. */
+    const uint32_t t1 = t0 + period; /* wrapped */
+    all_requested_at(t1);
+    c.did[speed].last_request_ms = t0;
+    TEST_ASSERT_EQUAL(K_READ, poll_skip_tp(t1));
+    all_requested_at(t1 + base);
+    TEST_ASSERT_EQUAL(K_NONE, poll_skip_tp(t1 + base));
+    TEST_ASSERT_EQUAL_UINT32(t1, c.did[speed].unanswered_ms);
+    all_requested_at(t1 + base + period);
+    c.did[speed].last_request_ms = t1 + base;
+    TEST_ASSERT_EQUAL(K_READ, poll_skip_tp(t1 + base + period));
+    TEST_ASSERT_TRUE(answer_read(t1 + base + period + 5u, speed, 61u));
+    TEST_ASSERT_EQUAL_UINT32(t1, smp.stamp_ms);
+    TEST_ASSERT_TRUE(c.did[speed].slow);
+}
+
 /*
  * D-051 runs. Every DID but 0xF40D answers after a round trip in [rtt_min, rtt_max].
  * 0xF40D, by mode:
@@ -1122,7 +1304,6 @@ static void test_a_skip_clears_the_slow_state(void)
 typedef enum { SPEED_SLOW_ABANDONS = 0, SPEED_SLOW_KEEPS, SPEED_ALTERNATING } speed_mode_t;
 
 #define LATE_MAX 8u
-
 
 static void run_with_slow_speed(speed_mode_t mode, uint32_t rtt_min, uint32_t rtt_max,
                                 uint32_t duration_ms)
@@ -1769,6 +1950,12 @@ int main(void)
     RUN_TEST(test_an_nrc_after_the_period_makes_the_did_faulty_too);
     RUN_TEST(test_a_late_answer_to_a_timed_out_read_is_stamped_with_that_read);
     RUN_TEST(test_a_skip_clears_the_slow_state);
+    RUN_TEST(test_a_decoded_answer_at_exactly_its_period_is_in_time);
+    RUN_TEST(test_one_lost_speed_answer_costs_one_more_faulty_round);
+    RUN_TEST(test_a_slow_rpm_within_the_base_timeout_starves_the_later_normal_dids);
+    RUN_TEST(test_ecu_absence_ends_the_fault_state_of_every_did);
+    RUN_TEST(test_not_sent_and_latch_keep_the_fault_state);
+    RUN_TEST(test_stamps_and_the_slow_check_are_wrap_safe);
     RUN_TEST(test_speed_answering_150_to_250_ms_after_0x78_keeps_the_others_fresh);
     RUN_TEST(test_speed_alternating_answer_and_endless_0x78_keeps_the_others_fresh);
     RUN_TEST(test_speed_answer_within_its_gen_period_keeps_the_period_from_the_request);
