@@ -77,13 +77,33 @@ static void lose_session(uds_client_core_t* c)
 }
 
 /*
- * Next due DID, or false (D-043): the lowest gen/ priority value first, then table
- * order. The scan always covers the whole table; a strict < keeps the first entry of a
- * class. No starvation while every request holds the slot for at most
- * ASSUMED_ROUND_TRIP_MS (ECU answer + one step): the defs codegen (after v0.3.1) and
- * test_the_gen_table_meets_its_gap_bound bound every DID's sample gap by its
- * stale_after_ms for this order. A faulty DID can exceed that; the samples then go
- * STALE in vehicle_signals (README, "Reads").
+ * D-050 (E-5): a DID whose last read timed out is faulty until it answers or is
+ * skipped. It competes in the normal class whatever its gen/ priority, and its read
+ * gets no NRC 0x78 extension, so it holds the slot for at most RESPONSE_TIMEOUT_BASE_MS.
+ * Priority alone cannot help: one request is in flight, so the hold time starves the
+ * others, not the order.
+ */
+static bool faulty(const uds_client_core_t* c, uint32_t idx)
+{
+    return c->did[idx].consecutive_timeouts > 0u;
+}
+
+static uint8_t poll_priority(const uds_client_core_t* c, uint32_t idx)
+{
+    const uint8_t prio = vehicle_cl250_dids[idx].priority;
+    return (faulty(c, idx) && (prio < VEHICLE_CL250_PRIORITY_NORMAL))
+               ? (uint8_t)VEHICLE_CL250_PRIORITY_NORMAL
+               : prio;
+}
+
+/*
+ * Next due DID, or false (D-043): the lowest priority value first (poll_priority(),
+ * D-050), then table order. The scan always covers the whole table; a strict < keeps
+ * the first entry of a class. No starvation while every request holds the slot for at
+ * most ASSUMED_ROUND_TRIP_MS (ECU answer + one step): the defs codegen (after v0.3.1)
+ * and test_the_gen_table_meets_its_gap_bound bound every DID's sample gap by its
+ * stale_after_ms for this order. A faulty DID holds it for up to the base timeout
+ * after its first failing attempt (README, "Reads").
  */
 static bool next_read(uds_client_core_t* c, uint32_t now_ms, uint32_t* idx_out)
 {
@@ -98,8 +118,7 @@ static bool next_read(uds_client_core_t* c, uint32_t now_ms, uint32_t* idx_out)
                          (!d->requested ||
                           expired(now_ms, d->last_request_ms,
                                   (uint32_t)vehicle_cl250_dids[idx].poll_period_ms));
-        if (due && (!found || (vehicle_cl250_dids[idx].priority <
-                               vehicle_cl250_dids[best].priority))) {
+        if (due && (!found || (poll_priority(c, idx) < poll_priority(c, best)))) {
             best = idx;
             found = true;
         }
@@ -213,10 +232,13 @@ static void on_negative(uds_client_core_t* c, uint32_t now_ms, uint8_t sid, uint
         return; /* e.g. an NRC for tester present: never ends another request */
     }
     if (nrc == UDS_NRC_RESPONSE_PENDING) {
-        c->wait_ms = (c->wait_ms > (VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS / 2u))
-                         ? VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS
-                         : (c->wait_ms * 2u);
-        c->wait_start_ms = now_ms;
+        /* D-050: a faulty DID's read still ends at the base timeout from its request. */
+        if ((c->pending != UDS_CLIENT_REQ_READ) || !faulty(c, c->pending_idx)) {
+            c->wait_ms = (c->wait_ms > (VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS / 2u))
+                             ? VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS
+                             : (c->wait_ms * 2u);
+            c->wait_start_ms = now_ms;
+        }
         count(&c->stats.response_pending);
         return;
     }
