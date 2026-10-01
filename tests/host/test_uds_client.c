@@ -18,6 +18,7 @@
 #include "services/diag.h"
 #include "services/timebase.h"
 #include "services/vehicle_signals.h"
+#include "platform_limits.h"
 #include "uds_iso14229.h"
 #include "vehicle_cl250.h"
 
@@ -341,6 +342,43 @@ static void test_sil_nrc_on_one_did_leaves_the_others_valid(void)
     assert_tester_frames_ok();
 }
 
+/*
+ * The ECU stops giving 0xF40D (NRC on that DID only) while everything else keeps
+ * running. The last speed sample is VALID up to PLATFORM_LIMIT_VEHICLE_SPEED_MAX_AGE_MS
+ * (D-048: = its stale_after_ms) and STALE from 301 ms on; the other DIDs stay VALID.
+ */
+static void test_sil_speed_sample_goes_stale_at_301_ms_when_the_ecu_stops_giving_it(void)
+{
+    const uint32_t idx = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t max_age = PLATFORM_LIMIT_VEHICLE_SPEED_MAX_AGE_MS;
+    vehicle_signal_sample_t s;
+    run(1000u, false);
+    TEST_ASSERT_TRUE(all_valid(timebase_now_ms()));
+    ecu.nrc_enabled = true;
+    ecu.nrc_did = VEHICLE_CL250_DID_VEHICLE_SPEED;
+    ecu.nrc_code = UDS_NRC_REQUEST_OUT_OF_RANGE;
+    TEST_ASSERT_TRUE(vehicle_signals_get(idx, timebase_now_ms(), &s));
+    const uint32_t last = s.timestamp_ms;
+    while (timebase_now_ms() != (last + max_age)) {
+        run(1u, false);
+    }
+    TEST_ASSERT_TRUE(vehicle_signals_get(idx, timebase_now_ms(), &s));
+    TEST_ASSERT_EQUAL_UINT32(last, s.timestamp_ms); /* no new sample came */
+    TEST_ASSERT_EQUAL(VEHICLE_SIGNAL_VALID, s.state);
+    run(1u, false);
+    TEST_ASSERT_TRUE(vehicle_signals_get(idx, timebase_now_ms(), &s));
+    TEST_ASSERT_EQUAL_UINT32(max_age + 1u, s.age_ms);
+    TEST_ASSERT_EQUAL(VEHICLE_SIGNAL_STALE, s.state);
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        if (i != idx) {
+            TEST_ASSERT_TRUE(vehicle_signals_get(i, timebase_now_ms(), &s));
+            TEST_ASSERT_EQUAL(VEHICLE_SIGNAL_VALID, s.state);
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(0u, uds_client_stats(&client)->timeouts);
+    assert_tester_frames_ok();
+}
+
 /* ------------------------------------------------------------------------- */
 /* Q-020: a segmented answer cannot be received                               */
 /* ------------------------------------------------------------------------- */
@@ -658,6 +696,7 @@ int main(void)
     RUN_TEST(test_sil_response_pending_bursts_are_waited_out);
     RUN_TEST(test_sil_endless_response_pending_ends_at_the_gen_max);
     RUN_TEST(test_sil_nrc_on_one_did_leaves_the_others_valid);
+    RUN_TEST(test_sil_speed_sample_goes_stale_at_301_ms_when_the_ecu_stops_giving_it);
     RUN_TEST(test_sil_segmented_answer_is_service_unavailable_without_flow_control);
     RUN_TEST(test_sil_guard_refusal_latches_the_client);
     RUN_TEST(test_sil_a_busy_link_does_not_latch_the_client);

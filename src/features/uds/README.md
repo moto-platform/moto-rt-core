@@ -8,7 +8,7 @@ Status:
   - the link glue that binds it to a CAN port and an ID pair (`isotp_link.{h,c}`)
   - the UDS client, the CL250 vehicle poller (`uds_client.{h,c}`, `uds_client_core.{h,c}`, Ç3)
   - the UDS server on the platform bus (`uds_server.{h,c}`, `uds_server_core.{h,c}`, Ç3, D-040)
-- ISO 14229 codes come from gen/ `uds_iso14229.h` (moto-vehicle-defs v0.2.0, D-040); the server contract (IDs, timing, services, DIDs, DTCs) from gen/ `platform_uds.h`.
+- ISO 14229 codes come from gen/ `uds_iso14229.h` (moto-vehicle-defs v0.3.1, D-040); the server contract (IDs, timing, services, DIDs, DTCs) from gen/ `platform_uds.h`.
 
 ## ISO-TP core (`isotp_core.h`)
 
@@ -143,7 +143,13 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
 **Timing.** Every value is a `VEHICLE_CL250_*` from gen/:
 - **Session.** 0x10 03 every `SESSION_RETRY_INTERVAL_MS` until the positive `SESSION_POSITIVE_SID` response with the echoed sub-function. No DID is read before that.
 - **Tester present.** 0x3E 80 every `TESTER_PRESENT_PERIOD_MS`, also before the session is up (verified legacy behaviour). The response is suppressed, so it never takes the in-flight slot.
-- **Reads.** Round-robin over the DIDs that are due (`poll_period_ms` since their last request) and not skipped. The scan starts after the last DID served, so a DID cannot starve. One request is in flight (`REQUESTS_IN_FLIGHT` = 1). When several requests are due, the order is session, then tester present, then reads.
+- **Reads (D-043).** Of the DIDs that are due (`poll_period_ms` since their last request) and not skipped, the lowest gen/ `priority` value goes first (`VEHICLE_CL250_PRIORITY_HIGH`, today only 0xF40D), then table order. One request is in flight (`REQUESTS_IN_FLIGHT` = 1). When several requests are due, the order is session, then tester present, then reads.
+  - Priority changes the order only, never what is sent: every request still passes the D-020 gates.
+  - **No starvation (nominal case).** While every request holds the slot for at most `ASSUMED_ROUND_TRIP_MS`, every DID gets a new sample within its `stale_after_ms`. The bound is non-preemptive fixed priority: period + one blocking round trip + higher-priority interference + its own round trip ≤ `stale_after_ms`. Today: 0xF40D 140/300, 0xF40C 110/150, 0xF411 300/600, 0xF405 960/2400, 0xF442 1000/2400 ms.
+    - The defs codegen checks it from the defs release after v0.3.1 on (`yaml_checks.did_sample_gap_bounds`, Unreleased in v0.3.1). `test_the_gen_table_meets_its_gap_bound` recomputes it from gen/ here, and `test_no_did_starves_*` checks the scheduler against it: 20 ms and 1 ms round trips, plus 40 seeded runs with random phases and round trips of 1-20 ms.
+    - `ASSUMED_ROUND_TRIP_MS` must cover the ECU's answer **plus one `uds_client_step()` period** of the target task, since a request holds the slot until the step that sees the answer. The 0.8 polling budget already caps it at 21 ms with today's table, so the D-029 bench measurement (ECU round trip + target step) must re-run `make check` in defs. Tester present (once per `TESTER_PRESENT_PERIOD_MS`) uses one step without holding the slot and is not in the model.
+  - After a **timeout** the DID's period restarts at the timeout. Otherwise a silent 0xF40D (period 100 ms = the base timeout) would be due again at once and, served first, hold the slot until it is skipped.
+  - **Fault mode is not covered by the bound.** A faulty high-priority DID still goes first: a silent 0xF40D holds the slot 100 ms of every 200 ms until it is skipped (0xF40C's gap reaches exactly its 150 ms `stale_after_ms`), and endless NRC 0x78 on 0xF40D holds it for `RESPONSE_TIMEOUT_MAX_MS` (2000 ms) per attempt. The normal DIDs then go STALE, the fail-safe result (VALID/STALE is decided by sample age in `services/vehicle_signals`, never by the scheduler). Whether a DID with a recent timeout should drop to the normal class is open (ISSUES E-5).
 - **Response timeout.**
   - `RESPONSE_TIMEOUT_BASE_MS`.
   - NRC 0x78 for the pending SID restarts it, doubled, up to `RESPONSE_TIMEOUT_MAX_MS` (100 → 200 → 400 → 800 → 1600 → 2000).
@@ -160,7 +166,7 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
   - While a reception runs, nothing is sent, and the base timeout pauses. The total cap still applies.
   - The link's receive buffer (`UDS_CLIENT_RX_BUF` = 64) is larger than a Single Frame, so a First Frame starts a reception instead of being dropped silently.
 - **Late, malformed or foreign answers** (another DID, out of range, longer than a Single Frame) are counted as `unexpected`. The request then ends by timeout.
-- **TX readiness.** No request is produced while `isotp_link_tx_ready()` is false (the link is sending, or the mailbox is full because no node ACKs: DLC unplugged, ECU off, cold-crank brownout). The timers keep running. At most one stuck request goes out when the bus frees. A request the link refuses as busy is dropped without a latch (`uds_client_core_not_sent()`).
+- **TX readiness.** No request is produced while `isotp_link_tx_ready()` is false (the link is sending, or the mailbox is full because no node ACKs: DLC unplugged, ECU off, cold-crank brownout). The timers keep running. At most one stuck request goes out when the bus frees. A request the link refuses as busy is dropped without a latch (`uds_client_core_not_sent()`); a dropped read gets its DID's previous schedule back, so it is due again at once instead of losing a period.
 - **Fail-closed latch** (`uds_client_fault()` reports the first reason). The client sends nothing more until it is opened again, and its session reads down:
   - `UDS_CLIENT_FAULT_GATE`: the link refused a request (the D-020 gate or the Single Frame length). Only a bug can cause it.
   - `UDS_CLIENT_FAULT_GUARD`: the `can_if` vehicle guard refused any frame.
