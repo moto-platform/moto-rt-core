@@ -529,12 +529,13 @@ static void test_no_did_starves_with_answers_after_one_ms(void)
 
 /*
  * ASSUMED_ROUND_TRIP_MS = the ECU's answer + one uds_client_step() period (E-6 n4): with
- * a 10 ms step, an answer that arrives just after a step (round trip ASSUMED - 10 + 1)
- * is seen one step later and holds the slot for exactly ASSUMED_ROUND_TRIP_MS.
+ * a step of CLIENT_STEP_MAX_MS (D-053), an answer that arrives just after a step (round
+ * trip ASSUMED - step + 1) is seen one step later and holds the slot for exactly
+ * ASSUMED_ROUND_TRIP_MS.
  */
 static void test_no_did_starves_when_the_answer_is_seen_one_step_later(void)
 {
-    const uint32_t step = 10u;
+    const uint32_t step = VEHICLE_CL250_CLIENT_STEP_MAX_MS;
     const uint32_t ecu_rtt = VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS - step + 1u;
     for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
         TEST_ASSERT_EQUAL_UINT32(0u, vehicle_cl250_dids[i].poll_period_ms % step);
@@ -894,9 +895,11 @@ static void run_with_faulty_speed(bool endless_0x78, uint32_t rtt_min, uint32_t 
         if (endless_0x78 && attempt && (t != attempt_t) && (((t - attempt_t) % 50u) == 0u)) {
             nrc(t, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_RESPONSE_PENDING);
         }
-        kind_t k;
-        while ((k = poll_at(t)) != K_NONE) {
+        for (;;) {
+            const kind_t k = poll_at(t);
             TEST_ASSERT_TRUE_MESSAGE(k != K_SESSION, "session lost");
+            /* After every poll, also one that produced nothing: a timeout ends the read
+             * at that poll even when no other request is due then. */
             if (attempt && ((uds_client_core_pending(&c) != UDS_CLIENT_REQ_READ) ||
                             (c.pending_idx != speed) || (k == K_READ))) {
                 attempt = false; /* ended in this poll (timeout) */
@@ -909,6 +912,9 @@ static void run_with_faulty_speed(bool endless_0x78, uint32_t rtt_min, uint32_t 
                     TEST_ASSERT_LESS_OR_EQUAL_UINT32_MESSAGE(base, t - attempt_t,
                                                              "a faulty read held the slot");
                 }
+            }
+            if (k == K_NONE) {
+                break;
             }
             if (k == K_READ) {
                 TEST_ASSERT_FALSE_MESSAGE(answer_due, "two requests in flight");
@@ -979,8 +985,8 @@ static void test_an_answer_is_stamped_with_its_request_send_time(void)
 }
 
 /*
- * 0xF40D answered after a 0x78, 180 ms after its request (period 100 ms): faulty for
- * one round. Its next read competes in the normal class and gets no 0x78 extension;
+ * 0xF40D answered after a 0x78, 80 ms past its gen/ period after its request: faulty
+ * for one round. Its next read competes in the normal class and gets no 0x78 extension;
  * an answer within the period gives it its gen/ priority and the extension back.
  */
 static void test_a_read_answered_after_its_period_makes_the_did_faulty_for_one_round(void)
@@ -1166,14 +1172,15 @@ static void test_one_lost_speed_answer_costs_one_more_faulty_round(void)
 }
 
 /*
- * D-052 (ISSUES E-8 (1)): with every poll period at least the base timeout, an RPM that
- * answers 51-99 ms after each request (no 0x78; the original finding, which starved the
- * later normal DIDs while RPM was polled at 50 ms) ends its read before it is due again,
- * so the DIDs that are due meanwhile go first and none starves (seeded, 10 x 20 s, the
- * others answering in 1..ASSUMED_ROUND_TRIP_MS ms). Sample age from the stamp. Holding
- * the slot up to 99 ms per read is far beyond ASSUMED_ROUND_TRIP_MS, outside both codegen
- * models, so a DID may go STALE briefly (measured with defs v0.3.2: throttle 35 ms in
- * 200 s, worst age 635 ms of 600; D-052).
+ * D-052 (ISSUES E-8 (1)), D-053: with every poll period at least the base timeout plus
+ * one step, an RPM that answers 51 ms to B - 1 after each request (no 0x78; the original
+ * finding, which starved the later normal DIDs while RPM was polled at 50 ms) ends its
+ * read before it is due again, so the DIDs that are due meanwhile go first and none
+ * starves (seeded, 10 x 20 s, the others answering in 1..ASSUMED_ROUND_TRIP_MS ms).
+ * Sample age from the stamp. Holding the slot up to B - 1 per read is far beyond
+ * ASSUMED_ROUND_TRIP_MS, outside both codegen models, so a DID may go STALE briefly
+ * (defs v0.3.2: throttle 35 ms in 200 s, worst age 635 ms of 600; measured with defs
+ * v0.3.3: none in 200 s, worst ages 224/330 RPM, 444/600 throttle).
  */
 static void test_an_rpm_answering_within_the_base_timeout_starves_no_one(void)
 {
@@ -1182,8 +1189,9 @@ static void test_an_rpm_answering_within_the_base_timeout_starves_no_one(void)
     const uint32_t rtt = VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS;
     const uint32_t t0 = 1000u;
     for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
-        /* The D-052 period rule, checked by the defs codegen. */
-        TEST_ASSERT_GREATER_OR_EQUAL_UINT32(base, vehicle_cl250_dids[i].poll_period_ms);
+        /* The D-053 period rule (D-052 floor + one step), checked by the defs codegen. */
+        TEST_ASSERT_GREATER_OR_EQUAL_UINT32(base + VEHICLE_CL250_CLIENT_STEP_MAX_MS,
+                                            vehicle_cl250_dids[i].poll_period_ms);
     }
     uint32_t stale_ms[VEHICLE_CL250_DID_COUNT] = {0u};
     for (uint32_t seed = 1u; seed <= 10u; seed++) {
@@ -1210,7 +1218,7 @@ static void test_an_rpm_answering_within_the_base_timeout_starves_no_one(void)
                     TEST_ASSERT_FALSE_MESSAGE(answer_due, "two requests in flight");
                     answer_due = true;
                     answer_idx = req_idx();
-                    answer_t = t + ((answer_idx == rpm) ? (51u + (rng_next() % 49u))
+                    answer_t = t + ((answer_idx == rpm) ? (51u + (rng_next() % (base - 51u)))
                                                         : (1u + (rng_next() % rtt)));
                 }
             }
@@ -1229,6 +1237,193 @@ static void test_an_rpm_answering_within_the_base_timeout_starves_no_one(void)
     for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
         TEST_ASSERT_LESS_OR_EQUAL_UINT32(200u, stale_ms[i]); /* <= 0.1 % of 200 s */
     }
+}
+
+/* ------------------------------------------------------------------------- */
+/* D-053 (ISSUES E-9, E-10): the poll period margin for the tester's step     */
+/* ------------------------------------------------------------------------- */
+
+/* Polls at every step from `from` (exclusive) to `to` (exclusive), `step` apart; only
+ * tester present may go out. */
+static void idle_steps(uint32_t from, uint32_t to, uint32_t step)
+{
+    for (uint32_t t = from + step; t < to; t += step) {
+        TEST_ASSERT_EQUAL(K_NONE, poll_skip_tp(t));
+    }
+}
+
+/*
+ * The tester steps every CLIENT_STEP_MAX_MS (S). 0xF40D is read when it and RPM are due,
+ * its answer arrives just after the step at sent + B - 1, and the next step comes `gap`
+ * ms later and takes it (before its timeout check, as uds_client_step() does). Returns
+ * the DID of the read that step produces.
+ */
+static uint32_t speed_answer_seen_after_gap(uint32_t gap)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t base = VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS;
+    const uint32_t step = VEHICLE_CL250_CLIENT_STEP_MAX_MS;
+    const uint32_t sent = vehicle_cl250_dids[speed].poll_period_ms;
+    bring_up(0u);
+    all_requested_at(0u);
+    idle_steps(0u, sent, step);
+    TEST_ASSERT_EQUAL(K_READ, poll_skip_tp(sent)); /* RPM is due too: speed goes first */
+    TEST_ASSERT_EQUAL_UINT32(speed, req_idx());
+    idle_steps(sent, sent + base - 1u, step);
+    TEST_ASSERT_EQUAL(K_NONE, poll_skip_tp(sent + base - 1u)); /* no timeout yet */
+    const uint32_t seen = sent + base - 1u + gap;
+    TEST_ASSERT_TRUE(answer_read(seen, speed, 60u));
+    TEST_ASSERT_EQUAL_UINT32(sent, smp.stamp_ms);
+    TEST_ASSERT_EQUAL(K_READ, poll_skip_tp(seen));
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->timeouts);
+    return req_idx();
+}
+
+static void test_an_answer_seen_at_sent_plus_b_plus_s_minus_1_is_in_time_and_the_due_did_goes(void)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t rpm = VEHICLE_CL250_IDX_ENGINE_SPEED;
+    const uint32_t step = VEHICLE_CL250_CLIENT_STEP_MAX_MS;
+    /* D-053 at its margin: P = B + S for speed and RPM. The equality is pinned on
+     * purpose: the residual test below needs it, and a longer period would be a defs
+     * change worth a fresh look at these tests. */
+    TEST_ASSERT_EQUAL_UINT32(VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS + step,
+                             vehicle_cl250_dids[speed].poll_period_ms);
+    TEST_ASSERT_EQUAL_UINT32(vehicle_cl250_dids[speed].poll_period_ms,
+                             vehicle_cl250_dids[rpm].poll_period_ms);
+    TEST_ASSERT_EQUAL_UINT32(rpm, speed_answer_seen_after_gap(step)); /* speed not due yet */
+    TEST_ASSERT_FALSE(c.did[speed].slow);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->slow_answers);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->step_overruns);
+    TEST_ASSERT_EQUAL_UINT32(step, stats()->step_gap_max_ms);
+}
+
+/*
+ * The residual (D-053 item 5): the rule holds only while step gaps stay within S. A gap
+ * of S + 1 sees the answer at sent + P: in time, but its DID is due again at once and,
+ * high priority, read back to back. S + 2 makes it slow (the E-9 hole). Both are counted.
+ */
+static void test_a_step_gap_above_s_is_the_counted_residual(void)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t step = VEHICLE_CL250_CLIENT_STEP_MAX_MS;
+    TEST_ASSERT_EQUAL_UINT32(speed, speed_answer_seen_after_gap(step + 1u));
+    TEST_ASSERT_FALSE(c.did[speed].slow);
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->step_overruns);
+    TEST_ASSERT_EQUAL_UINT32(step + 1u, stats()->step_gap_max_ms);
+    setUp();
+    (void)speed_answer_seen_after_gap(step + 2u);
+    TEST_ASSERT_TRUE(c.did[speed].slow);
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->slow_answers);
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->step_overruns);
+}
+
+/* The step that times a read out comes first: an answer arriving after it is unexpected. */
+static void test_an_answer_after_the_timeout_step_is_unexpected(void)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t rpm = VEHICLE_CL250_IDX_ENGINE_SPEED;
+    const uint32_t base = VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS;
+    const uint32_t step = VEHICLE_CL250_CLIENT_STEP_MAX_MS;
+    const uint32_t sent = vehicle_cl250_dids[speed].poll_period_ms;
+    bring_up(0u);
+    all_requested_at(0u);
+    idle_steps(0u, sent, step);
+    TEST_ASSERT_EQUAL(K_READ, poll_skip_tp(sent));
+    TEST_ASSERT_EQUAL_UINT32(speed, req_idx());
+    idle_steps(sent, sent + base - 1u, step);
+    TEST_ASSERT_EQUAL(K_NONE, poll_skip_tp(sent + base - 1u));
+    const uint32_t t = sent + base + step - 1u; /* the next step, S later */
+    TEST_ASSERT_EQUAL(K_READ, poll_skip_tp(t)); /* timed out; RPM is due and goes */
+    TEST_ASSERT_EQUAL_UINT32(rpm, req_idx());
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->timeouts);
+    /* It arrived after that step, so the next step takes it, before its own poll. */
+    TEST_ASSERT_FALSE(answer_read(t + step, speed, 60u));
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->unexpected);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->reads_ok);
+    TEST_ASSERT_TRUE(c.did[speed].unanswered); /* its stamp chain stays at sent */
+    TEST_ASSERT_EQUAL_UINT32(sent, c.did[speed].unanswered_ms);
+    TEST_ASSERT_EQUAL(UDS_CLIENT_REQ_READ, uds_client_core_pending(&c)); /* RPM's read */
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->step_overruns);
+}
+
+/*
+ * Seeded (10 x 20 s): step gaps of 1..S ms, every answer arriving 1..B - 1 ms after its
+ * request and taken at the first step after it. D-053: no slow answer, no timeout, and
+ * no DID read again in the step that took its own answer.
+ */
+static void test_step_gaps_up_to_s_with_answers_inside_b_give_no_slow_or_back_to_back_read(void)
+{
+    const uint32_t base = VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS;
+    const uint32_t step = VEHICLE_CL250_CLIENT_STEP_MAX_MS;
+    const uint32_t t0 = 1000u;
+    for (uint32_t seed = 1u; seed <= 10u; seed++) {
+        setUp();
+        rng_state = seed;
+        bring_up(t0);
+        bool answer_due = false;
+        uint32_t answer_t = 0u;
+        uint32_t answer_idx = 0u;
+        uint32_t reads = 0u;
+        uint32_t t = t0;
+        while (t < (t0 + 20000u)) {
+            t += 1u + (rng_next() % step);
+            bool taken = false;
+            if (answer_due && (t > answer_t)) {
+                TEST_ASSERT_TRUE(answer_read(t, answer_idx, 1u));
+                taken = true;
+                answer_due = false;
+            }
+            kind_t k;
+            while ((k = poll_at(t)) != K_NONE) {
+                TEST_ASSERT_TRUE_MESSAGE(k != K_SESSION, "session lost");
+                if (k == K_READ) {
+                    TEST_ASSERT_FALSE_MESSAGE(answer_due, "two requests in flight");
+                    TEST_ASSERT_FALSE_MESSAGE(taken && (req_idx() == answer_idx),
+                                              "a DID was read again in the step of its answer");
+                    answer_due = true;
+                    answer_idx = req_idx();
+                    answer_t = t + 1u + (rng_next() % (base - 1u));
+                    reads++;
+                }
+            }
+        }
+        TEST_ASSERT_GREATER_THAN_UINT32(100u, reads);
+        TEST_ASSERT_EQUAL_UINT32(0u, stats()->timeouts);
+        TEST_ASSERT_EQUAL_UINT32(0u, stats()->slow_answers);
+        TEST_ASSERT_EQUAL_UINT32(0u, stats()->step_overruns);
+        TEST_ASSERT_LESS_OR_EQUAL_UINT32(step, stats()->step_gap_max_ms);
+    }
+}
+
+/* Every gap between two polls above S is counted, wrap-safe, also with rx_busy, with
+ * tx_ready false and while latched (every step counts, README "Step margin"). */
+static void test_step_gaps_above_the_gen_step_max_are_counted(void)
+{
+    const uint32_t step = VEHICLE_CL250_CLIENT_STEP_MAX_MS;
+    const uint32_t t0 = 0xFFFFFFFFu - step; /* the second gap crosses 2^32 */
+    uds_client_core_init(&c, HOLD_MS);
+    (void)poll_at(t0);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->step_gap_max_ms); /* no gap before a 2nd poll */
+    (void)poll_at(t0 + step);
+    (void)poll_at(t0 + step); /* a second poll in the same ms is a gap of 0 */
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->step_overruns);
+    TEST_ASSERT_EQUAL_UINT32(step, stats()->step_gap_max_ms);
+    (void)poll_at(t0 + (2u * step) + 1u);
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->step_overruns);
+    TEST_ASSERT_EQUAL_UINT32(step + 1u, stats()->step_gap_max_ms);
+    const uint32_t t1 = t0 + (2u * step) + 1u;
+    TEST_ASSERT_EQUAL(K_NONE, poll_busy(t1 + step + 1u, true)); /* rx_busy */
+    TEST_ASSERT_EQUAL_UINT32(2u, stats()->step_overruns);
+    TEST_ASSERT_EQUAL(K_NONE, poll_full(t1 + (2u * step) + 2u, false, false)); /* !tx_ready */
+    TEST_ASSERT_EQUAL_UINT32(3u, stats()->step_overruns);
+    uds_client_core_latch(&c);
+    (void)poll_at(t1 + (3u * step) + 4u);
+    TEST_ASSERT_EQUAL_UINT32(4u, stats()->step_overruns);
+    TEST_ASSERT_EQUAL_UINT32(step + 2u, stats()->step_gap_max_ms);
+    uds_client_core_init(&c, HOLD_MS);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->step_overruns);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->step_gap_max_ms);
 }
 
 /* An ECU absent longer than RESPONSE_TIMEOUT_MAX_MS answers no read from before. */
@@ -2069,18 +2264,20 @@ static void test_schedule_is_wrap_safe(void)
     TEST_ASSERT_EQUAL_UINT32(0u, stats()->timeouts);
     TEST_ASSERT_TRUE(uds_client_core_session_up(&c));
     TEST_ASSERT_TRUE(uds_client_core_ecu_present(&c, start + 3000u));
+    const uint32_t rpm = VEHICLE_CL250_IDX_ENGINE_SPEED;
+    const uint32_t period = vehicle_cl250_dids[rpm].poll_period_ms;
     uint32_t last = start;
     uint32_t n = 0u;
     for (uint32_t i = 0u; i < log_n; i++) {
-        if ((log_buf[i].k == K_READ) && (log_buf[i].idx == VEHICLE_CL250_IDX_ENGINE_SPEED)) {
+        if ((log_buf[i].k == K_READ) && (log_buf[i].idx == rpm)) {
             if (n > 0u) {
-                TEST_ASSERT_EQUAL_UINT32(vehicle_cl250_dids[0].poll_period_ms, log_buf[i].t - last);
+                TEST_ASSERT_EQUAL_UINT32(period, log_buf[i].t - last);
             }
             last = log_buf[i].t;
             n++;
         }
     }
-    TEST_ASSERT_EQUAL_UINT32(3000u / vehicle_cl250_dids[0].poll_period_ms, n);
+    TEST_ASSERT_EQUAL_UINT32((3000u + period - 1u) / period, n); /* first read at start */
 }
 
 static void test_null_arguments_are_harmless(void)
@@ -2138,6 +2335,11 @@ int main(void)
     RUN_TEST(test_a_decoded_answer_at_exactly_its_period_is_in_time);
     RUN_TEST(test_one_lost_speed_answer_costs_one_more_faulty_round);
     RUN_TEST(test_an_rpm_answering_within_the_base_timeout_starves_no_one);
+    RUN_TEST(test_an_answer_seen_at_sent_plus_b_plus_s_minus_1_is_in_time_and_the_due_did_goes);
+    RUN_TEST(test_a_step_gap_above_s_is_the_counted_residual);
+    RUN_TEST(test_an_answer_after_the_timeout_step_is_unexpected);
+    RUN_TEST(test_step_gaps_up_to_s_with_answers_inside_b_give_no_slow_or_back_to_back_read);
+    RUN_TEST(test_step_gaps_above_the_gen_step_max_are_counted);
     RUN_TEST(test_ecu_absence_ends_the_fault_state_of_every_did);
     RUN_TEST(test_not_sent_and_latch_keep_the_fault_state);
     RUN_TEST(test_stamps_and_the_slow_check_are_wrap_safe);

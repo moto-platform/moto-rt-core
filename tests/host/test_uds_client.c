@@ -287,8 +287,17 @@ static void test_sil_session_drop_is_detected_by_nrc_and_reestablished(void)
     run(VEHICLE_CL250_SESSION_RETRY_INTERVAL_MS + 500u, false);
     TEST_ASSERT_TRUE(all_valid(timebase_now_ms()));
     sim_ecu_drop_session(&ecu); /* e.g. an ECU reset: reads now get NRC 0x7F */
-    run(5u, false);
     const uds_client_stats_t* st = uds_client_stats(&client);
+    /* The next read gets the NRC: one is due within the shortest gen/ poll period. */
+    uint32_t min_period = UINT32_MAX;
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        if (vehicle_cl250_dids[i].poll_period_ms < min_period) {
+            min_period = vehicle_cl250_dids[i].poll_period_ms;
+        }
+    }
+    for (uint32_t waited = 0u; (st->session_losses == 0u) && (waited <= min_period); waited++) {
+        run(1u, false);
+    }
     TEST_ASSERT_EQUAL_UINT32(1u, st->session_losses);
     TEST_ASSERT_GREATER_OR_EQUAL_UINT32(1u, st->nrc);
     run(2000u, true); /* re-established at once; nothing goes stale */
@@ -373,7 +382,7 @@ static void test_sil_nrc_on_one_did_leaves_the_others_valid(void)
 
 /*
  * D-051 (ISSUES E-7): 0xF40D answered after 0x78 at 0, 60 and 120 ms, at 180 ms, later
- * than its 100 ms period. Before D-051 it kept its priority and the 0x78 extension and
+ * than its 110 ms period. Before D-051 it kept its priority and the 0x78 extension and
  * was due again when its answer landed, so RPM (then 50/150 ms) was STALE all the
  * time. Now a late answer makes it faulty: its next reads end at the base timeout and
  * it is skipped after MAX_CONSECUTIVE_TIMEOUTS, so only the fresh attempt after each
@@ -415,9 +424,10 @@ static void test_sil_speed_answered_after_its_period_keeps_rpm_fresh_and_its_age
         }
     }
     const uds_client_stats_t* st = uds_client_stats(&client);
-    /* Measured 2026-10-01 with defs v0.3.2 (RPM 100/300 ms): RPM STALE 0 of 15000 ms
-     * (245 with v0.3.1's 50/150, 14897 without D-051); speed STALE 14460 ms with one
-     * sample per fresh attempt (fail-safe), 3 skips; 0 skips and 82 samples without D-051. */
+    /* Measured 2026-10-02 with defs v0.3.3 (speed and RPM at 110 ms, RPM stale 330): RPM
+     * STALE 0 of 15000 ms (0 with v0.3.2, 245 with v0.3.1's 50/150, 14897 without D-051);
+     * speed STALE 14360 ms with one sample per fresh attempt (fail-safe), 3 samples,
+     * 3 skips (v0.3.2: 14460 ms); 0 skips and 82 samples without D-051. */
     TEST_ASSERT_LESS_OR_EQUAL_UINT32(duration / 20u, rpm_stale_ms);
     TEST_ASSERT_GREATER_THAN_UINT32(0u, st->did_skips);
     TEST_ASSERT_GREATER_THAN_UINT32(0u, speed_samples);

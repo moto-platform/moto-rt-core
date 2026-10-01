@@ -242,6 +242,9 @@ int main(int argc, char** argv)
            (unsigned)isotp_link_tx_error_count(&client.link),
            (unsigned)can_if_tx_refused_count(CAN_PORT_VEHICLE), (int)uds_client_fault(&client),
            uds_client_failed(&client) ? ", CLIENT FAILED" : "");
+    printf("moto_rtcore_host: %u step gaps above %u ms, longest %u ms (D-053)\n",
+           (unsigned)st->step_overruns, (unsigned)VEHICLE_CL250_CLIENT_STEP_MAX_MS,
+           (unsigned)st->step_gap_max_ms);
     const uds_server_stats_t* ss = uds_server_stats(&server);
     printf("moto_rtcore_host: UDS server %u requests, %u positive, %u negative, %u suppressed, "
            "%u S3 timeouts\n",
