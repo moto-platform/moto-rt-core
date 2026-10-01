@@ -134,6 +134,7 @@ bool uds_client_core_poll(uds_client_core_t* c, uint32_t now_ms, bool rx_busy, b
         return false;
     }
     *len = 0u;
+    c->last = UDS_CLIENT_LAST_NONE;
     if (c->ecu_seen && !uds_client_core_ecu_present(c, now_ms)) {
         c->ecu_seen = false; /* absent: presence needs a new answer, also across a wrap */
         lose_session(c);     /* an ECU that came back is in its default session */
@@ -165,6 +166,9 @@ bool uds_client_core_poll(uds_client_core_t* c, uint32_t now_ms, bool rx_busy, b
         out[0] = (uint8_t)VEHICLE_CL250_SESSION_SID;
         out[1] = (uint8_t)VEHICLE_CL250_SESSION_SUBFUNCTION;
         *len = 2u;
+        c->last = UDS_CLIENT_LAST_SESSION;
+        c->prev_request_ms = c->session_tried_ms;
+        c->prev_requested = c->session_tried;
         c->session_tried = true;
         c->session_tried_ms = now_ms;
         start_request(c, UDS_CLIENT_REQ_SESSION, out[0], 0u, now_ms);
@@ -174,6 +178,9 @@ bool uds_client_core_poll(uds_client_core_t* c, uint32_t now_ms, bool rx_busy, b
         out[0] = (uint8_t)VEHICLE_CL250_TESTER_PRESENT_SID;
         out[1] = (uint8_t)VEHICLE_CL250_TESTER_PRESENT_SUBFUNCTION;
         *len = 2u;
+        c->last = UDS_CLIENT_LAST_TESTER_PRESENT;
+        c->prev_request_ms = c->tp_sent_ms;
+        c->prev_requested = c->tp_sent;
         c->tp_sent = true;
         c->tp_sent_ms = now_ms;
         count(&c->stats.requests); /* response suppressed: nothing to wait for */
@@ -192,6 +199,7 @@ bool uds_client_core_poll(uds_client_core_t* c, uint32_t now_ms, bool rx_busy, b
     out[1] = (uint8_t)(did >> 8u);
     out[2] = (uint8_t)(did & 0xFFu);
     *len = 3u;
+    c->last = UDS_CLIENT_LAST_READ;
     c->prev_request_ms = c->did[idx].last_request_ms;
     c->prev_requested = c->did[idx].requested;
     c->did[idx].requested = true;
@@ -202,13 +210,23 @@ bool uds_client_core_poll(uds_client_core_t* c, uint32_t now_ms, bool rx_busy, b
 
 void uds_client_core_not_sent(uds_client_core_t* c)
 {
-    if (c != NULL) {
-        if (c->pending == UDS_CLIENT_REQ_READ) {
-            /* Nothing went out: the period must not run from a request never sent. */
+    if ((c != NULL) && (c->last != UDS_CLIENT_LAST_NONE)) {
+        /* Nothing went out: no period may run from it, and it is not counted (E-6). */
+        if (c->last == UDS_CLIENT_LAST_SESSION) {
+            c->session_tried_ms = c->prev_request_ms;
+            c->session_tried = c->prev_requested;
+        } else if (c->last == UDS_CLIENT_LAST_TESTER_PRESENT) {
+            c->tp_sent_ms = c->prev_request_ms;
+            c->tp_sent = c->prev_requested;
+        } else {
             c->did[c->pending_idx].last_request_ms = c->prev_request_ms;
             c->did[c->pending_idx].requested = c->prev_requested;
         }
-        c->pending = UDS_CLIENT_REQ_NONE;
+        if (c->stats.requests < UINT32_MAX) {
+            c->stats.requests--; /* a saturated counter stays saturated */
+        }
+        c->pending = UDS_CLIENT_REQ_NONE; /* tester present never held it */
+        c->last = UDS_CLIENT_LAST_NONE;
     }
 }
 

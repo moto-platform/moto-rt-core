@@ -146,7 +146,7 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
 - **Reads (D-043).** Of the DIDs that are due (`poll_period_ms` since their last request) and not skipped, the lowest gen/ `priority` value goes first (`VEHICLE_CL250_PRIORITY_HIGH`, today only 0xF40D), then table order. One request is in flight (`REQUESTS_IN_FLIGHT` = 1). When several requests are due, the order is session, then tester present, then reads.
   - Priority changes the order only, never what is sent: every request still passes the D-020 gates.
   - **No starvation (nominal case).** While every request holds the slot for at most `ASSUMED_ROUND_TRIP_MS`, every DID gets a new sample within its `stale_after_ms`. The bound is non-preemptive fixed priority: period + one blocking round trip + higher-priority interference + its own round trip ≤ `stale_after_ms`. Today: 0xF40D 140/300, 0xF40C 110/150, 0xF411 300/600, 0xF405 960/2400, 0xF442 1000/2400 ms.
-    - The defs codegen checks it from the defs release after v0.3.1 on (`yaml_checks.did_sample_gap_bounds`, Unreleased in v0.3.1). `test_the_gen_table_meets_its_gap_bound` recomputes it from gen/ here, and `test_no_did_starves_*` checks the scheduler against it: 20 ms and 1 ms round trips, plus 40 seeded runs with random phases and round trips of 1-20 ms.
+    - The defs codegen checks it from the defs release after v0.3.1 on (`yaml_checks.did_sample_gap_bounds`, Unreleased in v0.3.1). `test_the_gen_table_meets_its_gap_bound` recomputes it from gen/ here, and `test_no_did_starves_*` checks the scheduler against it: 20 ms and 1 ms round trips, 40 seeded runs with random phases and round trips of 1-20 ms, and a poller that steps every 10 ms, so an answer is seen up to one step after it arrives (ISSUES E-6 n4); every request is checked to hold the slot for at most `ASSUMED_ROUND_TRIP_MS`.
     - `ASSUMED_ROUND_TRIP_MS` must cover the ECU's answer **plus one `uds_client_step()` period** of the target task, since a request holds the slot until the step that sees the answer. The 0.8 polling budget already caps it at 21 ms with today's table, so the D-029 bench measurement (ECU round trip + target step) must re-run `make check` in defs. Tester present (once per `TESTER_PRESENT_PERIOD_MS`) uses one step without holding the slot and is not in the model.
   - After a **timeout** the DID's period restarts at the timeout. Otherwise a silent 0xF40D (period 100 ms = the base timeout) would be due again at once and, served first, hold the slot until it is skipped.
   - **Fault mode (D-050, ISSUES E-5).** A DID whose last read timed out (`consecutive_timeouts > 0`) is faulty until it answers or is skipped. Meanwhile it competes in the normal class whatever its gen/ priority, and NRC 0x78 does not extend its read: the read ends `RESPONSE_TIMEOUT_BASE_MS` (100 ms) after it was sent. An answer or the skip gives it its gen/ priority and the 0x78 extension back.
@@ -178,7 +178,7 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
   - While a reception runs, nothing is sent, and the base timeout pauses. The total cap still applies.
   - The link's receive buffer (`UDS_CLIENT_RX_BUF` = 64) is larger than a Single Frame, so a First Frame starts a reception instead of being dropped silently.
 - **Late, malformed or foreign answers** (another DID, out of range, longer than a Single Frame) are counted as `unexpected`. The request then ends by timeout.
-- **TX readiness.** No request is produced while `isotp_link_tx_ready()` is false (the link is sending, or the mailbox is full because no node ACKs: DLC unplugged, ECU off, cold-crank brownout). The timers keep running. At most one stuck request goes out when the bus frees. A request the link refuses as busy is dropped without a latch (`uds_client_core_not_sent()`); a dropped read gets its DID's previous schedule back, so it is due again at once instead of losing a period.
+- **TX readiness.** No request is produced while `isotp_link_tx_ready()` is false (the link is sending, or the mailbox is full because no node ACKs: DLC unplugged, ECU off, cold-crank brownout). The timers keep running. At most one stuck request goes out when the bus frees. A request the link refuses as busy is dropped without a latch (`uds_client_core_not_sent()`). It is not counted in `requests`, and its schedule is restored: a read's DID, the session retry or tester present is due again at once instead of losing a period (ISSUES E-6 n1/n2).
 - **Fail-closed latch** (`uds_client_fault()` reports the first reason). The client sends nothing more until it is opened again, and its session reads down:
   - `UDS_CLIENT_FAULT_GATE`: the link refused a request (the D-020 gate or the Single Frame length). Only a bug can cause it.
   - `UDS_CLIENT_FAULT_GUARD`: the `can_if` vehicle guard refused any frame.
@@ -189,7 +189,6 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
   - A First Frame with FF_DL above `UDS_CLIENT_RX_BUF` (64) is dropped silently by the core. The request ends by timeout and counts towards the skip limit. No CL250 DID does this.
   - Each segmented response stops polling for about N_Cr + N_Bs (about 2 s), so every DID goes STALE. This is the cost of the Q-020 deferral.
   - A DID answered with a permanent NRC (for example 0x31) is polled at its full rate. This is legacy behaviour, and the schedule bounds it.
-  - `uds_client_core_not_sent()` clears only the pending slot. The dropped request's schedule stays advanced, so a dropped tester present waits one full period. The path is defensive: `tx_ready` already requires the link to be idle.
   - On the H7, the FDCAN acceptance filters must pass `VEHICLE_CL250_REQUEST_ID`, `VEHICLE_CL250_FALLBACK_REQUEST_ID` and every `vehicle_cl250_functional_watch[]` ID. Otherwise the foreign-tester watch is deaf. This is an Ç1 HAL requirement, checked on target by `uds_client_foreign_tester`.
   - N_As (a TX that is never confirmed) and bus-off recovery (`VEHICLE_CL250_BUS_OFF_BACKOFF_*`, D-030's latch after 5 bus-offs) come with the H7 FDCAN HAL (Ç1).
 - **Counters** (`uds_client_stats()`): requests, reads, timeouts, NRC, response pending, unavailable, skips, unexpected, session starts and losses.
@@ -199,7 +198,7 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
   - The 0xFD00 status: ECU present, session up, latched, latch reason (gen/ values).
   - A 0x14 clear on the platform bus resets the DTC records only. The next step sets them again while the condition lasts, and the latch is never released by it.
 
-**Memory.** `uds_client_t` is 356 B on the M7 (348 B before the D-040 diagnostics): the link, 64 + 8 B of buffers, and the core. It must have static storage duration. `vehicle_signals` adds 81 B, and the glue adds 4 B (the foreign-frame counter). Flash is about 2 kB: core 1198 B (1094 B before D-050), glue 622 B, service 252 B (release build; core 2026-10-01, the rest 2026-09-29). There is no heap, and every loop is bounded by the DID count or a frame length.
+**Memory.** `uds_client_t` is 364 B on the M7 (2026-10-01: 360 B after E-4/D-050, +4 B for the E-6 `not_sent` request kind; 348 B before the D-040 diagnostics): the link, 64 + 8 B of buffers, and the core. It must have static storage duration. `vehicle_signals` adds 81 B, and the glue adds 4 B (the foreign-frame counter). Flash is about 2 kB: core 1282 B (1094 B before D-050, 1198 B before E-6), glue 622 B, service 252 B (release build; core 2026-10-01, the rest 2026-09-29). There is no heap, and every loop is bounded by the DID count or a frame length.
 
 **Integration notes.**
 - Call `uds_client_step()` once per main-loop pass, after `can_if_dispatch(CAN_PORT_VEHICLE, ...)`.
@@ -237,7 +236,7 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
   - vss-schema-guardian: CLEAN.
   - safety-reviewer: every fix confirmed, no blocker. Four new MINOR findings:
     - MINOR-1: presence did not age out while latched. Fixed: the absence check runs before the latch return; tested.
-    - MINOR-2, MINOR-3, MINOR-4 (functional addressing, `not_sent` schedule, H7 filters): documented under known limits.
+    - MINOR-2, MINOR-3, MINOR-4 (functional addressing, `not_sent` schedule, H7 filters): documented under known limits. MINOR-3 fixed later (ISSUES E-6 n2): `not_sent` restores every kind of request.
 
 **Review of D-050 (2026-10-01).** vss-schema-guardian: CLEAN (defs v0.3.1). safety-reviewer: no blocker; the fault-state lifecycle, the 150 ms gap and the unchanged traffic were confirmed.
 - MAJOR-1, a slow but answering high-priority DID still starves the others (there before D-050): documented under "Not covered", user decision ISSUES E-7.

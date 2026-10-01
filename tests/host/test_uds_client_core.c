@@ -464,7 +464,7 @@ static uint32_t rng_next(void)
  * starts as if requested at a random time within its last period (and answered then).
  */
 static void run_with_round_trip(uint32_t rtt_min, uint32_t rtt_max, bool random_phase,
-                                uint32_t duration_ms)
+                                uint32_t duration_ms, uint32_t step_ms)
 {
     const uint32_t t0 = 1000u;
     uint32_t last_sample[VEHICLE_CL250_DID_COUNT];
@@ -472,6 +472,7 @@ static void run_with_round_trip(uint32_t rtt_min, uint32_t rtt_max, bool random_
     bool answer_due = false;
     uint32_t answer_t = 0u;
     uint32_t answer_idx = 0u;
+    uint32_t request_t = 0u;
     bring_up(t0);
     for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
         bound[i] = gap_bound(i);
@@ -483,20 +484,28 @@ static void run_with_round_trip(uint32_t rtt_min, uint32_t rtt_max, bool random_
         }
     }
     for (uint32_t t = t0; t < (t0 + duration_ms); t++) {
-        if (answer_due && (t == answer_t)) {
-            TEST_ASSERT_TRUE(answer_read(t, answer_idx, 1u));
-            TEST_ASSERT_EQUAL_UINT32(answer_idx, smp.idx);
-            last_sample[answer_idx] = t;
-            answer_due = false;
-        }
-        kind_t k;
-        while ((k = poll_at(t)) != K_NONE) {
-            TEST_ASSERT_TRUE_MESSAGE(k != K_SESSION, "session lost");
-            if (k == K_READ) {
-                TEST_ASSERT_FALSE_MESSAGE(answer_due, "two requests in flight");
-                answer_due = true;
-                answer_idx = req_idx();
-                answer_t = t + rtt_min + (rng_next() % (rtt_max - rtt_min + 1u));
+        if (((t - t0) % step_ms) != 0u) {
+            /* between two steps of the poller: an answer waits for the next one */
+        } else {
+            if (answer_due && (t >= answer_t)) {
+                TEST_ASSERT_TRUE(answer_read(t, answer_idx, 1u));
+                TEST_ASSERT_EQUAL_UINT32(answer_idx, smp.idx);
+                TEST_ASSERT_LESS_OR_EQUAL_UINT32_MESSAGE(VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS,
+                                                         t - request_t,
+                                                         "held the slot past the model's C");
+                last_sample[answer_idx] = t;
+                answer_due = false;
+            }
+            kind_t k;
+            while ((k = poll_at(t)) != K_NONE) {
+                TEST_ASSERT_TRUE_MESSAGE(k != K_SESSION, "session lost");
+                if (k == K_READ) {
+                    TEST_ASSERT_FALSE_MESSAGE(answer_due, "two requests in flight");
+                    answer_due = true;
+                    answer_idx = req_idx();
+                    request_t = t;
+                    answer_t = t + rtt_min + (rng_next() % (rtt_max - rtt_min + 1u));
+                }
             }
         }
         for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
@@ -510,12 +519,32 @@ static void run_with_round_trip(uint32_t rtt_min, uint32_t rtt_max, bool random_
 static void test_no_did_starves_with_answers_after_the_gen_assumed_round_trip(void)
 {
     const uint32_t rtt = VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS;
-    run_with_round_trip(rtt, rtt, false, 20000u);
+    run_with_round_trip(rtt, rtt, false, 20000u, 1u);
 }
 
 static void test_no_did_starves_with_answers_after_one_ms(void)
 {
-    run_with_round_trip(1u, 1u, false, 20000u);
+    run_with_round_trip(1u, 1u, false, 20000u, 1u);
+}
+
+/*
+ * ASSUMED_ROUND_TRIP_MS = the ECU's answer + one uds_client_step() period (E-6 n4): with
+ * a 10 ms step, an answer that arrives just after a step (round trip ASSUMED - 10 + 1)
+ * is seen one step later and holds the slot for exactly ASSUMED_ROUND_TRIP_MS.
+ */
+static void test_no_did_starves_when_the_answer_is_seen_one_step_later(void)
+{
+    const uint32_t step = 10u;
+    const uint32_t ecu_rtt = VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS - step + 1u;
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        TEST_ASSERT_EQUAL_UINT32(0u, vehicle_cl250_dids[i].poll_period_ms % step);
+    }
+    run_with_round_trip(ecu_rtt, ecu_rtt, false, 20000u, step);
+    for (uint32_t seed = 1u; seed <= 20u; seed++) {
+        setUp();
+        rng_state = seed;
+        run_with_round_trip(1u, ecu_rtt, true, 5000u, step);
+    }
 }
 
 static void test_no_did_starves_with_random_phases_and_round_trips(void)
@@ -523,7 +552,7 @@ static void test_no_did_starves_with_random_phases_and_round_trips(void)
     for (uint32_t seed = 1u; seed <= 40u; seed++) {
         setUp();
         rng_state = seed;
-        run_with_round_trip(1u, VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS, true, 5000u);
+        run_with_round_trip(1u, VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS, true, 5000u, 1u);
     }
 }
 
@@ -1236,10 +1265,12 @@ static void test_a_request_the_link_could_not_take_is_dropped_without_a_latch(vo
     bring_up(0u);
     TEST_ASSERT_EQUAL(K_READ, poll_at(0u));
     const uint32_t idx = req_idx();
+    const uint32_t sent = stats()->requests;
     uds_client_core_not_sent(&c);
     TEST_ASSERT_FALSE(uds_client_core_failed(&c));
     TEST_ASSERT_EQUAL(UDS_CLIENT_REQ_NONE, uds_client_core_pending(&c));
     TEST_ASSERT_EQUAL_UINT32(0u, stats()->timeouts);
+    TEST_ASSERT_EQUAL_UINT32(sent - 1u, stats()->requests); /* E-6 n1: not counted */
     /* Nothing went out, so the DID's period was not started: it goes again at once. */
     TEST_ASSERT_EQUAL(K_READ, poll_at(1u));
     TEST_ASSERT_EQUAL_UINT32(idx, req_idx());
@@ -1252,8 +1283,37 @@ static void test_a_request_the_link_could_not_take_is_dropped_without_a_latch(vo
     uds_client_core_not_sent(&c);
     TEST_ASSERT_TRUE(c.did[idx].requested);
     TEST_ASSERT_EQUAL_UINT32(1u, c.did[idx].last_request_ms);
-    uds_client_core_not_sent(&c); /* nothing pending: harmless */
+    const uint32_t after = stats()->requests;
+    uds_client_core_not_sent(&c); /* nothing produced since: harmless */
     TEST_ASSERT_EQUAL_UINT32(1u, c.did[idx].last_request_ms);
+    TEST_ASSERT_EQUAL_UINT32(after, stats()->requests);
+}
+
+/* E-6 n2: a dropped tester present keeps its period, like a read (m7). */
+static void test_a_tester_present_the_link_could_not_take_is_due_again_at_once(void)
+{
+    const uint32_t tp = VEHICLE_CL250_TESTER_PRESENT_PERIOD_MS;
+    bring_up(0u);
+    all_requested_at(tp); /* no read due at tp */
+    TEST_ASSERT_EQUAL(K_TP, poll_at(tp));
+    const uint32_t sent = stats()->requests;
+    uds_client_core_not_sent(&c);
+    TEST_ASSERT_EQUAL_UINT32(sent - 1u, stats()->requests);
+    TEST_ASSERT_EQUAL_UINT32(0u, c.tp_sent_ms); /* the period runs from the last one sent */
+    TEST_ASSERT_EQUAL(K_TP, poll_at(tp + 1u));
+    TEST_ASSERT_EQUAL(K_NONE, poll_at(tp + 1u));
+}
+
+static void test_a_session_request_the_link_could_not_take_is_retried_at_once(void)
+{
+    uds_client_core_init(&c, HOLD_MS);
+    TEST_ASSERT_EQUAL(K_SESSION, poll_at(0u));
+    uds_client_core_not_sent(&c);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->requests);
+    TEST_ASSERT_EQUAL(UDS_CLIENT_REQ_NONE, uds_client_core_pending(&c));
+    TEST_ASSERT_FALSE(c.session_tried); /* never tried: no retry interval to wait */
+    TEST_ASSERT_EQUAL(K_SESSION, poll_at(1u));
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->requests);
 }
 
 static void test_ecu_presence_needs_a_new_answer_after_absence(void)
@@ -1328,6 +1388,7 @@ int main(void)
     RUN_TEST(test_within_a_class_the_first_due_in_table_order_goes);
     RUN_TEST(test_no_did_starves_with_answers_after_the_gen_assumed_round_trip);
     RUN_TEST(test_no_did_starves_with_answers_after_one_ms);
+    RUN_TEST(test_no_did_starves_when_the_answer_is_seen_one_step_later);
     RUN_TEST(test_the_gen_table_meets_its_gap_bound);
     RUN_TEST(test_no_did_starves_with_random_phases_and_round_trips);
     RUN_TEST(test_each_did_is_polled_at_its_gen_period);
@@ -1363,6 +1424,8 @@ int main(void)
     RUN_TEST(test_latch_stops_the_core_until_init);
     RUN_TEST(test_nothing_is_sent_while_tx_is_not_ready_but_timers_run);
     RUN_TEST(test_a_request_the_link_could_not_take_is_dropped_without_a_latch);
+    RUN_TEST(test_a_tester_present_the_link_could_not_take_is_due_again_at_once);
+    RUN_TEST(test_a_session_request_the_link_could_not_take_is_retried_at_once);
     RUN_TEST(test_ecu_presence_needs_a_new_answer_after_absence);
     RUN_TEST(test_schedule_is_wrap_safe);
     RUN_TEST(test_null_arguments_are_harmless);

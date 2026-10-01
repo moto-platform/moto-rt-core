@@ -73,6 +73,14 @@ typedef enum {
     UDS_CLIENT_REQ_READ
 } uds_client_req_kind_t;
 
+/* The request the last poll produced, for uds_client_core_not_sent() (internal). */
+typedef enum {
+    UDS_CLIENT_LAST_NONE = 0,
+    UDS_CLIENT_LAST_SESSION,
+    UDS_CLIENT_LAST_TESTER_PRESENT,
+    UDS_CLIENT_LAST_READ
+} uds_client_last_t;
+
 typedef struct {
     uint32_t last_request_ms; /* start of the poll period: last request, or its timeout */
     uint32_t skip_start_ms;
@@ -83,7 +91,7 @@ typedef struct {
 
 /* Diagnostic counters (saturating). */
 typedef struct {
-    uint32_t requests;          /* requests handed to the caller, all kinds */
+    uint32_t requests;          /* requests the link took, all kinds (not a not_sent one) */
     uint32_t reads_ok;          /* DID samples produced */
     uint32_t timeouts;          /* requests that ended without an answer */
     uint32_t nrc;               /* negative responses, any SID and code */
@@ -117,7 +125,8 @@ typedef struct {
     uds_client_req_kind_t pending;
     uint8_t pending_sid;
     uint32_t pending_idx;
-    uint32_t prev_request_ms; /* the pending read's DID schedule before it, for not_sent */
+    uds_client_last_t last;   /* produced by the last poll, until not_sent or the next poll */
+    uint32_t prev_request_ms; /* that request's schedule before it, for not_sent */
     bool prev_requested;
     uint32_t sent_ms;         /* start of the total cap */
     uint32_t wait_start_ms;   /* start of the current response timeout */
@@ -148,7 +157,9 @@ bool uds_client_core_poll(uds_client_core_t* c, uint32_t now_ms, bool rx_busy, b
                           uint8_t* out, uint16_t* len);
 
 /* The request from the last poll did not go out (link busy): it is dropped without a
- * timeout, and a read's DID gets its schedule back, so it is due again at once. */
+ * timeout and not counted, and its schedule is restored (a read's DID, the session
+ * retry or tester present), so it is due again at once. Without a request from the
+ * last poll it does nothing. */
 void uds_client_core_not_sent(uds_client_core_t* c);
 
 /* Stops the core for good (until init): no request, session down, slot free. */
