@@ -53,6 +53,14 @@
  *     ends every DID's D-050/D-051 fault state: no read from before it is answered.
  *   - No request is produced while the link cannot take one at once (tx_ready false,
  *     e.g. no node ACKs and the mailbox stays full); the timers keep running.
+ *   - Step gaps (D-053): every DID's poll_period_ms is at least RESPONSE_TIMEOUT_BASE_MS
+ *     + CLIENT_STEP_MAX_MS (defs codegen), so an answer seen at the next step is in time
+ *     and its DID is not due yet. That holds while two polls are at most
+ *     CLIENT_STEP_MAX_MS apart; every larger gap between two polls is counted
+ *     (stats.step_overruns), and the longest one is kept (stats.step_gap_max_ms). A
+ *     step is every poll, also with rx_busy or while latched (the defs yaml definition;
+ *     D-053's "rx_busy false" adds nothing under Q-020, see README). The core does not
+ *     act on them.
  *   - A request the link could not take is dropped (uds_client_core_not_sent()); a read
  *     is due again at once. Only
  *     uds_client_core_latch() stops the core for good (a D-020 check refused a request,
@@ -113,6 +121,8 @@ typedef struct {
     uint32_t slow_answers;      /* answers later than poll_period_ms after their stamp (D-051) */
     uint32_t session_starts;    /* positive session responses */
     uint32_t session_losses;    /* session up -> down */
+    uint32_t step_overruns;     /* poll gaps above VEHICLE_CL250_CLIENT_STEP_MAX_MS (D-053) */
+    uint32_t step_gap_max_ms;   /* longest gap between two polls since init (D-029 bench) */
 } uds_client_stats_t;
 
 /* One decoded DID read, for the caller to store (services/vehicle_signals). */
@@ -151,6 +161,9 @@ typedef struct {
     bool ecu_seen;
     uint32_t last_response_ms;
 
+    uint32_t last_poll_ms;    /* the step gap check (D-053) */
+    bool polled;              /* last_poll_ms is set */
+
     bool failed;
 } uds_client_core_t;
 
@@ -159,8 +172,10 @@ void uds_client_core_init(uds_client_core_t* c, uint32_t abort_hold_ms);
 
 /*
  * Runs the timers and returns the next request, if one is due: *len bytes in out (room
- * for UDS_CLIENT_REQ_MAX). The request counts as sent; if the link does not take it,
- * call uds_client_core_not_sent() or uds_client_core_latch().
+ * for UDS_CLIENT_REQ_MAX). Call it once per step of the tester, after the step's
+ * indication: the gap to the previous call is the step gap of D-053. The request counts
+ * as sent; if the link does not take it, call uds_client_core_not_sent() or
+ * uds_client_core_latch().
  *   rx_busy:  a segmented reception is running on the link (isotp_link_rx_busy());
  *             nothing is sent while it runs.
  *   tx_ready: the link can send at once (isotp_link_tx_ready()); nothing is sent

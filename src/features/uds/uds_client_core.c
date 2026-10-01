@@ -88,6 +88,27 @@ static void forget_reads(uds_client_core_t* c)
     }
 }
 
+/*
+ * D-053: the poll period margin covers one step of at most CLIENT_STEP_MAX_MS. A longer
+ * gap lets an answer just inside the base timeout be seen at or after its DID is due
+ * again (slow, or read again back to back): counted here for the D-029 measurement and
+ * the field, not acted on. Every poll counts, also while latched or waiting.
+ */
+static void check_step_gap(uds_client_core_t* c, uint32_t now_ms)
+{
+    if (c->polled) {
+        const uint32_t gap = now_ms - c->last_poll_ms; /* wrap-safe */
+        if (gap > VEHICLE_CL250_CLIENT_STEP_MAX_MS) {
+            count(&c->stats.step_overruns);
+        }
+        if (gap > c->stats.step_gap_max_ms) {
+            c->stats.step_gap_max_ms = gap;
+        }
+    }
+    c->polled = true;
+    c->last_poll_ms = now_ms;
+}
+
 static void lose_session(uds_client_core_t* c)
 {
     if (c->session_up) {
@@ -188,6 +209,7 @@ bool uds_client_core_poll(uds_client_core_t* c, uint32_t now_ms, bool rx_busy, b
     }
     *len = 0u;
     c->last = UDS_CLIENT_LAST_NONE;
+    check_step_gap(c, now_ms);
     if (c->ecu_seen && !uds_client_core_ecu_present(c, now_ms)) {
         c->ecu_seen = false; /* absent: presence needs a new answer, also across a wrap */
         lose_session(c);     /* an ECU that came back is in its default session */
