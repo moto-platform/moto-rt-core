@@ -153,7 +153,7 @@ static uint8_t poll_priority(const uds_client_core_t* c, uint32_t idx)
  * Next due DID, or false (D-043): the lowest priority value first (poll_priority(),
  * D-050), then table order. The scan always covers the whole table; a strict < keeps
  * the first entry of a class. No starvation while every request holds the slot for at
- * most ASSUMED_ROUND_TRIP_MS (ECU answer + one step): the defs codegen (after v0.3.1)
+ * most ASSUMED_ROUND_TRIP_MS (ECU answer + one step): the defs codegen (v0.3.2 on)
  * and test_the_gen_table_meets_its_gap_bound bound every DID's sample gap by its
  * stale_after_ms for this order. A faulty DID holds it for up to the base timeout
  * after its first failing attempt (README, "Reads").
