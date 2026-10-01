@@ -34,7 +34,7 @@ typedef enum {
 typedef struct {
     uint32_t raw;          /* the DID's data bytes, unsigned big-endian */
     float physical;        /* raw through the generated formula, within [min, max] */
-    uint32_t timestamp_ms; /* timebase time the response was received */
+    uint32_t timestamp_ms; /* earliest time the ECU took it: the request send time (D-051) */
     uint32_t age_ms;       /* now - timestamp_ms at the time of the read */
     vehicle_signal_state_t state;
 } vehicle_signal_sample_t;

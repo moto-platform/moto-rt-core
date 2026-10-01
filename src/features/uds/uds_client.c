@@ -121,9 +121,9 @@ static void take_indication(uds_client_t* client, uint32_t now)
         return;
     }
     const uint8_t* data = (res == ISOTP_N_OK) ? isotp_link_rx_data(&client->link) : NULL;
-    uds_client_sample_t s = {0u, 0u, 0.0f};
+    uds_client_sample_t s = {0u, 0u, 0.0f, 0u};
     if (uds_client_core_on_indication(&client->core, now, res, data, len, &s)) {
-        (void)vehicle_signals_write(s.idx, s.raw, s.physical, now);
+        (void)vehicle_signals_write(s.idx, s.raw, s.physical, s.stamp_ms); /* D-051 */
     }
     if (res == ISOTP_N_OK) {
         isotp_link_rx_release(&client->link);

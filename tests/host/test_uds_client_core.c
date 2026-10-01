@@ -963,6 +963,325 @@ static void test_faulty_speed_with_random_round_trips_adds_only_the_jitter(void)
     }
 }
 
+/* ------------------------------------------------------------------------- */
+/* D-051 (E-7): slow answers and the sample stamp                             */
+/* ------------------------------------------------------------------------- */
+
+static void test_an_answer_is_stamped_with_its_request_send_time(void)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    bring_up(0u);
+    TEST_ASSERT_EQUAL(K_READ, poll_at(10u));
+    TEST_ASSERT_EQUAL_UINT32(speed, req_idx());
+    TEST_ASSERT_TRUE(answer_read(30u, speed, 60u));
+    TEST_ASSERT_EQUAL_UINT32(10u, smp.stamp_ms); /* the send time, not the arrival */
+    TEST_ASSERT_FALSE(c.did[speed].slow);
+}
+
+/*
+ * 0xF40D answered after a 0x78, 180 ms after its request (period 100 ms): faulty for
+ * one round. Its next read competes in the normal class and gets no 0x78 extension;
+ * an answer within the period gives it its gen/ priority and the extension back.
+ */
+static void test_a_read_answered_after_its_period_makes_the_did_faulty_for_one_round(void)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t rpm = VEHICLE_CL250_IDX_ENGINE_SPEED;
+    const uint32_t base = VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS;
+    const uint32_t period = vehicle_cl250_dids[speed].poll_period_ms;
+    bring_up(0u);
+    all_requested_at(0u);
+    c.did[speed].requested = false; /* only speed is due */
+    TEST_ASSERT_EQUAL(K_READ, poll_at(0u));
+    TEST_ASSERT_EQUAL_UINT32(speed, req_idx());
+    nrc(10u, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_RESPONSE_PENDING);
+    TEST_ASSERT_EQUAL_UINT32(2u * base, c.wait_ms); /* not faulty yet: extended */
+    TEST_ASSERT_TRUE(answer_read(period + 80u, speed, 60u)); /* held past its period */
+    TEST_ASSERT_EQUAL_UINT32(0u, smp.stamp_ms);
+    TEST_ASSERT_TRUE(c.did[speed].slow);
+    /* Both due: speed now competes in the normal class, RPM goes first. */
+    const uint32_t t1 = 2u * period;
+    all_requested_at(t1);
+    c.did[speed].last_request_ms = 0u;
+    c.did[rpm].requested = false;
+    TEST_ASSERT_EQUAL(K_READ, poll_skip_tp(t1));
+    TEST_ASSERT_EQUAL_UINT32(rpm, req_idx());
+    TEST_ASSERT_TRUE(answer_read(t1 + 1u, rpm, 1u));
+    TEST_ASSERT_EQUAL(K_READ, poll_skip_tp(t1 + 1u));
+    TEST_ASSERT_EQUAL_UINT32(speed, req_idx());
+    nrc(t1 + 10u, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_RESPONSE_PENDING);
+    TEST_ASSERT_EQUAL_UINT32(base, c.wait_ms); /* faulty: no extension */
+    TEST_ASSERT_TRUE(answer_read(t1 + 21u, speed, 61u)); /* within the period */
+    TEST_ASSERT_EQUAL_UINT32(t1 + 1u, smp.stamp_ms);
+    TEST_ASSERT_FALSE(c.did[speed].slow);
+    /* Its gen/ priority is back. */
+    all_requested_at(t1 + 21u);
+    c.did[speed].requested = false;
+    c.did[rpm].requested = false;
+    TEST_ASSERT_EQUAL(K_READ, poll_skip_tp(t1 + 21u));
+    TEST_ASSERT_EQUAL_UINT32(speed, req_idx());
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->timeouts);
+}
+
+/* An NRC other than 0x78 also ends the read with an answer: the same rule applies. */
+static void test_an_nrc_after_the_period_makes_the_did_faulty_too(void)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t period = vehicle_cl250_dids[speed].poll_period_ms;
+    bring_up(0u);
+    all_requested_at(0u);
+    c.did[speed].requested = false;
+    TEST_ASSERT_EQUAL(K_READ, poll_at(0u));
+    nrc(10u, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_RESPONSE_PENDING);
+    nrc(period, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_REQUEST_OUT_OF_RANGE);
+    TEST_ASSERT_FALSE(c.did[speed].slow); /* exactly the period is in time */
+    all_requested_at(period);
+    c.did[speed].requested = false;
+    TEST_ASSERT_EQUAL(K_READ, poll_skip_tp(period));
+    nrc(period + 10u, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_RESPONSE_PENDING);
+    nrc(2u * period + 1u, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_REQUEST_OUT_OF_RANGE);
+    TEST_ASSERT_TRUE(c.did[speed].slow); /* one ms past the period */
+    TEST_ASSERT_EQUAL(UDS_CLIENT_REQ_NONE, uds_client_core_pending(&c));
+}
+
+/*
+ * A late answer to a timed-out read is taken for the next read of the same DID (it
+ * carries no request reference). It is stamped with the first timed-out read since the
+ * last answer, so its age is never underestimated; it also counts as slow.
+ */
+static void test_a_late_answer_to_a_timed_out_read_is_stamped_with_that_read(void)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t base = VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS;
+    const uint32_t period = vehicle_cl250_dids[speed].poll_period_ms;
+    const uint32_t gap = base + period; /* timeout, then the period from it */
+    bring_up(0u);
+    all_requested_at(0u);
+    c.did[speed].requested = false;
+    TEST_ASSERT_EQUAL(K_READ, poll_at(0u));
+    for (uint32_t n = 1u; n <= 2u; n++) {
+        const uint32_t sent = (n - 1u) * gap;
+        all_requested_at(sent + base); /* the others are not due */
+        TEST_ASSERT_EQUAL(K_NONE, poll_skip_tp(sent + base)); /* times out */
+        TEST_ASSERT_EQUAL_UINT8((uint8_t)n, c.did[speed].consecutive_timeouts);
+        TEST_ASSERT_EQUAL_UINT32(0u, c.did[speed].unanswered_ms); /* the first one */
+        all_requested_at(n * gap);
+        c.did[speed].last_request_ms = sent + base; /* its period restarted at the timeout */
+        TEST_ASSERT_EQUAL(K_READ, poll_skip_tp(n * gap));
+        TEST_ASSERT_EQUAL_UINT32(speed, req_idx());
+    }
+    TEST_ASSERT_TRUE(answer_read((2u * gap) + 10u, speed, 60u)); /* meant for the read at 0 */
+    TEST_ASSERT_EQUAL_UINT32(0u, smp.stamp_ms);
+    TEST_ASSERT_TRUE(c.did[speed].slow);
+    TEST_ASSERT_EQUAL_UINT8(0u, c.did[speed].consecutive_timeouts);
+    /* The next answer within the period is stamped with its own read again. */
+    const uint32_t t1 = (2u * gap) + period;
+    all_requested_at(t1);
+    c.did[speed].last_request_ms = 2u * gap;
+    TEST_ASSERT_EQUAL(K_READ, poll_skip_tp(t1));
+    TEST_ASSERT_EQUAL_UINT32(speed, req_idx());
+    TEST_ASSERT_TRUE(answer_read(t1 + 5u, speed, 61u));
+    TEST_ASSERT_EQUAL_UINT32(t1, smp.stamp_ms);
+    TEST_ASSERT_FALSE(c.did[speed].slow);
+}
+
+static void test_a_skip_clears_the_slow_state(void)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t base = VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS;
+    bring_up(0u);
+    all_requested_at(0u);
+    c.did[speed].slow = true;
+    c.did[speed].consecutive_timeouts = (uint8_t)(VEHICLE_CL250_MAX_CONSECUTIVE_TIMEOUTS - 1u);
+    c.did[speed].requested = false;
+    TEST_ASSERT_EQUAL(K_READ, poll_at(0u));
+    (void)poll_skip_tp(base);
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->did_skips);
+    TEST_ASSERT_FALSE(c.did[speed].slow); /* the fresh attempt gets the extension back */
+}
+
+/*
+ * D-051 runs. Every DID but 0xF40D answers after a round trip in [rtt_min, rtt_max].
+ * 0xF40D, by mode:
+ *   SLOW_ABANDONS: NRC 0x78 10 ms after each request (and every 50 ms while that read
+ *                  is pending), then the answer 150-250 ms after the request (seeded).
+ *                  A new 0xF40D request drops the one before (like app/host/sim_ecu).
+ *   SLOW_KEEPS:    the same, but the ECU still answers a read after the next one came,
+ *                  so a late answer may be taken for the next 0xF40D read.
+ *   ALTERNATING:   odd requests answered after rtt_min, even ones NRC 0x78 every 50 ms
+ *                  while pending, never answered.
+ * Checks in every mode: one request in flight; a 0xF40D read that was faulty when sent
+ * holds the slot at most the base timeout (a fresh one up to the cap); the other DIDs
+ * stay within stale_after_ms plus the jitter except across a fresh attempt; the first
+ * answer after a timeout is stamped no later than the read the ECU answered.
+ * SLOW_ABANDONS and ALTERNATING: no sample looks younger than it is, and fresh attempts
+ * come only at the start and after a skip. SLOW_KEEPS is the README residual: the own
+ * answer of a read that a late answer ended can land on the next read, look younger
+ * and clear the slow state; it is checked to keep RPM STALE under 5 %.
+ */
+typedef enum { SPEED_SLOW_ABANDONS = 0, SPEED_SLOW_KEEPS, SPEED_ALTERNATING } speed_mode_t;
+
+#define LATE_MAX 8u
+
+
+static void run_with_slow_speed(speed_mode_t mode, uint32_t rtt_min, uint32_t rtt_max,
+                                uint32_t duration_ms)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t base = VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS;
+    const uint32_t t0 = 1000u;
+    uint32_t last_sample[VEHICLE_CL250_DID_COUNT];
+    uint32_t late_t[LATE_MAX];    /* pending 0xF40D answers: arrival */
+    uint32_t late_sent[LATE_MAX]; /* and the send time of the read they answer */
+    uint32_t late_n = 0u;
+    bool answer_due = false;
+    uint32_t answer_t = 0u;
+    uint32_t answer_idx = 0u;
+    bool attempt = false;
+    bool attempt_fresh = false;
+    uint32_t attempt_t = 0u;
+    uint32_t fresh_end = 0u;
+    uint32_t fresh_attempts = 0u;
+    uint32_t speed_requests = 0u;
+    uint32_t speed_samples = 0u;
+    uint32_t rpm_stale_ms = 0u;
+    uint32_t chained = 0u; /* speed samples stamped later than the read they answer */
+    bring_up(t0);
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        last_sample[i] = t0;
+    }
+    for (uint32_t t = t0; t < (t0 + duration_ms); t++) {
+        if (answer_due && (t == answer_t)) {
+            TEST_ASSERT_TRUE(answer_read(t, answer_idx, 1u));
+            last_sample[answer_idx] = t;
+            answer_due = false;
+        }
+        for (uint32_t n = 0u; n < late_n; n++) {
+            if (late_t[n] == t) {
+                const bool after_timeout = (c.did[speed].consecutive_timeouts > 0u);
+                if (answer_read(t, speed, 1u)) {
+                    speed_samples++;
+                    if (after_timeout) {
+                        TEST_ASSERT_LESS_OR_EQUAL_UINT32_MESSAGE(
+                            late_sent[n], smp.stamp_ms, "a speed sample looks younger than it is");
+                    } else if (smp.stamp_ms > late_sent[n]) {
+                        /* Residual (README): the own answer of a read that a late answer
+                         * ended lands on the next read. */
+                        chained++;
+                    } else {
+                        /* stamped no later than its read */
+                    }
+                }
+                late_t[n] = late_t[late_n - 1u];
+                late_sent[n] = late_sent[late_n - 1u];
+                late_n--;
+                n--;
+            }
+        }
+        if (attempt && (t != attempt_t) && (((t - attempt_t) % 50u) == 10u) &&
+            (uds_client_core_pending(&c) == UDS_CLIENT_REQ_READ) && (c.pending_idx == speed)) {
+            nrc(t, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_RESPONSE_PENDING);
+        }
+        kind_t k;
+        while ((k = poll_at(t)) != K_NONE) {
+            TEST_ASSERT_TRUE_MESSAGE(k != K_SESSION, "session lost");
+            if (attempt && ((uds_client_core_pending(&c) != UDS_CLIENT_REQ_READ) ||
+                            (c.pending_idx != speed) || (k == K_READ))) {
+                attempt = false; /* ended in this poll (timeout) */
+            }
+            if (k == K_READ) {
+                TEST_ASSERT_FALSE_MESSAGE(answer_due, "two requests in flight");
+                if (req_idx() == speed) {
+                    attempt = true;
+                    attempt_fresh = !c.did[speed].slow && (c.did[speed].consecutive_timeouts == 0u);
+                    attempt_t = t;
+                    speed_requests++;
+                    if (attempt_fresh) {
+                        fresh_attempts++;
+                    }
+                    const bool slow = (mode != SPEED_ALTERNATING);
+                    if (mode == SPEED_SLOW_ABANDONS) {
+                        late_n = 0u; /* the ECU drops a read when the next one comes */
+                    }
+                    if (slow || ((speed_requests % 2u) == 1u)) {
+                        TEST_ASSERT_LESS_THAN_UINT32(LATE_MAX, late_n);
+                        late_t[late_n] = t + (slow ? (150u + (rng_next() % 101u)) : rtt_min);
+                        late_sent[late_n] = t;
+                        late_n++;
+                    }
+                } else {
+                    answer_due = true;
+                    answer_idx = req_idx();
+                    answer_t = t + rtt_min + (rng_next() % (rtt_max - rtt_min + 1u));
+                }
+            }
+        }
+        if (attempt && (uds_client_core_pending(&c) == UDS_CLIENT_REQ_READ) &&
+            (c.pending_idx == speed)) {
+            TEST_ASSERT_LESS_OR_EQUAL_UINT32_MESSAGE(
+                attempt_fresh ? VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS : base, t - attempt_t,
+                "a speed read held the slot too long");
+        } else if (attempt) {
+            attempt = false; /* answered */
+        } else {
+            /* no speed read pending */
+        }
+        if (attempt_fresh && !attempt && (fresh_end < attempt_t)) {
+            fresh_end = t;
+        }
+        if ((t - last_sample[VEHICLE_CL250_IDX_ENGINE_SPEED]) >
+            vehicle_cl250_dids[VEHICLE_CL250_IDX_ENGINE_SPEED].stale_after_ms) {
+            rpm_stale_ms++;
+        }
+        for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+            const bool across_fresh = (attempt && attempt_fresh) || (fresh_end > last_sample[i]);
+            if ((i != speed) && !across_fresh) {
+                TEST_ASSERT_LESS_OR_EQUAL_UINT32_MESSAGE(
+                    vehicle_cl250_dids[i].stale_after_ms + (rtt_max - rtt_min),
+                    t - last_sample[i], "a DID went STALE while 0xF40D was slow");
+            }
+        }
+    }
+    TEST_ASSERT_GREATER_THAN_UINT32(0u, speed_samples);
+    if (mode == SPEED_SLOW_KEEPS) {
+        /* The residual (README): shifted answers may look younger and clear the slow
+         * state, so fresh attempts recur; each holds the slot only until its answer. */
+        TEST_ASSERT_LESS_OR_EQUAL_UINT32(duration_ms / 20u, rpm_stale_ms);
+    } else {
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(0u, chained, "a speed sample looks younger than it is");
+        TEST_ASSERT_LESS_OR_EQUAL_UINT32(
+            stats()->did_skips + ((mode == SPEED_SLOW_ABANDONS) ? 1u : 2u), fresh_attempts);
+    }
+}
+
+static void test_speed_answering_150_to_250_ms_after_0x78_keeps_the_others_fresh(void)
+{
+    const uint32_t rtt = VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS;
+    for (uint32_t seed = 1u; seed <= 10u; seed++) {
+        for (uint32_t m = (uint32_t)SPEED_SLOW_ABANDONS; m <= (uint32_t)SPEED_SLOW_KEEPS; m++) {
+            setUp();
+            rng_state = seed;
+            run_with_slow_speed((speed_mode_t)m, rtt, rtt, 20000u);
+            setUp();
+            rng_state = seed;
+            run_with_slow_speed((speed_mode_t)m, 1u, rtt, 20000u);
+        }
+    }
+}
+
+static void test_speed_alternating_answer_and_endless_0x78_keeps_the_others_fresh(void)
+{
+    const uint32_t rtt = VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS;
+    run_with_slow_speed(SPEED_ALTERNATING, rtt, rtt, 20000u);
+    setUp();
+    run_with_slow_speed(SPEED_ALTERNATING, 1u, 1u, 20000u);
+    for (uint32_t seed = 1u; seed <= 10u; seed++) {
+        setUp();
+        rng_state = seed;
+        run_with_slow_speed(SPEED_ALTERNATING, 1u, rtt, 15000u);
+    }
+}
+
 static void test_speed_answer_within_its_gen_period_keeps_the_period_from_the_request(void)
 {
     const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
@@ -1445,6 +1764,13 @@ int main(void)
     RUN_TEST(test_response_for_another_did_or_malformed_is_ignored);
     RUN_TEST(test_response_timeout_is_the_gen_base);
     RUN_TEST(test_silent_speed_restarts_its_period_and_the_normal_dids_are_still_read);
+    RUN_TEST(test_an_answer_is_stamped_with_its_request_send_time);
+    RUN_TEST(test_a_read_answered_after_its_period_makes_the_did_faulty_for_one_round);
+    RUN_TEST(test_an_nrc_after_the_period_makes_the_did_faulty_too);
+    RUN_TEST(test_a_late_answer_to_a_timed_out_read_is_stamped_with_that_read);
+    RUN_TEST(test_a_skip_clears_the_slow_state);
+    RUN_TEST(test_speed_answering_150_to_250_ms_after_0x78_keeps_the_others_fresh);
+    RUN_TEST(test_speed_alternating_answer_and_endless_0x78_keeps_the_others_fresh);
     RUN_TEST(test_speed_answer_within_its_gen_period_keeps_the_period_from_the_request);
     RUN_TEST(test_a_timed_out_high_did_competes_in_the_normal_class_until_it_answers);
     RUN_TEST(test_a_skip_gives_a_faulty_did_its_gen_priority_back);

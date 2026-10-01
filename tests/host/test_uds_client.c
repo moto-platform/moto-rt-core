@@ -148,6 +148,20 @@ static uint32_t tester_count(uint8_t sid, uint32_t from_t)
     return n;
 }
 
+/* True if the tester sent a 0x22 for did at t (sample stamps are request times, D-051). */
+static bool read_request_at(uint16_t did, uint32_t t)
+{
+    for (uint32_t i = 0u; i < sniff_count; i++) {
+        const uint8_t* d = sniffed[i].f.data;
+        if (is_tester(&sniffed[i]) && (sniffed[i].t == t) && (d[0] == 3u) &&
+            (d[1] == UDS_SID_READ_DATA_BY_IDENTIFIER) &&
+            ((uint16_t)(((uint16_t)d[2] << 8u) | d[3]) == did)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Healthy operation                                                          */
 /* ------------------------------------------------------------------------- */
@@ -288,17 +302,32 @@ static void test_sil_session_drop_is_detected_by_nrc_and_reestablished(void)
 /* NRC 0x78, other NRCs                                                       */
 /* ------------------------------------------------------------------------- */
 
-static void test_sil_response_pending_bursts_are_waited_out(void)
+/*
+ * 0x78 bursts that end within the DID's poll period are waited out: 0xF411 (TPS,
+ * 200 ms) is answered after 0x78 at 0, 60 and 120 ms, at 180 ms, past the base timeout.
+ * Its sample is stamped with the request's send time, not the arrival (D-051). An
+ * answer later than the period makes the DID faulty (next test).
+ */
+static void test_sil_response_pending_bursts_within_the_period_are_waited_out(void)
 {
+    const uint32_t idx = VEHICLE_CL250_IDX_THROTTLE_POS;
+    const uint32_t answer_ms = 180u;
+    TEST_ASSERT_GREATER_THAN_UINT32(VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS, answer_ms);
+    TEST_ASSERT_LESS_OR_EQUAL_UINT32(vehicle_cl250_dids[idx].poll_period_ms, answer_ms + 2u);
     run(300u, false);
     ecu.pending_count = 3u;
     ecu.pending_interval_ms = 60u; /* 0x78 at 0, 60, 120 ms, the answer at 180 ms */
+    ecu.pending_did = VEHICLE_CL250_DID_THROTTLE_POS;
     const uint32_t reads_before = uds_client_stats(&client)->reads_ok;
     run(3000u, false);
     const uds_client_stats_t* st = uds_client_stats(&client);
     TEST_ASSERT_EQUAL_UINT32(0u, st->timeouts);
     TEST_ASSERT_GREATER_OR_EQUAL_UINT32(3u, st->response_pending);
     TEST_ASSERT_GREATER_THAN_UINT32(reads_before + 5u, st->reads_ok);
+    vehicle_signal_sample_t s;
+    TEST_ASSERT_TRUE(vehicle_signals_get(idx, timebase_now_ms(), &s));
+    TEST_ASSERT_TRUE_MESSAGE(read_request_at(VEHICLE_CL250_DID_THROTTLE_POS, s.timestamp_ms),
+                             "the sample is not stamped with its request's send time");
     ecu.pending_count = 0u;
     run(1000u, false);
     TEST_ASSERT_TRUE(all_valid(timebase_now_ms()));
@@ -343,6 +372,62 @@ static void test_sil_nrc_on_one_did_leaves_the_others_valid(void)
 }
 
 /*
+ * D-051 (ISSUES E-7): 0xF40D answered after 0x78 at 0, 60 and 120 ms, at 180 ms, later
+ * than its 100 ms period. Before D-051 it kept its priority and the 0x78 extension and
+ * was due again when its answer landed, so RPM (stale_after_ms 150) was STALE all the
+ * time. Now a late answer makes it faulty: its next reads end at the base timeout and
+ * it is skipped after MAX_CONSECUTIVE_TIMEOUTS, so only the fresh attempt after each
+ * cooldown holds the slot past RPM's stale_after_ms. Every speed sample is stamped
+ * with a speed request's send time, so its age is never underestimated.
+ */
+static void test_sil_speed_answered_after_its_period_keeps_rpm_fresh_and_its_age_honest(void)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t rpm = VEHICLE_CL250_IDX_ENGINE_SPEED;
+    const uint32_t duration = 3u * VEHICLE_CL250_DID_SKIP_COOLDOWN_MS;
+    run(1000u, false);
+    TEST_ASSERT_TRUE(all_valid(timebase_now_ms()));
+    ecu.pending_count = 3u;
+    ecu.pending_interval_ms = 60u;
+    ecu.pending_did = VEHICLE_CL250_DID_VEHICLE_SPEED;
+    uint32_t rpm_stale_ms = 0u;
+    uint32_t speed_stale_ms = 0u;
+    uint32_t speed_samples = 0u;
+    vehicle_signal_sample_t s;
+    TEST_ASSERT_TRUE(vehicle_signals_get(speed, timebase_now_ms(), &s));
+    uint32_t last_stamp = s.timestamp_ms;
+    for (uint32_t i = 0u; i < duration; i++) {
+        run(1u, false);
+        const uint32_t now = timebase_now_ms();
+        TEST_ASSERT_TRUE(vehicle_signals_get(rpm, now, &s));
+        if (s.state != VEHICLE_SIGNAL_VALID) {
+            rpm_stale_ms++;
+        }
+        TEST_ASSERT_TRUE(vehicle_signals_get(speed, now, &s));
+        if (s.state != VEHICLE_SIGNAL_VALID) {
+            speed_stale_ms++;
+        }
+        if (s.timestamp_ms != last_stamp) {
+            last_stamp = s.timestamp_ms;
+            speed_samples++;
+            TEST_ASSERT_TRUE_MESSAGE(read_request_at(VEHICLE_CL250_DID_VEHICLE_SPEED, last_stamp),
+                                     "a speed sample is not stamped with a speed request");
+        }
+    }
+    const uds_client_stats_t* st = uds_client_stats(&client);
+    /* Measured 2026-10-01: RPM STALE 245 of 15000 ms (the fresh attempts), 14897 without
+     * D-051; speed STALE 14460 ms with one sample per fresh attempt (fail-safe), 0 skips
+     * and 82 samples without D-051. */
+    TEST_ASSERT_LESS_OR_EQUAL_UINT32(duration / 20u, rpm_stale_ms);
+    TEST_ASSERT_GREATER_THAN_UINT32(0u, st->did_skips);
+    TEST_ASSERT_GREATER_THAN_UINT32(0u, speed_samples);
+    TEST_ASSERT_LESS_OR_EQUAL_UINT32(st->did_skips + 1u, speed_samples); /* fresh attempts only */
+    TEST_ASSERT_GREATER_THAN_UINT32(duration / 2u, speed_stale_ms);
+    TEST_ASSERT_TRUE(uds_client_session_up(&client));
+    assert_tester_frames_ok();
+}
+
+/*
  * The ECU stops giving 0xF40D (NRC on that DID only) while everything else keeps
  * running. The last speed sample is VALID up to PLATFORM_LIMIT_VEHICLE_SPEED_MAX_AGE_MS
  * (D-048: = its stale_after_ms) and STALE from 301 ms on; the other DIDs stay VALID.
@@ -359,6 +444,8 @@ static void test_sil_speed_sample_goes_stale_at_301_ms_when_the_ecu_stops_giving
     ecu.nrc_code = UDS_NRC_REQUEST_OUT_OF_RANGE;
     TEST_ASSERT_TRUE(vehicle_signals_get(idx, timebase_now_ms(), &s));
     const uint32_t last = s.timestamp_ms;
+    /* D-051: the age counts from the request's send time, not from the answer. */
+    TEST_ASSERT_TRUE(read_request_at(VEHICLE_CL250_DID_VEHICLE_SPEED, last));
     while (timebase_now_ms() != (last + max_age)) {
         run(1u, false);
     }
@@ -693,7 +780,8 @@ int main(void)
     RUN_TEST(test_sil_ecu_off_goes_absent_and_stale_then_recovers);
     RUN_TEST(test_sil_unread_sample_stays_stale_across_the_counter_wrap);
     RUN_TEST(test_sil_session_drop_is_detected_by_nrc_and_reestablished);
-    RUN_TEST(test_sil_response_pending_bursts_are_waited_out);
+    RUN_TEST(test_sil_response_pending_bursts_within_the_period_are_waited_out);
+    RUN_TEST(test_sil_speed_answered_after_its_period_keeps_rpm_fresh_and_its_age_honest);
     RUN_TEST(test_sil_endless_response_pending_ends_at_the_gen_max);
     RUN_TEST(test_sil_nrc_on_one_did_leaves_the_others_valid);
     RUN_TEST(test_sil_speed_sample_goes_stale_at_301_ms_when_the_ecu_stops_giving_it);

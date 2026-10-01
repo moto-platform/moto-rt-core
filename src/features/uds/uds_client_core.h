@@ -29,8 +29,13 @@
  *     one poll step). A DID whose last read timed out competes in the normal class and
  *     gets no NRC 0x78 extension until it answers or is skipped (D-050), so after its
  *     first failing attempt it holds the slot for at most RESPONSE_TIMEOUT_BASE_MS
- *     (plus N_Cr if a segmented reception starts). A slow but answering DID is not
- *     faulty (README, "Not covered by D-050").
+ *     (plus N_Cr if a segmented reception starts). A read answered more than its
+ *     poll_period_ms after its sample stamp makes the DID faulty too, until an answer
+ *     comes within the period or the DID is skipped (D-051, ISSUES E-7).
+ *   - Sample stamp (D-051): the send time of the DID's oldest read since its last
+ *     answer: the read that just ended, or the first read that timed out before it. A
+ *     late answer to a timed-out read can be taken for the next read of the same DID;
+ *     this stamp never makes the sample look younger than it is.
  *   - Response timeout RESPONSE_TIMEOUT_BASE_MS; NRC 0x78 for the pending SID restarts
  *     it doubled (not for a D-050 faulty read), up to RESPONSE_TIMEOUT_MAX_MS; a
  *     request never waits longer than RESPONSE_TIMEOUT_MAX_MS in total. The base
@@ -84,9 +89,11 @@ typedef enum {
 typedef struct {
     uint32_t last_request_ms; /* start of the poll period: last request, or its timeout */
     uint32_t skip_start_ms;
+    uint32_t unanswered_ms; /* send time of the first timed-out read since the last answer */
     uint8_t consecutive_timeouts;
     bool requested;   /* last_request_ms is set */
     bool skipped;     /* in skip cooldown since skip_start_ms */
+    bool slow;        /* last answer came more than poll_period_ms after its stamp (D-051) */
 } uds_client_did_state_t;
 
 /* Diagnostic counters (saturating). */
@@ -108,6 +115,7 @@ typedef struct {
     uint32_t idx;       /* index into vehicle_cl250_dids[] */
     uint32_t raw;
     float physical;
+    uint32_t stamp_ms;  /* the ECU took the sample no earlier than this ("Sample stamp") */
 } uds_client_sample_t;
 
 /* State. Treat as opaque: use the functions below. */
