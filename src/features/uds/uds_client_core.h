@@ -42,6 +42,8 @@
  *     timeout pauses while a segmented
  *     reception runs (it ends in N_Cr at the latest); the total cap does not.
  *   - MAX_CONSECUTIVE_TIMEOUTS timeouts in a row skip a DID for DID_SKIP_COOLDOWN_MS.
+ *     Only an answer in time resets the count: a slow answer between two timeouts does
+ *     not (D-052), so an ECU alternating them is skipped too.
  *   - Any other NRC for the pending SID ends the request (legacy behaviour): not a
  *     timeout, the DID keeps its schedule.
  *   - A failed reception (Q-020: a segmented response ends in ISOTP_N_TIMEOUT_CR) means
@@ -91,10 +93,11 @@ typedef struct {
     uint32_t last_request_ms; /* start of the poll period: last request, or its timeout */
     uint32_t skip_start_ms;
     uint32_t unanswered_ms; /* send time of the first timed-out read since the last answer */
-    uint8_t consecutive_timeouts;
+    uint8_t consecutive_timeouts; /* timeouts since the last answer in time: the skip count */
     bool requested;   /* last_request_ms is set */
     bool skipped;     /* in skip cooldown since skip_start_ms */
     bool slow;        /* last answer came more than poll_period_ms after its stamp (D-051) */
+    bool unanswered;  /* a timed-out read is unanswered: unanswered_ms is the stamp (D-051) */
 } uds_client_did_state_t;
 
 /* Diagnostic counters (saturating). */

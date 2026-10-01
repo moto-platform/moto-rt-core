@@ -49,6 +49,7 @@ static void skip_did(uds_client_core_t* c, uint32_t idx, uint32_t now_ms)
     d->skip_start_ms = now_ms;
     d->consecutive_timeouts = 0u;
     d->slow = false; /* the fresh attempt after the cooldown gets its priority back */
+    d->unanswered = false;
     count(&c->stats.did_skips);
 }
 
@@ -61,7 +62,8 @@ static void end_with_timeout(uds_client_core_t* c, uint32_t now_ms)
          * timeout would otherwise be due again at once and, served first, hold the slot
          * until it is skipped. */
         d->last_request_ms = now_ms;
-        if (d->consecutive_timeouts == 0u) {
+        if (!d->unanswered) {
+            d->unanswered = true;
             d->unanswered_ms = c->sent_ms; /* its answer may still come (D-051) */
         }
         d->consecutive_timeouts++;
@@ -82,6 +84,7 @@ static void forget_reads(uds_client_core_t* c)
     for (uint32_t idx = 0u; idx < VEHICLE_CL250_DID_COUNT; idx++) {
         c->did[idx].consecutive_timeouts = 0u;
         c->did[idx].slow = false;
+        c->did[idx].unanswered = false;
     }
 }
 
@@ -94,9 +97,10 @@ static void lose_session(uds_client_core_t* c)
 }
 
 /*
- * D-050 (E-5): a DID whose last read timed out is faulty until it answers or is
- * skipped. It competes in the normal class whatever its gen/ priority, and its read
- * gets no NRC 0x78 extension, so it holds the slot for at most RESPONSE_TIMEOUT_BASE_MS.
+ * D-050 (E-5): a DID whose last read timed out is faulty until it answers in time
+ * (D-052: a slow answer keeps the timeout count) or is skipped. It competes in the
+ * normal class whatever its gen/ priority, and its read gets no NRC 0x78 extension,
+ * so it holds the slot for at most RESPONSE_TIMEOUT_BASE_MS.
  * Priority alone cannot help: one request is in flight, so the hold time starves the
  * others, not the order.
  * D-051 (E-7): a DID whose last answer came more than its poll_period_ms after its
@@ -115,19 +119,26 @@ static bool faulty(const uds_client_core_t* c, uint32_t idx)
 static uint32_t sample_stamp(const uds_client_core_t* c)
 {
     const uds_client_did_state_t* d = &c->did[c->pending_idx];
-    return (d->consecutive_timeouts > 0u) ? d->unanswered_ms : c->sent_ms;
+    return d->unanswered ? d->unanswered_ms : c->sent_ms;
 }
 
-/* The pending read was answered (decoded, or an NRC other than 0x78). */
+/*
+ * The pending read was answered (decoded, or an NRC other than 0x78). It ends the stamp
+ * chain. D-052 (E-8 (3)): only an answer in time resets the skip count, so an ECU that
+ * alternates timeouts with slow answers is still skipped after MAX_CONSECUTIVE_TIMEOUTS
+ * timeouts instead of holding the slot with no skip.
+ */
 static void read_answered(uds_client_core_t* c, uint32_t now_ms)
 {
     uds_client_did_state_t* d = &c->did[c->pending_idx];
     d->slow = (uint32_t)(now_ms - sample_stamp(c)) >
               (uint32_t)vehicle_cl250_dids[c->pending_idx].poll_period_ms;
+    d->unanswered = false;
     if (d->slow) {
         count(&c->stats.slow_answers);
+    } else {
+        d->consecutive_timeouts = 0u;
     }
-    d->consecutive_timeouts = 0u;
 }
 
 static uint8_t poll_priority(const uds_client_core_t* c, uint32_t idx)
