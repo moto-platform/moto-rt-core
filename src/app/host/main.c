@@ -17,15 +17,22 @@
  * touches the vehicle port. With --uds-scenario a scripted tester (app/host/sim_tester)
  * runs a full diagnostic session against it and the program exits when it is done.
  *
- * Exit code with --duration-ms: 0 if at least --min-responses DID reads were decoded and
- * the client did not latch as failed. With --uds-scenario: 0 if every scenario step
+ * rt-core's republisher (features/vehicle_republish, ISSUES D-5, D-056) sends the samples
+ * as 0x021 VehicleSpeed (E2E) and 0x110 VehicleEngine on the platform bus; a listener
+ * (app/host/sim_listener) checks their E2E, lengths and gaps as a receiver would.
+ *
+ * Exit code with --duration-ms: 0 if at least --min-responses DID reads were decoded,
+ * the client did not latch as failed, and the listener passed. With --uds-scenario: 0 if every scenario step
  * passed and the client did not latch.
  */
 #include "app/comms.h"
 #include "app/host/sim_ecu.h"
+#include "app/host/sim_listener.h"
 #include "app/host/sim_tester.h"
 #include "features/uds/uds_client.h"
 #include "features/uds/uds_server.h"
+#include "features/vehicle_republish/vehicle_republish.h"
+#include "platform.h"
 #include "platform_uds.h"
 #include "hal/host/can_port_host.h"
 #include "hal/host/hal_time_host.h"
@@ -118,6 +125,8 @@ static sim_ecu_t ecu;
 static sim_tester_t tester;
 static uds_client_t client;
 static uds_server_t server;
+static vehicle_republish_t republisher;
+static sim_listener_t listener;
 
 static const char* state_name(vehicle_signal_state_t st)
 {
@@ -186,6 +195,7 @@ int main(int argc, char** argv)
     vbus_init(&platform_bus);
     if (!vbus_attach(&platform_bus, &platform_node) ||
         !can_port_host_bind_vbus(CAN_PORT_PLATFORM, &platform_bus, platform_node) ||
+        !sim_listener_init(&listener, &platform_bus) ||
         (opt.uds_scenario && !sim_tester_init(&tester, &platform_bus, timebase_now_ms()))) {
         fprintf(stderr, "platform bus setup failed\n");
         return 1;
@@ -200,6 +210,10 @@ int main(int argc, char** argv)
     }
     if (uds_server_open(&server) != ISOTP_OK) {
         fprintf(stderr, "platform UDS server setup failed\n");
+        return 1;
+    }
+    if (!vehicle_republish_open(&republisher)) {
+        fprintf(stderr, "platform-bus republisher setup failed\n");
         return 1;
     }
     if (!comms_apply_filters()) {
@@ -230,7 +244,8 @@ int main(int argc, char** argv)
                 break;
             }
         }
-        comms_pass(&client, &server);
+        comms_pass(&client, &server, &republisher);
+        sim_listener_step(&listener, now);
 
         if (!opt.quiet && timebase_expired(now, printed_at, PRINT_PERIOD_MS)) {
             print_signals(now, start);
@@ -266,6 +281,20 @@ int main(int argc, char** argv)
            "%u S3 timeouts\n",
            (unsigned)ss->requests, (unsigned)ss->positive, (unsigned)ss->negative,
            (unsigned)ss->suppressed, (unsigned)ss->s3_timeouts);
+    const int listener_ok = sim_listener_passed(&listener);
+    printf("moto_rtcore_host: republisher 0x%03X %u sent, %u retried, %u dropped; "
+           "0x%03X %u sent, %u retried, %u dropped\n",
+           (unsigned)PLATFORM_VEHICLE_SPEED_FRAME_ID, (unsigned)republisher.speed.sent,
+           (unsigned)republisher.speed.retried, (unsigned)republisher.speed.dropped,
+           (unsigned)PLATFORM_VEHICLE_ENGINE_FRAME_ID, (unsigned)republisher.engine.sent,
+           (unsigned)republisher.engine.retried, (unsigned)republisher.engine.dropped);
+    printf("moto_rtcore_host: listener 0x%03X %u frames (E2E %u ok, %u bad, longest gap %u ms), "
+           "0x%03X %u frames (longest gap %u ms): %s\n",
+           (unsigned)PLATFORM_VEHICLE_SPEED_FRAME_ID, (unsigned)listener.speed.frames,
+           (unsigned)listener.speed_e2e_ok, (unsigned)listener.speed_e2e_bad,
+           (unsigned)listener.speed.gap_max_ms, (unsigned)PLATFORM_VEHICLE_ENGINE_FRAME_ID,
+           (unsigned)listener.engine.frames, (unsigned)listener.engine.gap_max_ms,
+           listener_ok ? "PASS" : "FAIL");
     can_port_host_unbind_all();
     if (opt.uds_scenario) {
         const int ok = sim_tester_passed(&tester) && !uds_client_failed(&client);
@@ -279,5 +308,6 @@ int main(int argc, char** argv)
     if (opt.duration_ms == 0u) {
         return 0;
     }
-    return ((st->reads_ok >= opt.min_responses) && !uds_client_failed(&client)) ? 0 : 1;
+    return ((st->reads_ok >= opt.min_responses) && !uds_client_failed(&client) && listener_ok) ? 0
+                                                                                               : 1;
 }

@@ -28,6 +28,8 @@ moto_host_test(test_uds_client moto_rtcore_fw moto_rtcore_sim moto_rtcore_hal_ho
 moto_host_test(test_uds_server_core)
 moto_host_test(test_diag moto_rtcore_fw)
 moto_host_test(test_uds_server moto_rtcore_fw moto_rtcore_sim moto_rtcore_hal_host)
+moto_host_test(test_vehicle_republish_core)
+moto_host_test(test_vehicle_republish moto_rtcore_fw moto_rtcore_sim moto_rtcore_hal_host)
 
 # SocketCAN backend: Linux only; skips (exit 77) when no vcan0 interface exists.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")

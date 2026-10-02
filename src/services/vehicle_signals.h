@@ -4,8 +4,8 @@
 /*
  * Vehicle signal store: the last sample of every CL250 DID in gen/vehicle_cl250.h,
  * indexed like vehicle_cl250_dids[] (vehicle_cl250_did_index_t). The UDS client
- * (features/uds) is the single writer; readers such as the future platform-bus
- * republisher use vehicle_signals_get() and never include features/.
+ * (features/uds) is the single writer; readers such as the platform-bus republisher
+ * (features/vehicle_republish) use vehicle_signals_get() and never include features/.
  *
  * The state is computed when a sample is read, from its age and the DID's generated
  * stale_after_ms (D-025, D-029): VALID while age <= stale_after_ms, STALE after that.
