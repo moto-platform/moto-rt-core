@@ -212,12 +212,13 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
   - Each segmented response stops polling for about N_Cr + N_Bs (about 2 s), so every DID goes STALE. This is the cost of the Q-020 deferral.
   - A DID answered with a permanent NRC (for example 0x31) is polled at its full rate. This is legacy behaviour, and the schedule bounds it.
   - The acceptance filters come from the `can_if` receiver table (`can_if_apply_filters()`, Ç1), so they pass `VEHICLE_CL250_RESPONSE_ID`, `VEHICLE_CL250_REQUEST_ID`, `VEHICLE_CL250_FALLBACK_REQUEST_ID` and every `vehicle_cl250_functional_watch[]` ID that the client registered. Otherwise the foreign-tester watch would be deaf. Checked on target by `uds_client_foreign_tester`.
-  - **Bus-off and N_As (Ç1, `services/can_sm`, D-054).** A vehicle bus-off aborts the pending request and blocks writes (`can_if_write()` returns `CAN_PORT_ERR_IO`, counted in `can_if_tx_blocked_count()`, never as a guard refusal, so the client does not latch). The client keeps its schedule and waits for `isotp_link_tx_ready()`. Recovery waits 1, 2, 4, 8 s (gen/ `VEHICLE_CL250_BUS_OFF_BACKOFF_*`). The 5th bus-off since boot latches the vehicle port (D-030): off the vehicle bus until reboot, seen as `VEHICLE_ECU_COMM_LOST` and STALE values. The vehicle port takes a new frame only when none is pending (one TX buffer), so a request never queues behind a stuck one; a stuck one is aborted after N_As. A request that got out late anyway is an abandoned read (D-051). Until the rt-core health DID (D-054 item 7), a latched vehicle port shows on 0xFD00 as fault NONE with the ECU absent, which looks like an ECU fault: check the host summary or, later, the health DID.
+  - **Bus-off and N_As (Ç1, `services/can_sm`, D-054).** A vehicle bus-off aborts the pending request and blocks writes (`can_if_write()` returns `CAN_PORT_ERR_IO`, counted in `can_if_tx_blocked_count()`, never as a guard refusal, so the client does not latch). The client keeps its schedule and waits for `isotp_link_tx_ready()`. Recovery waits 1, 2, 4, 8 s (gen/ `VEHICLE_CL250_BUS_OFF_BACKOFF_*`). The 5th bus-off since boot latches the vehicle port (D-030): off the vehicle bus until reboot, seen as `VEHICLE_ECU_COMM_LOST` and STALE values. The vehicle port takes a new frame only when none is pending (one TX buffer), so a request never queues behind a stuck one; a stuck one is aborted after N_As. A request that got out late anyway is an abandoned read (D-051). A latched vehicle port still shows on 0xFD00 as fault NONE with the ECU absent; the root cause is on 0xFD02 (`VEHICLE_STATE` LATCHED and the `VEHICLE_LATCHED` flag) and in DTC U0001-88 `VEHICLE_BUS_OFF_LATCHED` (D-055).
 - **Counters** (`uds_client_stats()`): requests, reads, timeouts, NRC, response pending, unavailable, skips, unexpected, session starts and losses, slow answers (D-051), step gaps above `CLIENT_STEP_MAX_MS` and the longest step gap (D-053).
 - **Diagnostics (D-040).** Every step reports to `services/diag`, level-triggered:
   - DTC `VEHICLE_ECU_COMM_LOST` (U0100-00): the ECU is absent, counted only once `ECU_ABSENT_TIMEOUT_MS` has passed since open (a sticky flag, so the ms counter wrap cannot disarm it).
   - DTC `VEHICLE_TESTER_LATCHED` (U3000-00): the latch.
   - The 0xFD00 status: ECU present, session up, latched, latch reason (gen/ values).
+  - The 0xFD02 step counters (`stats.step_overruns`, `stats.step_gap_max_ms`, D-055), every step, latched or not, so they read fresh while the client runs.
   - A 0x14 clear on the platform bus resets the DTC records only. The next step sets them again while the condition lasts, and the latch is never released by it.
 
 **Memory.** `uds_client_t` is 420 B on the M7 (2026-10-02: +12 B for the D-053 step-gap check; 408 B in v0.5.0, 388 B after D-051, 364 B before it, 348 B before the D-040 diagnostics): the link, 64 + 8 B of buffers, and the core. It must have static storage duration. `vehicle_signals` adds 81 B, and the glue adds 4 B (the foreign-frame counter). `uds_client_sample_t` (stack) is 16 B. Flash is about 2.6 kB: core 1538 B (+52 B for D-053; 1486 B in v0.5.0, 1286 B before D-051, 1094 B before D-050), glue 802 B, service 252 B (release build, 2026-10-02). There is no heap, and every loop is bounded by the DID count or a frame length.
@@ -314,11 +315,17 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
 - 0xF189 SW version: `MOTO_RTCORE_VERSION` = the CMake project version, NUL-padded to 12 bytes
 - 0xFD00 vehicle-tester status: byte 0 = ECU present / session up / latched bits, byte 1 = latch reason
 - 0xFD01 uptime in seconds since `uds_server_open()`
+- 0xFD02 rt-core health (D-055), 23 bytes, big-endian, gen/ `PLATFORM_UDS_RT_CORE_HEALTH_*` offsets:
+  - byte 0 flags: `STEP_STATS_FRESH` (the client wrote its step counters within `PLATFORM_UDS_RT_CORE_HEALTH_MAX_AGE_MS`), `VEHICLE_LATCHED`
+  - bytes 1-4: the D-053 step counters `STEP_OVERRUNS`, `STEP_GAP_MAX_MS` (from `services/diag`)
+  - bytes 5-13 vehicle port, 14-22 platform port (from `services/can_sm`): `STATE` (0 ERROR_ACTIVE, 1 ERROR_PASSIVE, 2 BUS_OFF, 3 LATCHED, 0xFF UNKNOWN), then bus-offs, recovery attempts, deferred recoveries and N_As aborts
+  - every counter is clamped to its gen/ `*_MAX` (0xFFFF) before packing, never truncated
 - 0xFD10–0xFD14 the five CL250 samples from `services/vehicle_signals`: [state 0 NONE / 1 VALID / 2 STALE][age ms, big-endian, saturates at 0xFFFF, 0xFFFF for NONE][raw, big-endian]
 
 **DTCs** (`services/diag`, RAM only until the H7 flash driver, D-040):
 - 0xC10000 U0100-00, CL250 ECU communication lost
 - 0xF00000 U3000-00, vehicle UDS client latched
+- 0xC00188 U0001-88, vehicle CAN port latched after its bus-off limit (D-030, D-054, D-055): reported by the server glue every pass next to `diag_supervise()`
 
 **NRC order** (clause 7.5):
 - 0x11 service not supported
@@ -351,13 +358,18 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
   - `diag_supervise()`, called by the server every pass, fails U3000-00.
   - The stale flag is sticky until a new status arrives, so the ms wrap cannot revive an old one.
   - A client that failed to open or stopped therefore never looks healthy.
+- **0xFD02 is fail-safe** (D-055, safety review MAJOR-1 on defs#32):
+  - A port reads `STATE` UNKNOWN (0xFF) unless `can_sm_state_known()`: before init, before the first controller snapshot, or while its controller cannot be read. It never reads its last state, since 0 means ERROR_ACTIVE. A latch is rt-core's own state, so a latched port stays LATCHED even with an unreadable controller.
+  - `VEHICLE_LATCHED` and the vehicle `STATE` come from one read per response, so they never disagree.
+  - Step counters with no write since boot read 0 with `STEP_STATS_FRESH` clear; older than 500 ms they read their last values with the flag clear (sticky until the next write, wrap-safe). The flag is their only freshness signal.
+  - U0001-88 fails while the vehicle port is LATCHED, passes in the other known states, and gets no report while the state is UNKNOWN (the last status stays). A 0x14 clear hides it for one pass at most and never releases the latch.
 - A provider that fails gives NRC 0x22.
 - If a gen/ DID has no source here, or its layout changes (for example the vehicle sample length), reading it gives NRC 0x22 rather than a guessed value.
 - **No security access.** There is no 0x27 yet. The extended session is the only barrier before 0x14, and it clears RAM DTC records only. Treat the platform bus as unauthenticated: nothing reachable from the Raspi or the phone may assume a tester was authenticated.
 
 **Memory.**
-- M7 RAM: `uds_server_t` is 468 B (link, 64 B rx, 57 B tx, core with a 64 B request copy, 57 B answer buffer). `services/diag` is 12 B.
-- M7 flash (release, 2026-09-30, after the safety fixes): core 1396 B, glue 1030 B, diag 304 B, gen tables 270 B, `isotp_single_frame()` about 40 B.
+- M7 RAM: `uds_server_t` is 564 B (link, 64 B rx, 101 B tx, core with a 64 B request copy, 101 B answer buffer; the two buffers grew by 44 B each with 0xFD02, since `UDS_SERVER_RSP_MAX` = 1 + 4 × (2 + 23)). `services/diag` is 31 B (+19 B for the 0xFD02 step counters and the third DTC).
+- M7 flash (release, 2026-10-02, defs v0.4.0): core 1396 B, glue 1382 B (1030 B before 0xFD02), diag 472 B (304 B), gen tables 280 B, `isotp_single_frame()` about 40 B. The whole of D-055 is about +0.6 KB flash and +107 B RAM.
 - `CAN_IF_MAX_RECEIVERS` went from 8 to 12:
   - vehicle: the link, 2 physical and 2 functional watches
   - platform: the server's physical and functional receivers
@@ -417,6 +429,11 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
 
 - Checks after the fixes: see the PR description (ctest, coverage, MISRA, cross builds, SIL).
 
+
+**Reviews of the health DID (D-055, 2026-10-02).**
+- architecture-guard on the plan: no blocker. The server reads `services/can_sm` directly (features → services), the client's step counters go through `services/diag`, `diag` includes no other service, and the U0001-88 monitor sits in the server glue next to `diag_supervise()`.
+- vss-schema-guardian: CLEAN (defs v0.4.0).
+- safety-reviewer: no blocker; R1-R7 of D-055 met. Applied: MINOR-1 (every counter's gen/ `*_MAX` is asserted equal to the clamp value), MINOR-2 (tests: port counters above 0xFFFF read 0xFFFF, through a host-only `vbus_add_bus_off_events()` hook; a latched client keeps `STEP_STATS_FRESH`), NIT-1 (`can_sm_state_known()` and `can_sm_state()` agree only within the comms task). Open: NIT-2 (defs codegen comments STATE `*_MAX` as a counter limit); the HIL `uds_server_health_flood` below. A 4 × 0xFD02 answer is 101 B (15 frames on 0x718); E2E frames not waiting behind it on the H7 still needs the D-054 item 6 dedicated TX buffers.
 
 ## Proposed HIL scenarios (moto-hil-bench, once the host schema exists)
 
@@ -479,4 +496,13 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
 - `uds_server_dongle_latch` (both buses):
   - A frame on 0x7DF on the vehicle bus.
   - Pass when the client latches with `FOREIGN_TESTER`, 0xFD00 reports latched with reason 3, U3000-00 is testFailed, and after 0x14 it is testFailed again within one loop while the client stays silent.
+- `uds_server_health_vehicle_latch` (D-055, both buses):
+  - Short CANH/CANL on the vehicle bus 5 times, each held past its bus-off and released after the recovery.
+  - Pass when 0xFD02 reads `VEHICLE_STATE` LATCHED with the `VEHICLE_LATCHED` flag, `VEHICLE_BUS_OFFS` 5 and `VEHICLE_RECOVERIES` 4; U0001-88 and U0100-00 are testFailed and U3000-00 is not; after 0x14 U0001-88 is testFailed again within one loop and the vehicle bus stays silent until reboot.
+- `uds_server_health_flood` (D-055, safety review):
+  - A tester requests 4 × 0xFD02 back to back at STmin 0 while the rt-core heartbeat (0x081) and the lean / µ frames are timed.
+  - Pass when no E2E frame is later than one cycle and safety-node never marks them INVALID.
+- `uds_server_health_platform_bus_off` (D-055):
+  - Platform bus-off for 5 s, then released.
+  - Pass when, after recovery, 0xFD02 reads `PLATFORM_STATE` ERROR_ACTIVE (never LATCHED), `PLATFORM_BUS_OFFS` and `PLATFORM_RECOVERIES` went up, and `STEP_STATS_FRESH` is set.
 

@@ -53,6 +53,7 @@ static bool client_on;          /* a real UDS client runs on the vehicle bus */
 static bool feed_status;        /* stands in for a healthy client's diag status every pass */
 static bool allow_extended;     /* the test injects a 29-bit frame on purpose */
 static bool vehicle_bus_used;   /* the client legitimately talks on the vehicle bus */
+static bool sm_on;              /* services/can_sm steps both ports every pass */
 
 static isotp_link_t tester;
 static uint8_t tester_rx[MSG_MAX], tester_tx[MSG_MAX];
@@ -106,6 +107,7 @@ void setUp(void)
     feed_status = true;
     allow_extended = false;
     vehicle_bus_used = false;
+    sm_on = false;
 }
 
 /* Universal checks: the platform bus carries only the three gen/ IDs, in 11-bit format,
@@ -204,6 +206,10 @@ static void tester_step(uint32_t t)
 static void tick(void)
 {
     const uint32_t t = timebase_now_ms();
+    if (sm_on) {
+        can_sm_step(CAN_PORT_PLATFORM);
+        can_sm_step(CAN_PORT_VEHICLE);
+    }
     tester_step(t);
     (void)can_if_dispatch(CAN_PORT_PLATFORM, 64u);
     if (client_on) {
@@ -1177,10 +1183,232 @@ static void test_platform_session_and_clear_requests_never_release_a_latched_cli
                            got[3u + PLATFORM_UDS_VEHICLE_TESTER_STATUS_FAULT_BYTE]);
 }
 
+/* ------------------------------------------------------------------ 0xFD02 health, U0001-88 */
+
+#define H(f) (3u + PLATFORM_UDS_RT_CORE_HEALTH_##f##_BYTE) /* field offset in got[] */
+#define FRESH_BIT PLATFORM_UDS_RT_CORE_HEALTH_STEP_STATS_FRESH_MASK
+#define LATCH_BIT PLATFORM_UDS_RT_CORE_HEALTH_VEHICLE_LATCHED_MASK
+
+static uint16_t be16_at(uint32_t at)
+{
+    return (uint16_t)(((uint16_t)got[at] << 8u) | got[at + 1u]);
+}
+
+static void read_health(void)
+{
+    TEST_ASSERT_TRUE(read_did(PLATFORM_UDS_DID_RT_CORE_HEALTH));
+    TEST_ASSERT_EQUAL_UINT16(3u + PLATFORM_UDS_DID_RT_CORE_HEALTH_LENGTH, got_len);
+}
+
+static uint8_t bus_off_latched_status(void)
+{
+    return diag_dtc_status(PLATFORM_UDS_DTC_IDX_VEHICLE_BUS_OFF_LATCHED);
+}
+
+/* Bus-offs on the vehicle port until it latches (D-030, D-054): each one is recovered
+ * after its backoff, the last one latches. */
+static void latch_the_vehicle_port(void)
+{
+    for (uint32_t k = 0u; k < CAN_SM_VEHICLE_BUS_OFF_LATCH; k++) {
+        const uint32_t recovered = vbus_recover_count(&bus_vehicle, node_vehicle);
+        vbus_set_bus_off(&bus_vehicle, node_vehicle, true);
+        if (k + 1u == CAN_SM_VEHICLE_BUS_OFF_LATCH) {
+            pump(2u);
+            break;
+        }
+        for (uint32_t i = 0u; (i < (2u * VEHICLE_CL250_BUS_OFF_BACKOFF_MAX_MS)) &&
+                              (vbus_recover_count(&bus_vehicle, node_vehicle) == recovered);
+             i++) {
+            tick();
+        }
+        TEST_ASSERT_EQUAL_UINT32(recovered + 1u, vbus_recover_count(&bus_vehicle, node_vehicle));
+        pump(2u); /* back on the bus */
+    }
+    TEST_ASSERT_EQUAL(CAN_SM_LATCHED, can_sm_state(CAN_PORT_VEHICLE));
+}
+
+static void test_health_before_any_snapshot_reads_unknown_ports_and_stale_steps(void)
+{
+    pump(5u); /* can_sm never stepped: no controller snapshot yet */
+    read_health();
+    TEST_ASSERT_EQUAL_HEX8(0u, got[H(STEP_STATS_FRESH)]); /* no client: not fresh, not latched */
+    TEST_ASSERT_EQUAL_UINT16(0u, be16_at(H(STEP_OVERRUNS)));
+    TEST_ASSERT_EQUAL_UINT16(0u, be16_at(H(STEP_GAP_MAX_MS)));
+    TEST_ASSERT_EQUAL_HEX8(PLATFORM_UDS_RT_CORE_HEALTH_VEHICLE_STATE_UNKNOWN, got[H(VEHICLE_STATE)]);
+    TEST_ASSERT_EQUAL_HEX8(PLATFORM_UDS_RT_CORE_HEALTH_PLATFORM_STATE_UNKNOWN,
+                           got[H(PLATFORM_STATE)]);
+    TEST_ASSERT_EQUAL_HEX8(0u, bus_off_latched_status()); /* unknown: no report at all */
+}
+
+static void test_health_counters_are_big_endian_and_saturate_at_0xffff(void)
+{
+    sm_on = true;
+    pump(2u);
+    diag_set_client_steps(0x10000u, UINT32_MAX, timebase_now_ms());
+    read_health();
+    TEST_ASSERT_EQUAL_HEX8(FRESH_BIT, got[H(STEP_STATS_FRESH)]);
+    TEST_ASSERT_EQUAL_UINT16(0xFFFFu, be16_at(H(STEP_OVERRUNS)));
+    TEST_ASSERT_EQUAL_UINT16(0xFFFFu, be16_at(H(STEP_GAP_MAX_MS)));
+    diag_set_client_steps(0x1234u, 0xFFFFu, timebase_now_ms());
+    read_health();
+    TEST_ASSERT_EQUAL_HEX8(0x12u, got[H(STEP_OVERRUNS)]); /* big-endian */
+    TEST_ASSERT_EQUAL_HEX8(0x34u, got[H(STEP_OVERRUNS) + 1u]);
+    TEST_ASSERT_EQUAL_UINT16(0xFFFFu, be16_at(H(STEP_GAP_MAX_MS)));
+    TEST_ASSERT_EQUAL_HEX8(PLATFORM_UDS_RT_CORE_HEALTH_VEHICLE_STATE_ERROR_ACTIVE,
+                           got[H(VEHICLE_STATE)]);
+    TEST_ASSERT_EQUAL_HEX8(PLATFORM_UDS_RT_CORE_HEALTH_PLATFORM_STATE_ERROR_ACTIVE,
+                           got[H(PLATFORM_STATE)]);
+    TEST_ASSERT_EQUAL_HEX8(0u, bus_off_latched_status()); /* known and not latched: passed */
+}
+
+static void test_health_step_counters_come_from_the_running_client_and_go_stale(void)
+{
+    sm_on = true;
+    start_client();
+    pump(1000u);
+    read_health();
+    TEST_ASSERT_EQUAL_HEX8(FRESH_BIT, got[H(STEP_STATS_FRESH)]);
+    TEST_ASSERT_EQUAL_UINT16(0u, be16_at(H(STEP_OVERRUNS))); /* one step per ms */
+    TEST_ASSERT_EQUAL_UINT16(1u, be16_at(H(STEP_GAP_MAX_MS)));
+    client_on = false; /* the client stops: its last values stay, not fresh */
+    pump(PLATFORM_UDS_RT_CORE_HEALTH_MAX_AGE_MS + 1u);
+    read_health();
+    TEST_ASSERT_EQUAL_HEX8(0u, got[H(STEP_STATS_FRESH)]);
+    TEST_ASSERT_EQUAL_UINT16(1u, be16_at(H(STEP_GAP_MAX_MS)));
+}
+
+static void test_a_latched_vehicle_port_shows_in_the_did_and_the_dtc_and_survives_a_clear(void)
+{
+    sm_on = true;
+    pump(2u);
+    latch_the_vehicle_port();
+    read_health();
+    TEST_ASSERT_EQUAL_HEX8(LATCH_BIT, (uint8_t)(got[H(VEHICLE_LATCHED)] & LATCH_BIT));
+    TEST_ASSERT_EQUAL_HEX8(PLATFORM_UDS_RT_CORE_HEALTH_VEHICLE_STATE_LATCHED, got[H(VEHICLE_STATE)]);
+    TEST_ASSERT_EQUAL_UINT16(CAN_SM_VEHICLE_BUS_OFF_LATCH, be16_at(H(VEHICLE_BUS_OFFS)));
+    TEST_ASSERT_EQUAL_UINT16(CAN_SM_VEHICLE_BUS_OFF_LATCH - 1u, be16_at(H(VEHICLE_RECOVERIES)));
+    TEST_ASSERT_EQUAL_HEX8(PLATFORM_UDS_RT_CORE_HEALTH_PLATFORM_STATE_ERROR_ACTIVE,
+                           got[H(PLATFORM_STATE)]);
+    TEST_ASSERT_EQUAL_UINT16(0u, be16_at(H(PLATFORM_BUS_OFFS)));
+    TEST_ASSERT_EQUAL_HEX8(AVAIL & (UDS_DTC_STATUS_TEST_FAILED | UDS_DTC_STATUS_CONFIRMED_DTC),
+                           bus_off_latched_status());
+
+    enter_extended();
+    const uint8_t clear[] = {UDS_SID_CLEAR_DIAGNOSTIC_INFORMATION,
+                             (UDS_GROUP_OF_DTC_ALL >> 16u) & 0xFFu,
+                             (UDS_GROUP_OF_DTC_ALL >> 8u) & 0xFFu, UDS_GROUP_OF_DTC_ALL & 0xFFu};
+    TEST_ASSERT_TRUE(REQUEST(clear));
+    TEST_ASSERT_EQUAL_HEX8(POS(UDS_SID_CLEAR_DIAGNOSTIC_INFORMATION), got[0]);
+    pump(1u); /* the monitor's next pass sets it again: the latch holds (D-055) */
+    TEST_ASSERT_NOT_EQUAL(0u, bus_off_latched_status() & UDS_DTC_STATUS_TEST_FAILED);
+    TEST_ASSERT_EQUAL(CAN_SM_LATCHED, can_sm_state(CAN_PORT_VEHICLE));
+    TEST_ASSERT_EQUAL_UINT8(1u, report_dtc_by_mask(UDS_DTC_STATUS_TEST_FAILED)); /* U0001-88 */
+    const uint32_t dtc = PLATFORM_UDS_DTC_VEHICLE_BUS_OFF_LATCHED;
+    TEST_ASSERT_EQUAL_HEX8((dtc >> 16u) & 0xFFu, got[3]);
+    TEST_ASSERT_EQUAL_HEX8((dtc >> 8u) & 0xFFu, got[4]);
+    TEST_ASSERT_EQUAL_HEX8(dtc & 0xFFu, got[5]);
+}
+
+static void test_an_unreadable_vehicle_controller_reads_unknown_and_leaves_the_dtc_alone(void)
+{
+    sm_on = true;
+    pump(2u);
+    diag_dtc_report(PLATFORM_UDS_DTC_IDX_VEHICLE_BUS_OFF_LATCHED, true); /* a prior result */
+    can_port_host_unbind(CAN_PORT_VEHICLE);
+    pump(2u);
+    read_health();
+    TEST_ASSERT_EQUAL_HEX8(PLATFORM_UDS_RT_CORE_HEALTH_VEHICLE_STATE_UNKNOWN, got[H(VEHICLE_STATE)]);
+    TEST_ASSERT_EQUAL_HEX8(0u, (uint8_t)(got[H(VEHICLE_LATCHED)] & LATCH_BIT));
+    TEST_ASSERT_EQUAL_HEX8(PLATFORM_UDS_RT_CORE_HEALTH_PLATFORM_STATE_ERROR_ACTIVE,
+                           got[H(PLATFORM_STATE)]);
+    TEST_ASSERT_NOT_EQUAL(0u, bus_off_latched_status() & UDS_DTC_STATUS_TEST_FAILED); /* kept */
+    TEST_ASSERT_TRUE(can_port_host_bind_vbus(CAN_PORT_VEHICLE, &bus_vehicle, node_vehicle));
+    pump(2u); /* known again and not latched: passed */
+    TEST_ASSERT_EQUAL_HEX8(0u, bus_off_latched_status() & UDS_DTC_STATUS_TEST_FAILED);
+}
+
+static void test_error_passive_and_bus_off_ports_are_reported_and_the_platform_still_answers(void)
+{
+    sm_on = true;
+    vbus_set_error_counters(&bus_platform, node_dut, 130u, 0u);
+    pump(2u);
+    read_health();
+    TEST_ASSERT_EQUAL_HEX8(PLATFORM_UDS_RT_CORE_HEALTH_PLATFORM_STATE_ERROR_PASSIVE,
+                           got[H(PLATFORM_STATE)]);
+    TEST_ASSERT_EQUAL_HEX8(PLATFORM_UDS_RT_CORE_HEALTH_VEHICLE_STATE_ERROR_ACTIVE,
+                           got[H(VEHICLE_STATE)]);
+    vbus_set_bus_off(&bus_vehicle, node_vehicle, true); /* inside its recovery backoff */
+    pump(2u);
+    read_health();
+    TEST_ASSERT_EQUAL_HEX8(PLATFORM_UDS_RT_CORE_HEALTH_VEHICLE_STATE_BUS_OFF, got[H(VEHICLE_STATE)]);
+    TEST_ASSERT_EQUAL_UINT16(1u, be16_at(H(VEHICLE_BUS_OFFS)));
+    TEST_ASSERT_EQUAL_HEX8(0u, (uint8_t)(got[H(VEHICLE_LATCHED)] & LATCH_BIT));
+    TEST_ASSERT_EQUAL_HEX8(0u, bus_off_latched_status() & UDS_DTC_STATUS_TEST_FAILED);
+}
+
+static void test_port_counters_above_0xffff_read_0xffff_and_the_burst_latches_the_vehicle(void)
+{
+    sm_on = true;
+    pump(2u);
+    vbus_add_bus_off_events(&bus_vehicle, node_vehicle, 0x10000u + 7u);
+    vbus_add_bus_off_events(&bus_platform, node_dut, UINT32_MAX);
+    pump(2u);
+    TEST_ASSERT_GREATER_THAN_UINT32(0xFFFFu, can_sm_stats(CAN_PORT_VEHICLE)->bus_off_events);
+    TEST_ASSERT_GREATER_THAN_UINT32(0xFFFFu, can_sm_stats(CAN_PORT_PLATFORM)->bus_off_events);
+    read_health();
+    TEST_ASSERT_EQUAL_UINT16(0xFFFFu, be16_at(H(VEHICLE_BUS_OFFS)));  /* clamped, not 0x0007 */
+    TEST_ASSERT_EQUAL_UINT16(0xFFFFu, be16_at(H(PLATFORM_BUS_OFFS))); /* not 0xFFFF by wrap */
+    TEST_ASSERT_EQUAL_HEX8(PLATFORM_UDS_RT_CORE_HEALTH_VEHICLE_STATE_LATCHED, got[H(VEHICLE_STATE)]);
+    TEST_ASSERT_EQUAL_HEX8(LATCH_BIT, (uint8_t)(got[H(VEHICLE_LATCHED)] & LATCH_BIT));
+    TEST_ASSERT_NOT_EQUAL(PLATFORM_UDS_RT_CORE_HEALTH_PLATFORM_STATE_LATCHED, got[H(PLATFORM_STATE)]);
+}
+
+static void test_a_latched_client_still_writes_fresh_step_counters(void)
+{
+    sm_on = true;
+    start_client();
+    pump(600u);
+    inject_vehicle_frame(vehicle_cl250_functional_watch[0].id,
+                         vehicle_cl250_functional_watch[0].extended);
+    pump(PLATFORM_UDS_RT_CORE_HEALTH_MAX_AGE_MS + 100u);
+    TEST_ASSERT_EQUAL(UDS_CLIENT_FAULT_FOREIGN_TESTER, uds_client_fault(&client));
+    read_health();
+    TEST_ASSERT_EQUAL_HEX8(FRESH_BIT, (uint8_t)(got[H(STEP_STATS_FRESH)] & FRESH_BIT));
+    TEST_ASSERT_EQUAL_HEX8(0u, (uint8_t)(got[H(VEHICLE_LATCHED)] & LATCH_BIT)); /* client, not port */
+}
+
+static void test_four_health_reads_make_the_longest_segmented_answer(void)
+{
+    sm_on = true;
+    pump(2u);
+    const uint8_t req[] = {UDS_SID_READ_DATA_BY_IDENTIFIER,
+                           DID_BYTES(PLATFORM_UDS_DID_RT_CORE_HEALTH),
+                           DID_BYTES(PLATFORM_UDS_DID_RT_CORE_HEALTH),
+                           DID_BYTES(PLATFORM_UDS_DID_RT_CORE_HEALTH),
+                           DID_BYTES(PLATFORM_UDS_DID_RT_CORE_HEALTH)};
+    TEST_ASSERT_TRUE(REQUEST(req));
+    TEST_ASSERT_EQUAL_UINT16(101u, got_len);
+    TEST_ASSERT_EQUAL_UINT16(UDS_SERVER_RSP_MAX, got_len);
+    for (uint32_t i = 0u; i < 4u; i++) {
+        const uint32_t at = 1u + (i * (2u + PLATFORM_UDS_DID_RT_CORE_HEALTH_LENGTH));
+        TEST_ASSERT_EQUAL_HEX8(HI(PLATFORM_UDS_DID_RT_CORE_HEALTH), got[at]);
+        TEST_ASSERT_EQUAL_HEX8(LO(PLATFORM_UDS_DID_RT_CORE_HEALTH), got[at + 1u]);
+    }
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_open_twice_is_busy_and_null_is_an_argument_error);
+    RUN_TEST(test_health_before_any_snapshot_reads_unknown_ports_and_stale_steps);
+    RUN_TEST(test_health_counters_are_big_endian_and_saturate_at_0xffff);
+    RUN_TEST(test_health_step_counters_come_from_the_running_client_and_go_stale);
+    RUN_TEST(test_a_latched_vehicle_port_shows_in_the_did_and_the_dtc_and_survives_a_clear);
+    RUN_TEST(test_an_unreadable_vehicle_controller_reads_unknown_and_leaves_the_dtc_alone);
+    RUN_TEST(test_error_passive_and_bus_off_ports_are_reported_and_the_platform_still_answers);
+    RUN_TEST(test_port_counters_above_0xffff_read_0xffff_and_the_burst_latches_the_vehicle);
+    RUN_TEST(test_a_latched_client_still_writes_fresh_step_counters);
+    RUN_TEST(test_four_health_reads_make_the_longest_segmented_answer);
     RUN_TEST(test_getters_and_step_are_safe_for_null_and_unopened_servers);
     RUN_TEST(test_a_full_receiver_table_fails_open_and_leaves_the_server_closed);
     RUN_TEST(test_server_frames_use_only_the_gen_response_id_dlc_and_padding);

@@ -80,6 +80,10 @@ void vbus_tx_abort(vbus_t* bus, uint8_t node);
 /* Bus-off on (counted once per entry) or off. */
 void vbus_set_bus_off(vbus_t* bus, uint8_t node, bool bus_off);
 
+/* Test hook: `count` bus-off entries the driver's ISR counted between two steps (the
+ * port is back on the bus), e.g. to check saturating readers. */
+void vbus_add_bus_off_events(vbus_t* bus, uint8_t node, uint32_t count);
+
 /* can_port_recover(): leaves bus-off; counted, so tests see each attempt. */
 void vbus_recover(vbus_t* bus, uint8_t node);
 uint32_t vbus_recover_count(const vbus_t* bus, uint8_t node);

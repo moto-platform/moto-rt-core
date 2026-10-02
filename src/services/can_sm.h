@@ -55,6 +55,15 @@ void can_sm_step(can_port_id_t port);
 /* CAN_SM_LATCHED for an unknown port and before can_sm_init(). */
 can_sm_state_t can_sm_state(can_port_id_t port);
 
+/* True when can_sm_state() reports what the port really is (D-055, health DID): after
+ * can_sm_init(), for a known port, once a step read a controller snapshot and while the
+ * last read succeeded. A latch is rt-core's own state, so a latched port stays known
+ * even if its controller cannot be read. False otherwise: the caller reports UNKNOWN,
+ * never the last state (safety review MAJOR-1 on defs#32). It agrees with a following
+ * can_sm_state() only because both run in the comms task with can_sm_step() (D-054
+ * item 7); a task split needs a snapshot of the pair. */
+bool can_sm_state_known(can_port_id_t port);
+
 /* True in ERROR_ACTIVE / ERROR_PASSIVE. False for an unknown port and before can_sm_init()
  * (can_if_init() calls it), so nothing is sent fail-open. */
 bool can_sm_tx_allowed(can_port_id_t port);
