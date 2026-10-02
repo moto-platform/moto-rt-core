@@ -5,6 +5,7 @@ add_library(moto_rtcore_logic STATIC
     features/uds/uds_client_core.c
     features/uds/uds_server_core.c
     hal/can_frame.c
+    services/can_sm_core.c
 )
 target_include_directories(moto_rtcore_logic PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -27,11 +28,13 @@ target_include_directories(moto_defs_gen PUBLIC ${MOTO_DEFS_GEN})
 add_library(moto_rtcore_fw STATIC
     services/timebase.c
     services/can_if.c
+    services/can_sm.c
     services/vehicle_signals.c
     services/diag.c
     features/uds/isotp_link.c
     features/uds/uds_client.c
     features/uds/uds_server.c
+    app/comms.c
 )
 target_link_libraries(moto_rtcore_fw PUBLIC moto_rtcore_logic moto_defs_gen)
 # DID 0xF189 (SW version) reports the CMake project version (D-036, D-040).

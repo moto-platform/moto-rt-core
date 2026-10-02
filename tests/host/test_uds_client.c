@@ -15,6 +15,7 @@
 #include "hal/host/hal_time_host.h"
 #include "platform_uds.h"
 #include "services/can_if.h"
+#include "services/can_sm.h"
 #include "services/diag.h"
 #include "services/timebase.h"
 #include "services/vehicle_signals.h"
@@ -599,6 +600,113 @@ static void test_sil_long_tx_blockage_goes_absent_and_recovers_without_a_latch(v
     TEST_ASSERT_EQUAL_UINT32(1u, uds_client_stats(&client)->session_losses);
 }
 
+/* ------------------------------------------------------------------------- */
+/* CAN state manager (Ç1): N_As abort and bus-off on the vehicle port         */
+/* ------------------------------------------------------------------------- */
+
+static uint32_t vehicle_pending(void)
+{
+    return bus.nodes[node_vehicle].tx_pending_count;
+}
+
+/* The rest of a main-loop pass after the state manager's step, as run() does it. */
+static void pass_after_sm(void)
+{
+    const uint32_t now = timebase_now_ms();
+    (void)can_if_dispatch(CAN_PORT_VEHICLE, 64u);
+    sim_ecu_step(&ecu, now);
+    (void)can_if_dispatch(CAN_PORT_VEHICLE, 64u);
+    uds_client_step(&client);
+    sniff();
+    hal_time_host_advance(1u);
+}
+
+/* run() with services/can_sm in front of the dispatch, like app/comms.c. */
+static void run_sm(uint32_t ms)
+{
+    for (uint32_t i = 0u; i < ms; i++) {
+        can_sm_step(CAN_PORT_VEHICLE);
+        pass_after_sm();
+    }
+}
+
+static void test_sil_a_stalled_vehicle_tx_queues_one_request_and_is_aborted_after_n_as(void)
+{
+    run_sm(1000u);
+    TEST_ASSERT_TRUE(all_valid(timebase_now_ms()));
+    vbus_set_tx_stalled(&bus, node_vehicle, true); /* no ACK: the frame never leaves */
+    for (uint32_t i = 0u; (i < 500u) && (vehicle_pending() == 0u); i++) {
+        run_sm(1u);
+    }
+    TEST_ASSERT_EQUAL_UINT32(1u, vehicle_pending());
+    const uint32_t t_pending = timebase_now_ms();
+    const uint32_t frames = vbus_frame_count(&bus);
+    const uint32_t ecu_requests = ecu.requests;
+    const uint32_t aborts = can_if_tx_abort_count(CAN_PORT_VEHICLE);
+
+    bool aborted = false;
+    for (uint32_t i = 0u; (i < CAN_SM_TX_TIMEOUT_MS + 100u) && !aborted; i++) {
+        can_sm_step(CAN_PORT_VEHICLE);
+        /* tx_free needs an empty buffer on the vehicle port: nothing queues behind it */
+        TEST_ASSERT_LESS_OR_EQUAL_UINT32(1u, vehicle_pending());
+        if (can_if_tx_abort_count(CAN_PORT_VEHICLE) != aborts) {
+            aborted = true;
+            TEST_ASSERT_UINT32_WITHIN(2u, CAN_SM_TX_TIMEOUT_MS, timebase_now_ms() - t_pending);
+            TEST_ASSERT_EQUAL_UINT32(0u, vehicle_pending());
+            vbus_set_tx_stalled(&bus, node_vehicle, false);
+            /* the aborted request was not flushed, so the ECU never gets it */
+            TEST_ASSERT_EQUAL_UINT32(frames, vbus_frame_count(&bus));
+            TEST_ASSERT_EQUAL_UINT32(ecu_requests, ecu.requests);
+        }
+        pass_after_sm();
+    }
+    TEST_ASSERT_TRUE(aborted);
+    TEST_ASSERT_EQUAL_UINT32(1u, can_sm_stats(CAN_PORT_VEHICLE)->tx_timeouts);
+    TEST_ASSERT_EQUAL(CAN_SM_ERROR_ACTIVE, can_sm_state(CAN_PORT_VEHICLE));
+
+    /* not a latch: the client keeps polling and the ECU answers again */
+    const uint32_t released = timebase_now_ms();
+    run_sm(VEHICLE_CL250_SESSION_RETRY_INTERVAL_MS + 1000u);
+    TEST_ASSERT_FALSE(uds_client_failed(&client));
+    TEST_ASSERT_EQUAL(UDS_CLIENT_FAULT_NONE, uds_client_fault(&client));
+    TEST_ASSERT_TRUE(uds_client_session_up(&client));
+    TEST_ASSERT_TRUE(all_valid(timebase_now_ms()));
+    TEST_ASSERT_GREATER_THAN_UINT32(0u, tester_count(UDS_SID_READ_DATA_BY_IDENTIFIER, released));
+    TEST_ASSERT_EQUAL_UINT32(1u, can_sm_stats(CAN_PORT_VEHICLE)->tx_timeouts); /* only the one */
+    assert_tester_frames_ok();
+}
+
+static void test_sil_a_vehicle_bus_off_silences_the_client_and_it_resumes_after_the_recovery(void)
+{
+    run_sm(1000u);
+    TEST_ASSERT_TRUE(all_valid(timebase_now_ms()));
+    vbus_set_bus_off(&bus, node_vehicle, true);
+    const uint32_t mark = sniff_count;
+    const uint32_t frames = vbus_frame_count(&bus);
+    run_sm(VEHICLE_CL250_BUS_OFF_BACKOFF_INITIAL_MS - 50u);
+    TEST_ASSERT_EQUAL(CAN_SM_BUS_OFF, can_sm_state(CAN_PORT_VEHICLE));
+    TEST_ASSERT_EQUAL_UINT32(0u, vbus_recover_count(&bus, node_vehicle));
+    TEST_ASSERT_EQUAL_UINT32(frames, vbus_frame_count(&bus)); /* the bus stayed silent */
+    for (uint32_t i = mark; i < sniff_count; i++) {
+        TEST_ASSERT_FALSE(is_tester(&sniffed[i]));
+    }
+    TEST_ASSERT_FALSE(uds_client_failed(&client)); /* a bus-off is not a client fault */
+    TEST_ASSERT_EQUAL(UDS_CLIENT_FAULT_NONE, uds_client_fault(&client));
+
+    run_sm(100u); /* the backoff ends: the manager restarts the controller */
+    TEST_ASSERT_EQUAL_UINT32(1u, vbus_recover_count(&bus, node_vehicle));
+    const uint32_t recovered = timebase_now_ms();
+    run_sm(VEHICLE_CL250_SESSION_RETRY_INTERVAL_MS + 1500u);
+    TEST_ASSERT_EQUAL(CAN_SM_ERROR_ACTIVE, can_sm_state(CAN_PORT_VEHICLE));
+    TEST_ASSERT_FALSE(uds_client_failed(&client));
+    TEST_ASSERT_TRUE(uds_client_session_up(&client));
+    TEST_ASSERT_TRUE(uds_client_ecu_present(&client));
+    TEST_ASSERT_TRUE(all_valid(timebase_now_ms()));
+    TEST_ASSERT_GREATER_THAN_UINT32(0u, tester_count(UDS_SID_READ_DATA_BY_IDENTIFIER, recovered));
+    TEST_ASSERT_EQUAL_UINT32(1u, can_sm_stats(CAN_PORT_VEHICLE)->bus_off_events);
+    assert_tester_frames_ok(); /* the guard never refused anything on the way */
+}
+
 static void foreign_frame_latches(uint32_t id, bool extended)
 {
     run(500u, false);
@@ -800,6 +908,8 @@ int main(void)
     RUN_TEST(test_sil_a_busy_link_does_not_latch_the_client);
     RUN_TEST(test_sil_short_tx_blockage_recovers_without_a_latch);
     RUN_TEST(test_sil_long_tx_blockage_goes_absent_and_recovers_without_a_latch);
+    RUN_TEST(test_sil_a_stalled_vehicle_tx_queues_one_request_and_is_aborted_after_n_as);
+    RUN_TEST(test_sil_a_vehicle_bus_off_silences_the_client_and_it_resumes_after_the_recovery);
     RUN_TEST(test_sil_a_second_tester_on_the_request_id_latches_the_client);
     RUN_TEST(test_sil_a_second_tester_on_the_fallback_id_latches_the_client);
     RUN_TEST(test_open_fails_closed_without_room_for_the_foreign_watch);

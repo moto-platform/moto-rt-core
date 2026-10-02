@@ -22,8 +22,15 @@
  * Control and cannot receive segmented responses (see README).
  *
  * The link registers itself as a can_if receiver, so it must have static storage
- * duration. N_As/N_Ar need a TX-complete confirmation from the driver and are not
- * implemented yet: a frame accepted by can_if_write() counts as sent.
+ * duration.
+ *
+ * N_As (Ç1): services/can_sm aborts a port's pending TX when no frame was confirmed
+ * within N_As, or on a bus-off, and can_if_tx_abort_count() changes. A link whose message
+ * is under way then ends it with ISOTP_N_TIMEOUT_A (at its next step, or before it
+ * accepts a new message, so a new message is never ended by an older abort). A frame
+ * accepted by can_if_write() still counts as sent for the core: a Single Frame whose
+ * frame was aborted is already confirmed, and the peer's timeout covers it. N_Ar is the
+ * peer's business (we never wait for our own Flow Control to be confirmed).
  */
 
 #include "features/uds/isotp_core.h"
@@ -54,6 +61,8 @@ typedef struct {
     const uint8_t* rx_buf;
     uint32_t tx_error_count;
     uint32_t tx_refused_count;
+    uint32_t abort_seen;  /* can_if_tx_abort_count() last acted on */
+    uint32_t tx_timeouts; /* messages ended with ISOTP_N_TIMEOUT_A */
     bool vehicle;     /* CL250 tester link: D-020 checks apply */
     bool open;
 } isotp_can_link_t;
@@ -96,6 +105,9 @@ bool isotp_link_take_tx_confirm(isotp_can_link_t* link, isotp_n_result_t* result
 /* Frames the core produced that the port refused or could not take (lost; the peer
  * then times out). Includes frames refused by the can_if vehicle guard. */
 uint32_t isotp_link_tx_error_count(const isotp_can_link_t* link);
+
+/* Messages ended with ISOTP_N_TIMEOUT_A (N_As abort or bus-off). */
+uint32_t isotp_link_tx_timeout_count(const isotp_can_link_t* link);
 
 /* Vehicle link: requests and frames refused by the D-020 checks (never written). */
 uint32_t isotp_link_tx_refused_count(const isotp_can_link_t* link);

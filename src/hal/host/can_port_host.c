@@ -26,6 +26,7 @@ typedef struct {
     vbus_t* bus;
     uint8_t node;
     int fd;
+    uint32_t tx_done; /* SocketCAN: frames the socket took (no ACK information) */
 } port_binding_t;
 
 static port_binding_t bindings[CAN_PORT_COUNT];
@@ -80,6 +81,7 @@ bool can_port_host_bind_socketcan(can_port_id_t port, const char* ifname)
     can_port_host_unbind(port);
     b->backend = BACKEND_SOCKETCAN;
     b->fd = fd;
+    b->tx_done = 0u;
     return true;
 }
 
@@ -98,6 +100,21 @@ static can_port_status_t socketcan_write(int fd, const can_frame_t* frame)
         return CAN_PORT_TX_FULL;
     }
     return CAN_PORT_ERR_IO;
+}
+
+/* Exact (ID, format) filters; an empty list receives nothing. */
+static can_port_status_t socketcan_set_filters(int fd, const can_port_filter_t* filters,
+                                               uint32_t count)
+{
+    struct can_filter raw[CAN_PORT_MAX_FILTERS];
+    for (uint32_t i = 0u; i < count; i++) {
+        raw[i].can_id = filters[i].extended ? (filters[i].id | CAN_EFF_FLAG) : filters[i].id;
+        raw[i].can_mask = CAN_EFF_FLAG | CAN_RTR_FLAG |
+                          (filters[i].extended ? CAN_EFF_MASK : CAN_SFF_MASK);
+    }
+    const int rc = setsockopt(fd, SOL_CAN_RAW, CAN_RAW_FILTER, (count > 0u) ? raw : NULL,
+                              (socklen_t)(count * sizeof raw[0]));
+    return (rc == 0) ? CAN_PORT_OK : CAN_PORT_ERR_IO;
 }
 
 static bool socketcan_tx_free(int fd)
@@ -155,6 +172,7 @@ void can_port_host_unbind(can_port_id_t port)
     b->bus = NULL;
     b->node = 0u;
     b->fd = -1;
+    b->tx_done = 0u;
 }
 
 void can_port_host_unbind_all(void)
@@ -174,8 +192,13 @@ can_port_status_t can_port_write(can_port_id_t port, const can_frame_t* frame)
     case BACKEND_VBUS:
         return vbus_send(b->bus, b->node, frame);
 #if HAVE_SOCKETCAN
-    case BACKEND_SOCKETCAN:
-        return socketcan_write(b->fd, frame);
+    case BACKEND_SOCKETCAN: {
+        const can_port_status_t st = socketcan_write(b->fd, frame);
+        if (st == CAN_PORT_OK) {
+            bindings[port].tx_done++;
+        }
+        return st;
+    }
 #endif
     default:
         return CAN_PORT_ERR_CLOSED;
@@ -189,8 +212,14 @@ bool can_port_tx_free(can_port_id_t port)
         return false;
     }
     switch (b->backend) {
-    case BACKEND_VBUS:
-        return vbus_tx_free(b->bus, b->node);
+    case BACKEND_VBUS: {
+        /* The H7 vehicle port has one TX buffer (hal/can_port.h): free only when empty. */
+        can_port_state_t st;
+        const bool empty = (port != CAN_PORT_VEHICLE) ||
+                           ((vbus_state(b->bus, b->node, &st) == CAN_PORT_OK) &&
+                            (st.tx_pending == 0u));
+        return empty && vbus_tx_free(b->bus, b->node);
+    }
 #if HAVE_SOCKETCAN
     case BACKEND_SOCKETCAN:
         return socketcan_tx_free(b->fd);
@@ -212,6 +241,89 @@ can_port_status_t can_port_read(can_port_id_t port, can_frame_t* frame)
 #if HAVE_SOCKETCAN
     case BACKEND_SOCKETCAN:
         return socketcan_read(b->fd, frame);
+#endif
+    default:
+        return CAN_PORT_ERR_CLOSED;
+    }
+}
+
+can_port_status_t can_port_get_state(can_port_id_t port, can_port_state_t* state)
+{
+    const port_binding_t* b = binding_of(port);
+    if ((b == NULL) || (state == NULL)) {
+        return CAN_PORT_ERR_ARG;
+    }
+    switch (b->backend) {
+    case BACKEND_VBUS:
+        return vbus_state(b->bus, b->node, state);
+#if HAVE_SOCKETCAN
+    case BACKEND_SOCKETCAN:
+        /* A raw socket shows no controller state: report a healthy, idle controller. */
+        state->tec = 0u;
+        state->rec = 0u;
+        state->error_passive = false;
+        state->bus_off = false;
+        state->bus_off_events = 0u;
+        state->tx_pending = 0u;
+        state->tx_done = b->tx_done;
+        return CAN_PORT_OK;
+#endif
+    default:
+        return CAN_PORT_ERR_CLOSED;
+    }
+}
+
+can_port_status_t can_port_recover(can_port_id_t port)
+{
+    const port_binding_t* b = binding_of(port);
+    if (b == NULL) {
+        return CAN_PORT_ERR_ARG;
+    }
+    switch (b->backend) {
+    case BACKEND_VBUS:
+        vbus_recover(b->bus, b->node);
+        return CAN_PORT_OK;
+#if HAVE_SOCKETCAN
+    case BACKEND_SOCKETCAN:
+        return CAN_PORT_OK; /* the kernel driver restarts the controller (restart-ms) */
+#endif
+    default:
+        return CAN_PORT_ERR_CLOSED;
+    }
+}
+
+can_port_status_t can_port_tx_abort(can_port_id_t port)
+{
+    const port_binding_t* b = binding_of(port);
+    if (b == NULL) {
+        return CAN_PORT_ERR_ARG;
+    }
+    switch (b->backend) {
+    case BACKEND_VBUS:
+        vbus_tx_abort(b->bus, b->node);
+        return CAN_PORT_OK;
+#if HAVE_SOCKETCAN
+    case BACKEND_SOCKETCAN:
+        return CAN_PORT_OK; /* nothing is held back: pending is always 0 */
+#endif
+    default:
+        return CAN_PORT_ERR_CLOSED;
+    }
+}
+
+can_port_status_t can_port_set_filters(can_port_id_t port, const can_port_filter_t* filters,
+                                       uint32_t count)
+{
+    const port_binding_t* b = binding_of(port);
+    if ((b == NULL) || (count > CAN_PORT_MAX_FILTERS) || ((filters == NULL) && (count > 0u))) {
+        return CAN_PORT_ERR_ARG;
+    }
+    switch (b->backend) {
+    case BACKEND_VBUS:
+        return vbus_set_filters(b->bus, b->node, filters, count);
+#if HAVE_SOCKETCAN
+    case BACKEND_SOCKETCAN:
+        return socketcan_set_filters(b->fd, filters, count);
 #endif
     default:
         return CAN_PORT_ERR_CLOSED;

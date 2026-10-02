@@ -21,6 +21,7 @@
  * the client did not latch as failed. With --uds-scenario: 0 if every scenario step
  * passed and the client did not latch.
  */
+#include "app/comms.h"
 #include "app/host/sim_ecu.h"
 #include "app/host/sim_tester.h"
 #include "features/uds/uds_client.h"
@@ -29,6 +30,7 @@
 #include "hal/host/can_port_host.h"
 #include "hal/host/hal_time_host.h"
 #include "services/can_if.h"
+#include "services/can_sm.h"
 #include "services/diag.h"
 #include "services/timebase.h"
 #include "services/vehicle_signals.h"
@@ -40,7 +42,6 @@
 #include <string.h>
 
 #define LOOP_PERIOD_MS 1u
-#define RX_PER_PASS 32u
 #define PRINT_PERIOD_MS 1000u
 #define VIRTUAL_IF_PREFIX "vcan"
 
@@ -174,6 +175,11 @@ int main(int argc, char** argv)
         fprintf(stderr, "cannot open SocketCAN interface %s%s\n", opt.vcan,
                 can_port_host_has_socketcan() ? "" : " (SocketCAN needs Linux)");
         return 1;
+    } else if (opt.allow_real_bus) {
+        fprintf(stderr, "warning: SocketCAN shows no controller state: the bus-off latch (D-030), "
+                        "N_As and the one-request TX buffer are not enforced on %s\n", opt.vcan);
+    } else {
+        /* a virtual interface */
     }
 
     uint8_t platform_node = 0u;
@@ -196,6 +202,10 @@ int main(int argc, char** argv)
         fprintf(stderr, "platform UDS server setup failed\n");
         return 1;
     }
+    if (!comms_apply_filters()) {
+        fprintf(stderr, "CAN acceptance filter setup failed\n");
+        return 1;
+    }
     printf("moto_rtcore_host: UDS client 0x%08X -> 0x%08X on %s\n",
            (unsigned)VEHICLE_CL250_REQUEST_ID, (unsigned)VEHICLE_CL250_RESPONSE_ID,
            simulated ? "in-process bus + simulated CL250 ECU" : opt.vcan);
@@ -209,22 +219,18 @@ int main(int argc, char** argv)
             break;
         }
 
-        (void)can_if_dispatch(CAN_PORT_VEHICLE, RX_PER_PASS);
+        /* The simulated peers answer what rt-core sent in the last pass; rt-core then
+         * reads their frames in this pass (app/comms: client before server). */
         if (simulated) {
             sim_ecu_step(&ecu, now);
-            (void)can_if_dispatch(CAN_PORT_VEHICLE, RX_PER_PASS);
         }
-        uds_client_step(&client);
-
-        (void)can_if_dispatch(CAN_PORT_PLATFORM, RX_PER_PASS);
         if (opt.uds_scenario) {
             sim_tester_step(&tester, now);
             if (sim_tester_finished(&tester)) {
                 break;
             }
-            (void)can_if_dispatch(CAN_PORT_PLATFORM, RX_PER_PASS);
         }
-        uds_server_step(&server);
+        comms_pass(&client, &server);
 
         if (!opt.quiet && timebase_expired(now, printed_at, PRINT_PERIOD_MS)) {
             print_signals(now, start);
@@ -245,6 +251,16 @@ int main(int argc, char** argv)
     printf("moto_rtcore_host: %u step gaps above %u ms, longest %u ms (D-053)\n",
            (unsigned)st->step_overruns, (unsigned)VEHICLE_CL250_CLIENT_STEP_MAX_MS,
            (unsigned)st->step_gap_max_ms);
+    for (uint32_t p = 0u; p < (uint32_t)CAN_PORT_COUNT; p++) {
+        const can_sm_stats_t* cs = can_sm_stats((can_port_id_t)p);
+        printf("moto_rtcore_host: %s port state %d, %u bus-offs, %u recoveries (%u deferred), "
+               "%u N_As aborts, %u blocked writes\n",
+               (p == (uint32_t)CAN_PORT_VEHICLE) ? "vehicle" : "platform",
+               (int)can_sm_state((can_port_id_t)p), (unsigned)cs->bus_off_events,
+               (unsigned)cs->recover_attempts, (unsigned)cs->recover_deferred,
+               (unsigned)cs->tx_timeouts,
+               (unsigned)can_if_tx_blocked_count((can_port_id_t)p));
+    }
     const uds_server_stats_t* ss = uds_server_stats(&server);
     printf("moto_rtcore_host: UDS server %u requests, %u positive, %u negative, %u suppressed, "
            "%u S3 timeouts\n",

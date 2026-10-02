@@ -56,8 +56,10 @@ CMake + STM32CubeMX (HAL) + arm-none-eabi-gcc (D-007). RTOS: FreeRTOS/CMSIS-RTOS
   - `services/diag`: DTC memory (RAM, level-triggered) and the vehicle-tester status; written by the client glue, read and cleared by the server.
   - `services/timebase`
   - `services/vehicle_signals`: the last raw/physical sample per gen/ DID. VALID/STALE is derived at read time from `stale_after_ms`.
-  - `services/can_if`: CAN RX routing, plus the **fixed, fail-closed D-020 vehicle-bus guard** that every vehicle frame passes. Never add a bypass.
-  - `hal/can_types.h`, `hal/can_port.h` (services and app only), `hal/hal_time.h`, and the host port `hal/host/`
+  - `services/can_if`: CAN RX routing, plus the **fixed, fail-closed D-020 vehicle-bus guard** that every vehicle frame passes. Never add a bypass. A bus-off or latched port refuses writes with `CAN_PORT_ERR_IO` (not a guard refusal); `can_if_apply_filters()` turns the receiver table into the port's acceptance filters.
+  - `services/can_sm` + `can_sm_core` (Ç1): CAN error state machine per port (error active/passive/bus-off, backoff recovery, N_As abort). The vehicle port latches on its 5th bus-off (D-030, D-054); the platform port never latches.
+  - `app/comms`: the portable comms pass (client before server), shared by the host program and the future H7 task.
+  - `hal/can_types.h`, `hal/can_port.h` (services and app only; FDCAN requirements in `hal/README.md`), `hal/hal_time.h`, and the host port `hal/host/`
 - Libraries:
   - `moto_rtcore_logic` (pure) and `moto_rtcore_fw` (services + feature glue, HAL interfaces only) are also cross-compiled for M7.
   - `moto_rtcore_hal_host` and `moto_rtcore_host` build natively only.

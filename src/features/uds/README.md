@@ -23,7 +23,7 @@ It is pure logic with no HAL, RTOS or heap, and is tested in `tests/host/test_is
 - CAN FD frames and the 32-bit FF_DL escape.
 - Extended and mixed addressing.
 - Sending FC.WAIT as a receiver.
-- The N_As / N_Ar transmit confirmation, which belongs to the glue.
+- The N_As / N_Ar transmit confirmation, which belongs to the glue (`isotp_abort_tx()` ends a message whose frames the driver aborted, with `ISOTP_N_TIMEOUT_A`).
 
 **Inputs.**
 - The CAN frames of one link, one (request ID, response ID) pair, via `isotp_on_frame()`.
@@ -99,7 +99,7 @@ It is pure logic with no HAL, RTOS or heap, and is tested in `tests/host/test_is
 **Failure behaviour.**
 - A full TX mailbox leaves frames in the core until the next step; nothing is lost.
 - A frame the port refuses (`can_if_write` ≠ OK) is lost and counted (`isotp_link_tx_error_count()`). The peer then times out.
-- N_As/N_Ar need a TX-complete confirmation from the FDCAN driver and come with the H7 HAL. Until then, a frame accepted by the port counts as sent.
+- **N_As (Ç1).** `services/can_sm` aborts a port's pending TX when no frame was confirmed within `CAN_SM_TX_TIMEOUT_MS` (1000 ms, the ISO 15765-2 default), or on a bus-off, and `can_if_tx_abort_count()` changes. A link with a message under way ends it with `ISOTP_N_TIMEOUT_A` (`isotp_link_tx_timeout_count()`). It checks at its next step and before it accepts a new message, so an older abort never ends a new message. For the core, a frame accepted by `can_if_write()` still counts as sent: a Single Frame whose frame was aborted is already confirmed, and the peer's or the client's response timeout covers it. N_Ar is the peer's business. Known limit: the core counts a message as sent once its last frame is in the TX buffers (3 on the host bus; the H7 queue depth may differ), so an abort that drops only the tail of a message (or a Single Frame) gives no N_TIMEOUT_A and no `tx_failed`; the peer's N_Cr (or the client's response timeout) covers it, and the frames never go out late.
 
 **Memory.** `isotp_can_link_t` plus buffers supplied by the caller (static storage). The link registers itself with `can_if` as the receiver context, so it must have static storage duration.
 
@@ -211,8 +211,8 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
   - A First Frame with FF_DL above `UDS_CLIENT_RX_BUF` (64) is dropped silently by the core. The request ends by timeout and counts towards the skip limit. No CL250 DID does this.
   - Each segmented response stops polling for about N_Cr + N_Bs (about 2 s), so every DID goes STALE. This is the cost of the Q-020 deferral.
   - A DID answered with a permanent NRC (for example 0x31) is polled at its full rate. This is legacy behaviour, and the schedule bounds it.
-  - On the H7, the FDCAN acceptance filters must pass `VEHICLE_CL250_REQUEST_ID`, `VEHICLE_CL250_FALLBACK_REQUEST_ID` and every `vehicle_cl250_functional_watch[]` ID. Otherwise the foreign-tester watch is deaf. This is an Ç1 HAL requirement, checked on target by `uds_client_foreign_tester`.
-  - N_As (a TX that is never confirmed) and bus-off recovery (`VEHICLE_CL250_BUS_OFF_BACKOFF_*`, D-030's latch after 5 bus-offs) come with the H7 FDCAN HAL (Ç1).
+  - The acceptance filters come from the `can_if` receiver table (`can_if_apply_filters()`, Ç1), so they pass `VEHICLE_CL250_RESPONSE_ID`, `VEHICLE_CL250_REQUEST_ID`, `VEHICLE_CL250_FALLBACK_REQUEST_ID` and every `vehicle_cl250_functional_watch[]` ID that the client registered. Otherwise the foreign-tester watch would be deaf. Checked on target by `uds_client_foreign_tester`.
+  - **Bus-off and N_As (Ç1, `services/can_sm`, D-054).** A vehicle bus-off aborts the pending request and blocks writes (`can_if_write()` returns `CAN_PORT_ERR_IO`, counted in `can_if_tx_blocked_count()`, never as a guard refusal, so the client does not latch). The client keeps its schedule and waits for `isotp_link_tx_ready()`. Recovery waits 1, 2, 4, 8 s (gen/ `VEHICLE_CL250_BUS_OFF_BACKOFF_*`). The 5th bus-off since boot latches the vehicle port (D-030): off the vehicle bus until reboot, seen as `VEHICLE_ECU_COMM_LOST` and STALE values. The vehicle port takes a new frame only when none is pending (one TX buffer), so a request never queues behind a stuck one; a stuck one is aborted after N_As. A request that got out late anyway is an abandoned read (D-051). Until the rt-core health DID (D-054 item 7), a latched vehicle port shows on 0xFD00 as fault NONE with the ECU absent, which looks like an ECU fault: check the host summary or, later, the health DID.
 - **Counters** (`uds_client_stats()`): requests, reads, timeouts, NRC, response pending, unavailable, skips, unexpected, session starts and losses, slow answers (D-051), step gaps above `CLIENT_STEP_MAX_MS` and the longest step gap (D-053).
 - **Diagnostics (D-040).** Every step reports to `services/diag`, level-triggered:
   - DTC `VEHICLE_ECU_COMM_LOST` (U0100-00): the ECU is absent, counted only once `ECU_ABSENT_TIMEOUT_MS` has passed since open (a sticky flag, so the ms counter wrap cannot disarm it).
@@ -247,7 +247,7 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
 | m6 | `uds_client_sample_t s` was not initialised | Fixed |
 | m7 | A permanent NRC is polled at full rate | Documented (legacy, user decision) |
 | m8 | `moto_rtcore_host --allow-real-bus` is now a full tester | Fixed: the warning text says so, and the summary prints the fault |
-| — | N_As, bus-off backoff | Deferred to the H7 HAL (Ç1) |
+| — | N_As, bus-off backoff | Done in Ç1 (`services/can_sm`, D-054); the H7 FDCAN driver itself waits for the board (Q-019) |
 
 - Checks after the fixes (2026-09-29):
   - ctest 9/9 (ASan + UBSan)
@@ -285,7 +285,7 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
 - NIT-1 (line length), NIT-2 (the P = B + S pin is documented), NIT-3 (the late answer is taken at the next step), NIT-4 (`rx_busy` / `tx_ready` polls in the counter test) applied.
 
 **Follow-ups.** The client is merged (rt-core#5 and #6); the ISO codes and Q-021 are done (D-040). What remains:
-- N_As, bus-off backoff and FDCAN filters that pass the request and watch IDs: the H7 HAL (Ç1).
+- ~~N_As, bus-off backoff and FDCAN filters that pass the request and watch IDs~~: done in Ç1 (`services/can_sm`, `can_if_apply_filters()`). The H7 FDCAN port of `hal/can_port.h` waits for the board (Q-019).
 - A platform-bus republisher that reads `services/vehicle_signals` and maps NONE/STALE to INVALID (speed E2E to safety-node, D-021).
 
 ## UDS server, platform bus (`uds_server.h`, `uds_server_core.h`)
@@ -343,7 +343,7 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
 - **Queued answer.**
   - While the link is busy (`ISOTP_ERR_BUSY`), the answer stays queued and is retried every pass (`tx_busy`). S3 keeps running meanwhile (`uds_server_core_tick()`).
   - It is dropped once it is P2\*server old (`tx_expired`), so the glue never delivers a stale answer later.
-  - An answer the link already accepted (frames in the core or the mailbox) can still go out late after a bus stall until N_As exists (Ç1 FDCAN HAL; safety re-review MINOR-B).
+  - An answer the link already accepted (frames in the core or the mailbox) is aborted at a bus-off, or N_As after the port's last TX progress (Ç1, `services/can_sm`; N_As is per port, so on a busy platform bus a starved answer is bounded by the port's progress, not by its own age): it ends with `ISOTP_N_TIMEOUT_A` (`tx_failed`) and never goes out later than that (safety re-review MINOR-B). The abort cancels every pending frame of the port, not only the server's: acceptable fail-safe behaviour on the platform bus, whose periodic senders send again.
   - A functional request that arrives while an answer is queued is dropped and counted, never run late (safety re-review MINOR-A).
   - Any other link error drops it at once (`tx_failed`), as does a failed N_USData.confirm.
 - **Vehicle-tester status is fail-safe** (safety review MAJOR-1). `services/diag` stamps the client's status. If none has come since boot, or the last one is older than `PLATFORM_UDS_VEHICLE_TESTER_STATUS_MAX_AGE_MS` (500 ms):
@@ -369,7 +369,7 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
   - Why the order matters (safety re-review MINOR-C): the client's first status must arrive before `diag_supervise()` runs.
   - If the server ran first and more than `PLATFORM_UDS_VEHICLE_TESTER_STATUS_MAX_AGE_MS` passed between `diag_init()` and the first pass, U3000-00 would be confirmed at every boot.
   - That error is in the fail-safe direction, but it is a false fault.
-- **Ç1 requirement, one comms task** (safety review MINOR-3):
+- **Ç1 requirement, one comms task** (safety review MINOR-3; `src/app/comms.c` `comms_pass()` fixes the order for the host and the H7 task):
   - `can_if`, `services/diag`, `services/vehicle_signals`, `uds_client` and `uds_server` run in the same FreeRTOS task.
   - Every `can_if_register_rx()` happens before the scheduler starts.
   - If this is ever split, those services need a critical section or a snapshot. Otherwise the 0xFD00 status, a sample, or the one-pass 0x14 window can tear.
@@ -412,7 +412,7 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
 | ID | Finding | Status |
 |---|---|---|
 | MINOR-A | A functional request that arrived while an answer was queued stayed held and ran up to P2\* late | Fixed: dropped and counted; test |
-| MINOR-B | "A dead bus never delivers a stale answer" holds for the glue queue only; the link's accepted frames wait for N_As | Documented; HIL `uds_server_bus_off_recovery` depends on N_As (Ç1) |
+| MINOR-B | "A dead bus never delivers a stale answer" holds for the glue queue only; the link's accepted frames wait for N_As | Bounded in Ç1: a bus-off, or N_As after the port's last TX progress, aborts the port's pending TX (`services/can_sm`); HIL `uds_server_bus_off_recovery` |
 | MINOR-C | The boot grace depends on the client-before-server step order | Documented (integration) |
 
 - Checks after the fixes: see the PR description (ctest, coverage, MISRA, cross builds, SIL).
@@ -436,7 +436,7 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
   - Pass when the tester's first frame is 0x10 03 and a tester present goes out every `VEHICLE_CL250_TESTER_PRESENT_PERIOD_MS` (±1 loop period).
   - Over 60 s every DID stays VALID: age ≤ `stale_after_ms` on the platform bus once the republisher exists, or in the rt-core log until then.
   - Every tester frame passes `vehicle_cl250_frame_allowed()`.
-- `uds_client_vehicle_dlc_unplug_replug` (vehicle bus, UDS client, needs the H7 N_As abort):
+- `uds_client_vehicle_dlc_unplug_replug` (vehicle bus, UDS client, N_As abort from Ç1):
   - Disconnect CAN_H/L for 2 s and for 10 s.
   - Pass when there is no latch, bus load stays bounded while unplugged, and every DID is VALID within `SESSION_RETRY_INTERVAL_MS` + `stale_after_ms` after reconnecting.
 - `uds_client_vehicle_faulty_speed` (vehicle bus, UDS client, D-050; ISSUES E-6):
@@ -473,7 +473,7 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
 - `uds_server_port_mapping` (first H7 bring-up):
   - The platform tester exercises every server service.
   - Pass when the vehicle bus carries only 29-bit 0x18DA10F1 frames that pass the gate. This catches an FDCAN1/FDCAN2 swap.
-- `uds_server_bus_off_recovery` (needs N_As from the Ç1 FDCAN HAL):
+- `uds_server_bus_off_recovery` (N_As and bus-off recovery from Ç1):
   - Platform bus-off for 10 s in the extended session.
   - Pass when, after recovery, no stale answer appears, the session is default, and new requests are answered.
 - `uds_server_dongle_latch` (both buses):

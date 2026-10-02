@@ -416,6 +416,13 @@ void isotp_rx_release(isotp_link_t* link)
     }
 }
 
+void isotp_abort_tx(isotp_link_t* link, isotp_n_result_t result)
+{
+    if ((link != NULL) && (link->tx_state != ISOTP_TX_IDLE)) {
+        tx_finish(link, result);
+    }
+}
+
 bool isotp_take_tx_confirm(isotp_link_t* link, isotp_n_result_t* result)
 {
     if ((link == NULL) || !link->tx_conf_pending) {

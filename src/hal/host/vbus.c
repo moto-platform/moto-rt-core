@@ -2,9 +2,31 @@
 
 #include <stddef.h>
 
+/* Above this TEC or REC a controller is error passive (ISO 11898-1). */
+#define ERROR_PASSIVE_LIMIT 127u
+
 static bool node_ok(const vbus_t* bus, uint8_t node)
 {
     return (bus != NULL) && (node < VBUS_MAX_NODES) && bus->nodes[node].attached;
+}
+
+static void reset_node(vbus_node_t* n)
+{
+    n->head = 0u;
+    n->count = 0u;
+    n->overruns = 0u;
+    n->tx_pending_count = 0u;
+    n->tx_done = 0u;
+    n->bus_off_events = 0u;
+    n->recover_count = 0u;
+    n->filter_count = 0u;
+    n->tec = 0u;
+    n->rec = 0u;
+    n->filtered = false;
+    n->attached = false;
+    n->tx_blocked = false;
+    n->tx_stalled = false;
+    n->bus_off = false;
 }
 
 void vbus_init(vbus_t* bus)
@@ -13,11 +35,7 @@ void vbus_init(vbus_t* bus)
         return;
     }
     for (uint8_t i = 0u; i < VBUS_MAX_NODES; i++) {
-        bus->nodes[i].head = 0u;
-        bus->nodes[i].count = 0u;
-        bus->nodes[i].overruns = 0u;
-        bus->nodes[i].attached = false;
-        bus->nodes[i].tx_blocked = false;
+        reset_node(&bus->nodes[i]);
     }
     bus->frame_count = 0u;
 }
@@ -29,6 +47,7 @@ bool vbus_attach(vbus_t* bus, uint8_t* node)
     }
     for (uint8_t i = 0u; i < VBUS_MAX_NODES; i++) {
         if (!bus->nodes[i].attached) {
+            reset_node(&bus->nodes[i]);
             bus->nodes[i].attached = true;
             *node = i;
             return true;
@@ -37,17 +56,25 @@ bool vbus_attach(vbus_t* bus, uint8_t* node)
     return false;
 }
 
-can_port_status_t vbus_send(vbus_t* bus, uint8_t node, const can_frame_t* frame)
+static bool accepts(const vbus_node_t* n, const can_frame_t* frame)
 {
-    if (!node_ok(bus, node) || !can_frame_valid(frame)) {
-        return CAN_PORT_ERR_ARG;
+    if (!n->filtered) {
+        return true;
     }
-    if (bus->nodes[node].tx_blocked) {
-        return CAN_PORT_TX_FULL;
+    for (uint32_t i = 0u; i < n->filter_count; i++) {
+        if ((n->filters[i].id == frame->id) && (n->filters[i].extended == frame->extended)) {
+            return true;
+        }
     }
+    return false;
+}
+
+/* Puts one frame on the bus: every other attached, bus-on node that accepts it gets it. */
+static void deliver(vbus_t* bus, uint8_t node, const can_frame_t* frame)
+{
     for (uint8_t i = 0u; i < VBUS_MAX_NODES; i++) {
         vbus_node_t* dst = &bus->nodes[i];
-        if ((i == node) || !dst->attached) {
+        if ((i == node) || !dst->attached || dst->bus_off || !accepts(dst, frame)) {
             continue;
         }
         if (dst->count >= VBUS_RX_DEPTH) {
@@ -59,6 +86,30 @@ can_port_status_t vbus_send(vbus_t* bus, uint8_t node, const can_frame_t* frame)
         dst->count++;
     }
     bus->frame_count++;
+    bus->nodes[node].tx_done++;
+}
+
+can_port_status_t vbus_send(vbus_t* bus, uint8_t node, const can_frame_t* frame)
+{
+    if (!node_ok(bus, node) || !can_frame_valid(frame)) {
+        return CAN_PORT_ERR_ARG;
+    }
+    vbus_node_t* n = &bus->nodes[node];
+    if (n->bus_off) {
+        return CAN_PORT_ERR_IO;
+    }
+    if (n->tx_blocked) {
+        return CAN_PORT_TX_FULL;
+    }
+    if (n->tx_stalled || (n->tx_pending_count > 0u)) {
+        if (n->tx_pending_count >= VBUS_TX_DEPTH) {
+            return CAN_PORT_TX_FULL;
+        }
+        n->tx_pending[n->tx_pending_count] = *frame;
+        n->tx_pending_count++;
+        return CAN_PORT_OK;
+    }
+    deliver(bus, node, frame);
     return CAN_PORT_OK;
 }
 
@@ -79,7 +130,11 @@ can_port_status_t vbus_recv(vbus_t* bus, uint8_t node, can_frame_t* frame)
 
 bool vbus_tx_free(const vbus_t* bus, uint8_t node)
 {
-    return node_ok(bus, node) && !bus->nodes[node].tx_blocked;
+    if (!node_ok(bus, node)) {
+        return false;
+    }
+    const vbus_node_t* n = &bus->nodes[node];
+    return !n->tx_blocked && !n->bus_off && (n->tx_pending_count < VBUS_TX_DEPTH);
 }
 
 void vbus_set_tx_blocked(vbus_t* bus, uint8_t node, bool blocked)
@@ -87,6 +142,110 @@ void vbus_set_tx_blocked(vbus_t* bus, uint8_t node, bool blocked)
     if (node_ok(bus, node)) {
         bus->nodes[node].tx_blocked = blocked;
     }
+}
+
+static void flush_pending(vbus_t* bus, uint8_t node)
+{
+    vbus_node_t* n = &bus->nodes[node];
+    if (n->bus_off) {
+        return;
+    }
+    for (uint32_t i = 0u; i < n->tx_pending_count; i++) {
+        deliver(bus, node, &n->tx_pending[i]);
+    }
+    n->tx_pending_count = 0u;
+}
+
+void vbus_set_tx_stalled(vbus_t* bus, uint8_t node, bool stalled)
+{
+    if (!node_ok(bus, node)) {
+        return;
+    }
+    bus->nodes[node].tx_stalled = stalled;
+    if (!stalled) {
+        flush_pending(bus, node); /* the late frames a missing abort would let out */
+    }
+}
+
+void vbus_tx_abort(vbus_t* bus, uint8_t node)
+{
+    if (node_ok(bus, node)) {
+        bus->nodes[node].tx_pending_count = 0u;
+    }
+}
+
+void vbus_set_bus_off(vbus_t* bus, uint8_t node, bool bus_off)
+{
+    if (!node_ok(bus, node)) {
+        return;
+    }
+    vbus_node_t* n = &bus->nodes[node];
+    if (bus_off && !n->bus_off) {
+        n->bus_off_events++;
+    }
+    n->bus_off = bus_off;
+}
+
+void vbus_recover(vbus_t* bus, uint8_t node)
+{
+    if (!node_ok(bus, node)) {
+        return;
+    }
+    vbus_node_t* n = &bus->nodes[node];
+    n->recover_count++;
+    if (n->bus_off) {
+        n->bus_off = false;
+        n->tec = 0u; /* the controller restarts with cleared error counters */
+        n->rec = 0u;
+        if (!n->tx_stalled) {
+            flush_pending(bus, node);
+        }
+    }
+}
+
+uint32_t vbus_recover_count(const vbus_t* bus, uint8_t node)
+{
+    return node_ok(bus, node) ? bus->nodes[node].recover_count : 0u;
+}
+
+void vbus_set_error_counters(vbus_t* bus, uint8_t node, uint8_t tec, uint8_t rec)
+{
+    if (node_ok(bus, node)) {
+        bus->nodes[node].tec = tec;
+        bus->nodes[node].rec = rec;
+    }
+}
+
+can_port_status_t vbus_set_filters(vbus_t* bus, uint8_t node, const can_port_filter_t* filters,
+                                   uint32_t count)
+{
+    if (!node_ok(bus, node) || (count > CAN_PORT_MAX_FILTERS) ||
+        ((filters == NULL) && (count > 0u))) {
+        return CAN_PORT_ERR_ARG;
+    }
+    vbus_node_t* n = &bus->nodes[node];
+    for (uint32_t i = 0u; i < count; i++) {
+        n->filters[i] = filters[i];
+    }
+    n->filter_count = count;
+    n->filtered = true;
+    return CAN_PORT_OK;
+}
+
+can_port_status_t vbus_state(const vbus_t* bus, uint8_t node, can_port_state_t* state)
+{
+    if (!node_ok(bus, node) || (state == NULL)) {
+        return CAN_PORT_ERR_ARG;
+    }
+    const vbus_node_t* n = &bus->nodes[node];
+    state->tec = n->tec;
+    state->rec = n->rec;
+    state->error_passive = (n->tec > ERROR_PASSIVE_LIMIT) || (n->rec > ERROR_PASSIVE_LIMIT);
+    state->bus_off = n->bus_off;
+    state->bus_off_events = n->bus_off_events;
+    state->tx_pending = n->tx_pending_count;
+    state->tx_done = n->tx_done;
+    return CAN_PORT_OK;
 }
 
 uint32_t vbus_overruns(const vbus_t* bus, uint8_t node)
