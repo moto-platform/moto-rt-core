@@ -1051,7 +1051,10 @@ static void test_read_of_the_longest_dids_fills_exactly_the_longest_response(voi
         }
     }
     TEST_ASSERT_EQUAL_UINT8(PLATFORM_UDS_MAX_DID_LENGTH, platform_uds_dids[longest].length);
-    TEST_ASSERT_EQUAL_UINT8(PLATFORM_UDS_DID_SW_VERSION_LENGTH, platform_uds_dids[longest].length);
+    /* defs v0.4.0: 0xFD02 RT_CORE_HEALTH (23 B), so 4 of them make a 101 B answer */
+    TEST_ASSERT_EQUAL_UINT8(PLATFORM_UDS_DID_RT_CORE_HEALTH_LENGTH,
+                            platform_uds_dids[longest].length);
+    TEST_ASSERT_EQUAL_UINT16(101u, UDS_SERVER_RSP_MAX);
     uint8_t req[1u + (2u * PLATFORM_UDS_MAX_READ_DIDS)];
     req[0] = UDS_SID_READ_DATA_BY_IDENTIFIER;
     for (uint32_t i = 0u; i < PLATFORM_UDS_MAX_READ_DIDS; i++) {

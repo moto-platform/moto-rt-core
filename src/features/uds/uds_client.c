@@ -94,10 +94,10 @@ static uint8_t fault_code(uds_client_fault_t fault)
     return code;
 }
 
-/* Level-triggered DTC results and the 0xFD00 status, every pass (services/diag). A
- * 0x14 clear therefore hides an active condition for one pass at most, and never
- * releases the latch itself. The ECU gets ECU_ABSENT_TIMEOUT_MS after open to answer
- * before its absence counts. */
+/* Level-triggered DTC results, the 0xFD00 status and the 0xFD02 step counters, every
+ * pass, latched or not (services/diag). A 0x14 clear therefore hides an active
+ * condition for one pass at most, and never releases the latch itself. The ECU gets
+ * ECU_ABSENT_TIMEOUT_MS after open to answer before its absence counts. */
 static void report_diag(uds_client_t* client, uint32_t now, bool present)
 {
     const bool latched = uds_client_core_failed(&client->core);
@@ -111,6 +111,8 @@ static void report_diag(uds_client_t* client, uint32_t now, bool present)
     const diag_vehicle_tester_t status = {present, uds_client_core_session_up(&client->core),
                                           latched, fault_code(client->fault)};
     diag_set_vehicle_tester(&status, now);
+    const uds_client_stats_t* st = uds_client_core_stats(&client->core);
+    diag_set_client_steps(st->step_overruns, st->step_gap_max_ms, now); /* 0xFD02, D-055 */
 }
 
 static void take_indication(uds_client_t* client, uint32_t now)

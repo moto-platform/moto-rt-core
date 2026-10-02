@@ -53,6 +53,7 @@ static void on_frame(void* ctx, const can_frame_t* f)
 
 /* Before can_sm_init(): nothing may have run yet, so this is captured in main(). */
 static uint8_t before_init_tec_max = 0xFFu;
+static bool before_init_known = true;
 
 static void capture_before_init(void)
 {
@@ -63,6 +64,8 @@ static void capture_before_init(void)
     (void)can_port_host_bind_vbus(CAN_PORT_VEHICLE, &b, n);
     vbus_set_error_counters(&b, n, 200u, 200u);
     can_sm_step(CAN_PORT_VEHICLE); /* must be a no-op: the manager is not initialised */
+    before_init_known = can_sm_state_known(CAN_PORT_VEHICLE) ||
+                        can_sm_state_known(CAN_PORT_PLATFORM);
     const can_sm_stats_t* st = can_sm_stats(CAN_PORT_VEHICLE);
     if (st != NULL) {
         before_init_tec_max = st->tec_max;
@@ -753,6 +756,48 @@ static void test_comms_applies_the_filters_and_the_sil_exchange_still_works(void
     TEST_ASSERT_EQUAL(CAN_SM_ERROR_ACTIVE, can_sm_state(CAN_PORT_PLATFORM));
 }
 
+/* ------------------------------------------------ state known (D-055, health DID) */
+
+static void test_no_state_is_known_before_init_or_before_the_first_snapshot(void)
+{
+    TEST_ASSERT_FALSE(before_init_known); /* can_sm_state() says LATCHED there */
+    can_if_init();                        /* reset, no step yet */
+    TEST_ASSERT_FALSE(can_sm_state_known(CAN_PORT_VEHICLE));
+    TEST_ASSERT_FALSE(can_sm_state_known(CAN_PORT_PLATFORM));
+    can_sm_step(CAN_PORT_VEHICLE);
+    TEST_ASSERT_TRUE(can_sm_state_known(CAN_PORT_VEHICLE));
+    TEST_ASSERT_FALSE(can_sm_state_known(CAN_PORT_PLATFORM)); /* per port */
+    TEST_ASSERT_FALSE(can_sm_state_known(CAN_PORT_COUNT));
+}
+
+static void test_an_unreadable_controller_is_unknown_until_a_good_snapshot(void)
+{
+    TEST_ASSERT_TRUE(can_sm_state_known(CAN_PORT_PLATFORM));
+    can_port_host_unbind(CAN_PORT_PLATFORM);
+    can_sm_step(CAN_PORT_PLATFORM);
+    TEST_ASSERT_EQUAL(CAN_SM_ERROR_ACTIVE, can_sm_state(CAN_PORT_PLATFORM)); /* the last one */
+    TEST_ASSERT_FALSE(can_sm_state_known(CAN_PORT_PLATFORM));
+    TEST_ASSERT_TRUE(can_port_host_bind_vbus(CAN_PORT_PLATFORM, &bus_p, node_platform));
+    can_sm_step(CAN_PORT_PLATFORM);
+    TEST_ASSERT_TRUE(can_sm_state_known(CAN_PORT_PLATFORM));
+}
+
+static void test_a_latched_port_stays_known_when_its_controller_cannot_be_read(void)
+{
+    for (uint32_t k = 0u; k < CAN_SM_VEHICLE_BUS_OFF_LATCH - 1u; k++) {
+        TEST_ASSERT_NOT_EQUAL_UINT32(0u, bus_off_cycle(CAN_PORT_VEHICLE, &bus_v, node_vehicle,
+                                                       2u * VEHICLE_CL250_BUS_OFF_BACKOFF_MAX_MS));
+    }
+    can_sm_step(CAN_PORT_VEHICLE);
+    vbus_set_bus_off(&bus_v, node_vehicle, true);
+    can_sm_step(CAN_PORT_VEHICLE);
+    TEST_ASSERT_EQUAL(CAN_SM_LATCHED, can_sm_state(CAN_PORT_VEHICLE));
+    can_port_host_unbind(CAN_PORT_VEHICLE);
+    can_sm_step(CAN_PORT_VEHICLE);
+    TEST_ASSERT_TRUE(can_sm_state_known(CAN_PORT_VEHICLE)); /* the latch is our own state */
+    TEST_ASSERT_EQUAL(CAN_SM_LATCHED, can_sm_state(CAN_PORT_VEHICLE));
+}
+
 int main(void)
 {
     capture_before_init();
@@ -776,6 +821,9 @@ int main(void)
     RUN_TEST(test_a_port_whose_state_cannot_be_read_refuses_tx_and_drops_its_pending_frames);
     RUN_TEST(test_the_platform_filters_take_a_full_receiver_table);
     RUN_TEST(test_unbound_ports_and_unknown_port_ids_are_safe);
+    RUN_TEST(test_no_state_is_known_before_init_or_before_the_first_snapshot);
+    RUN_TEST(test_an_unreadable_controller_is_unknown_until_a_good_snapshot);
+    RUN_TEST(test_a_latched_port_stays_known_when_its_controller_cannot_be_read);
     RUN_TEST(test_applied_filters_pass_only_registered_ids_and_unmatched_ones_are_not_unrouted);
     RUN_TEST(test_filters_of_one_port_do_not_touch_the_other_port);
     RUN_TEST(test_filter_fifo_is_1_for_the_platform_diagnostic_ids_and_0_for_everything_else);

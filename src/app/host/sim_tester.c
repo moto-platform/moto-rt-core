@@ -21,7 +21,7 @@
 #define MAX_REQ 12u
 #define MAX_EXPECT 16u
 
-typedef enum { CHECK_NONE = 0, CHECK_MULTI_READ } check_t;
+typedef enum { CHECK_NONE = 0, CHECK_MULTI_READ, CHECK_HEALTH } check_t;
 
 typedef struct {
     const char* name;
@@ -61,6 +61,12 @@ static const step_t script[] = {
       LO(PLATFORM_UDS_DID_VEHICLE_ENGINE_SPEED)}, 9u, false,
      {POS(UDS_SID_READ_DATA_BY_IDENTIFIER), HI(PLATFORM_UDS_DID_SW_VERSION),
       LO(PLATFORM_UDS_DID_SW_VERSION)}, 3u, 0u, CHECK_MULTI_READ},
+    {"rt-core health (0xFD02)", 0u, false,
+     {UDS_SID_READ_DATA_BY_IDENTIFIER, HI(PLATFORM_UDS_DID_RT_CORE_HEALTH),
+      LO(PLATFORM_UDS_DID_RT_CORE_HEALTH)}, 3u, false,
+     {POS(UDS_SID_READ_DATA_BY_IDENTIFIER), HI(PLATFORM_UDS_DID_RT_CORE_HEALTH),
+      LO(PLATFORM_UDS_DID_RT_CORE_HEALTH)}, 3u,
+     (uint16_t)(3u + PLATFORM_UDS_DID_RT_CORE_HEALTH_LENGTH), CHECK_HEALTH},
     {"DTC count (none failing)", 0u, false,
      {UDS_SID_READ_DTC_INFORMATION, UDS_READ_DTC_REPORT_NUMBER_OF_DTC_BY_STATUS_MASK,
       PLATFORM_UDS_DTC_STATUS_AVAILABILITY_MASK}, 3u,
@@ -178,6 +184,30 @@ static bool check_multi_read(sim_tester_t* t, const uint8_t* rsp)
     return true;
 }
 
+/* 0xFD02 on a healthy bench (D-055): the client's step counters are fresh, both ports
+ * are known and ERROR_ACTIVE, and the vehicle port is not latched. */
+static bool check_health(sim_tester_t* t, const uint8_t* rsp)
+{
+    const uint8_t* rec = &rsp[3];
+    const uint8_t flags = rec[PLATFORM_UDS_RT_CORE_HEALTH_STEP_STATS_FRESH_BYTE];
+    if ((flags & PLATFORM_UDS_RT_CORE_HEALTH_STEP_STATS_FRESH_MASK) == 0u) {
+        fail(t, "0xFD02 step counters are not fresh");
+        return false;
+    }
+    if ((flags & PLATFORM_UDS_RT_CORE_HEALTH_VEHICLE_LATCHED_MASK) != 0u) {
+        fail(t, "0xFD02 reports the vehicle port latched");
+        return false;
+    }
+    if ((rec[PLATFORM_UDS_RT_CORE_HEALTH_VEHICLE_STATE_BYTE] !=
+         PLATFORM_UDS_RT_CORE_HEALTH_VEHICLE_STATE_ERROR_ACTIVE) ||
+        (rec[PLATFORM_UDS_RT_CORE_HEALTH_PLATFORM_STATE_BYTE] !=
+         PLATFORM_UDS_RT_CORE_HEALTH_PLATFORM_STATE_ERROR_ACTIVE)) {
+        fail(t, "0xFD02 port state is not ERROR_ACTIVE");
+        return false;
+    }
+    return true;
+}
+
 static void on_answer(sim_tester_t* t, uint32_t now, const uint8_t* rsp, uint16_t len)
 {
     const step_t* s = &script[t->step];
@@ -201,6 +231,9 @@ static void on_answer(sim_tester_t* t, uint32_t now, const uint8_t* rsp, uint16_
         return;
     }
     if ((s->check == CHECK_MULTI_READ) && !check_multi_read(t, rsp)) {
+        return;
+    }
+    if ((s->check == CHECK_HEALTH) && !check_health(t, rsp)) {
         return;
     }
     next_step(t, now);

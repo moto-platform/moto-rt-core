@@ -74,10 +74,18 @@ void can_sm_step(can_port_id_t port)
     }
 }
 
-// cppcheck-suppress misra-c2012-8.7 ; DEV-002: diagnostics, host summary and the health DID
 can_sm_state_t can_sm_state(can_port_id_t port)
 {
     return (initialised && sm_port_ok(port)) ? can_sm_core_state(&cores[port]) : CAN_SM_LATCHED;
+}
+
+bool can_sm_state_known(can_port_id_t port)
+{
+    if (!initialised || !sm_port_ok(port)) {
+        return false;
+    }
+    const can_sm_core_t* sm = &cores[port];
+    return (can_sm_core_state(sm) == CAN_SM_LATCHED) || (sm->primed && !state_unknown[port]);
 }
 
 bool can_sm_tx_allowed(can_port_id_t port)
@@ -91,7 +99,6 @@ uint32_t can_sm_abort_seq(can_port_id_t port)
     return sm_port_ok(port) ? can_sm_core_abort_seq(&cores[port]) : 0u;
 }
 
-// cppcheck-suppress misra-c2012-8.7 ; DEV-002: diagnostics, host summary and the health DID
 const can_sm_stats_t* can_sm_stats(can_port_id_t port)
 {
     return sm_port_ok(port) ? can_sm_core_stats(&cores[port]) : NULL;

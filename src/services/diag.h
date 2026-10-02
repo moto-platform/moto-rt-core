@@ -3,8 +3,12 @@
 
 /*
  * Diagnostic state service (≈ AUTOSAR Dem, concept only, D-006): rt-core's own DTC
- * memory and the vehicle-tester status that the platform UDS server reports (D-040).
- * Features write it, the UDS server reads and clears it; neither includes the other.
+ * memory, and the vehicle-tester status and step counters that the platform UDS server
+ * reports (0xFD00, 0xFD02; D-040, D-055). The UDS client glue writes the status, the
+ * step counters and its DTC results; the UDS server glue reads them, clears the DTCs and
+ * reports its own monitors (VEHICLE_TESTER_LATCHED supervision, VEHICLE_BUS_OFF_LATCHED
+ * from services/can_sm). Neither feature includes the other, and diag includes no other
+ * service.
  *
  * DTCs are the gen/ table (platform_uds.h, platform_uds_dtcs[]), indexed by
  * platform_uds_dtc_index_t. A monitor reports its test result every pass
@@ -20,6 +24,11 @@
  * PLATFORM_UDS_VEHICLE_TESTER_STATUS_MAX_AGE_MS, reads as FAULT = NOT_RUNNING with every
  * flag clear, and diag_supervise() then fails VEHICLE_TESTER_LATCHED. A client that
  * never opened or stopped therefore never looks healthy.
+ *
+ * Step counters (D-055): the client's D-053 counters with the time they were written.
+ * None since diag_init() reads as zero, not fresh; older than
+ * PLATFORM_UDS_RT_CORE_HEALTH_MAX_AGE_MS reads as the last values, not fresh (sticky
+ * until the next write, like the status). Freshness is their only health signal.
  *
  * RAM only: the memory is lost on reset until the H7 flash driver exists (D-040).
  * Static storage, no heap. Main loop only (not ISR-safe).
@@ -41,7 +50,15 @@ typedef struct {
     uint8_t fault;
 } diag_vehicle_tester_t;
 
-/* Clears every DTC status; the vehicle tester reads NOT_RUNNING until its first status. */
+/* The vehicle UDS client's D-053 step counters, as the 0xFD02 DID reports them. */
+typedef struct {
+    uint32_t overruns;   /* saturating */
+    uint32_t gap_max_ms; /* saturating */
+    bool fresh;          /* written within PLATFORM_UDS_RT_CORE_HEALTH_MAX_AGE_MS */
+} diag_client_steps_t;
+
+/* Clears every DTC status; the vehicle tester reads NOT_RUNNING and the step counters
+ * zero and not fresh until their first write. */
 void diag_init(uint32_t now_ms);
 
 /* A monitor's test result for DTC index idx (ignored if out of range). */
@@ -60,8 +77,16 @@ void diag_set_vehicle_tester(const diag_vehicle_tester_t* status, uint32_t now_m
  * than PLATFORM_UDS_VEHICLE_TESTER_STATUS_MAX_AGE_MS. */
 diag_vehicle_tester_t diag_vehicle_tester(uint32_t now_ms);
 
+/* Latest step counters (writer: the UDS client glue, every step, latched or not). */
+void diag_set_client_steps(uint32_t overruns, uint32_t gap_max_ms, uint32_t now_ms);
+
+/* The step counters as of now_ms; `fresh` false if none was written since init or the
+ * last write is older than PLATFORM_UDS_RT_CORE_HEALTH_MAX_AGE_MS (wrap-safe). */
+diag_client_steps_t diag_client_steps(uint32_t now_ms);
+
 /* Every pass (the UDS server glue): fails VEHICLE_TESTER_LATCHED while the status is
- * missing or stale, including MAX_AGE_MS after init with no status at all. */
+ * missing or stale, including MAX_AGE_MS after init with no status at all, and marks
+ * stale step counters as not fresh until their next write. */
 void diag_supervise(uint32_t now_ms);
 
 #ifdef __cplusplus

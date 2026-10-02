@@ -1,7 +1,8 @@
 /*
  * L0 tests for the diagnostic state service (services/diag): DTC status bytes with
  * level-triggered reports (ISO 14229-1 Annex D status bits), ClearDiagnosticInformation
- * semantics and the vehicle-tester status. No requirement IDs yet (Q-006).
+ * semantics, the vehicle-tester status and the client step counters of 0xFD02 (D-055).
+ * No requirement IDs yet (Q-006).
  */
 #include "platform_uds.h"
 #include "services/diag.h"
@@ -19,6 +20,7 @@
 
 #define T0 5000u
 #define MAX_AGE PLATFORM_UDS_VEHICLE_TESTER_STATUS_MAX_AGE_MS
+#define STEPS_MAX_AGE PLATFORM_UDS_RT_CORE_HEALTH_MAX_AGE_MS
 
 void setUp(void)
 {
@@ -230,6 +232,59 @@ static void test_a_new_status_after_staleness_makes_it_fresh_again(void)
     TEST_ASSERT_TRUE(diag_vehicle_tester(T0 + MAX_AGE + 6u).ecu_present);
 }
 
+/* ------------------------------------------------------------------ step counters */
+
+static void test_step_counters_read_zero_and_not_fresh_before_the_first_write(void)
+{
+    const diag_client_steps_t r = diag_client_steps(T0 + 1u);
+    TEST_ASSERT_EQUAL_UINT32(0u, r.overruns);
+    TEST_ASSERT_EQUAL_UINT32(0u, r.gap_max_ms);
+    TEST_ASSERT_FALSE(r.fresh);
+    TEST_ASSERT_FALSE(diag_client_steps(T0).fresh); /* a stamp equal to init is no write */
+}
+
+static void test_step_counters_round_trip_and_stay_fresh_until_max_age(void)
+{
+    diag_set_client_steps(7u, 0xFFFFFFFFu, T0 + 10u);
+    diag_client_steps_t r = diag_client_steps(T0 + 10u + STEPS_MAX_AGE - 1u);
+    TEST_ASSERT_EQUAL_UINT32(7u, r.overruns);
+    TEST_ASSERT_EQUAL_UINT32(0xFFFFFFFFu, r.gap_max_ms);
+    TEST_ASSERT_TRUE(r.fresh);
+    r = diag_client_steps(T0 + 10u + STEPS_MAX_AGE);
+    TEST_ASSERT_FALSE(r.fresh);
+    TEST_ASSERT_EQUAL_UINT32(7u, r.overruns); /* last values kept, only not fresh */
+}
+
+static void test_stale_step_counters_stay_not_fresh_across_the_clock_wrap_until_a_new_write(void)
+{
+    diag_set_client_steps(1u, 12u, T0);
+    diag_supervise(T0 + STEPS_MAX_AGE); /* supervise sees them stale */
+    /* 2^32 + 10 ms after the write the 32-bit clock reads T0 + 10: raw age 10 ms */
+    TEST_ASSERT_FALSE(diag_client_steps(T0 + 10u).fresh);
+    diag_set_client_steps(2u, 12u, T0 + 20u);
+    TEST_ASSERT_TRUE(diag_client_steps(T0 + 21u).fresh);
+    TEST_ASSERT_EQUAL_UINT32(2u, diag_client_steps(T0 + 21u).overruns);
+}
+
+static void test_supervise_keeps_regularly_written_step_counters_fresh(void)
+{
+    for (uint32_t t = T0; t < (T0 + (3u * STEPS_MAX_AGE)); t += 50u) {
+        diag_set_client_steps(0u, 10u, t);
+        diag_supervise(t + 1u);
+        TEST_ASSERT_TRUE(diag_client_steps(t + 1u).fresh);
+    }
+}
+
+static void test_clear_and_init_of_the_step_counters(void)
+{
+    diag_set_client_steps(3u, 40u, T0 + 1u);
+    diag_dtc_clear_all(); /* 0x14 never touches them */
+    TEST_ASSERT_EQUAL_UINT32(3u, diag_client_steps(T0 + 2u).overruns);
+    diag_init(T0 + 2u);
+    TEST_ASSERT_EQUAL_UINT32(0u, diag_client_steps(T0 + 3u).overruns);
+    TEST_ASSERT_FALSE(diag_client_steps(T0 + 3u).fresh);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -252,5 +307,10 @@ int main(void)
     RUN_TEST(test_supervise_fails_the_dtc_when_the_status_goes_stale_and_it_survives_a_clear);
     RUN_TEST(test_a_stale_status_stays_not_running_across_the_clock_wrap_until_a_new_set);
     RUN_TEST(test_a_new_status_after_staleness_makes_it_fresh_again);
+    RUN_TEST(test_step_counters_read_zero_and_not_fresh_before_the_first_write);
+    RUN_TEST(test_step_counters_round_trip_and_stay_fresh_until_max_age);
+    RUN_TEST(test_stale_step_counters_stay_not_fresh_across_the_clock_wrap_until_a_new_write);
+    RUN_TEST(test_supervise_keeps_regularly_written_step_counters_fresh);
+    RUN_TEST(test_clear_and_init_of_the_step_counters);
     return UNITY_END();
 }
