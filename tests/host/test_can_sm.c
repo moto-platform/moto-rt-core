@@ -798,6 +798,116 @@ static void test_a_latched_port_stays_known_when_its_controller_cannot_be_read(v
     TEST_ASSERT_EQUAL(CAN_SM_LATCHED, can_sm_state(CAN_PORT_VEHICLE));
 }
 
+/* ------------------------------------------- dedicated TX buffers (D-056, PR-A review) */
+
+/* ID_A gets a dedicated replace-on-new buffer on the platform port. */
+static void use_dedicated_a(void)
+{
+    can_if_init();
+    TEST_ASSERT_EQUAL(CAN_IF_OK, can_if_register_tx_dedicated(CAN_PORT_PLATFORM, ID_A, false));
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, can_if_apply_filters(CAN_PORT_PLATFORM));
+    can_sm_step(CAN_PORT_PLATFORM);
+}
+
+static void test_a_dedicated_frame_nobody_replaces_is_aborted_by_n_as(void)
+{
+    use_dedicated_a();
+    vbus_set_tx_stalled(&bus_p, node_platform, true);
+    const can_frame_t d = test_frame(ID_A, false, 0x61u);
+    const can_frame_t q = test_frame(ID_B, false, 0x62u);
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, can_if_write(CAN_PORT_PLATFORM, &d));
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, can_if_write(CAN_PORT_PLATFORM, &q)); /* and one FIFO frame */
+    TEST_ASSERT_EQUAL_UINT32(2u, pending(&bus_p, node_platform));
+    const uint32_t aborts = can_if_tx_abort_count(CAN_PORT_PLATFORM);
+    can_sm_step(CAN_PORT_PLATFORM);
+    tick_n(CAN_PORT_PLATFORM, CAN_SM_TX_TIMEOUT_MS);
+    /* one N_As abort cancels the dedicated buffer and the FIFO together */
+    TEST_ASSERT_EQUAL_UINT32(aborts + 1u, can_if_tx_abort_count(CAN_PORT_PLATFORM));
+    TEST_ASSERT_EQUAL_UINT32(1u, can_sm_stats(CAN_PORT_PLATFORM)->tx_timeouts);
+    TEST_ASSERT_EQUAL_UINT32(0u, pending(&bus_p, node_platform));
+    vbus_set_tx_stalled(&bus_p, node_platform, false);
+    tick_n(CAN_PORT_PLATFORM, 10u);
+    TEST_ASSERT_EQUAL_UINT32(0u, vbus_frame_count(&bus_p)); /* neither went out late */
+}
+
+static void test_a_dedicated_frame_written_every_cycle_is_replaced_without_aborts(void)
+{
+    use_dedicated_a();
+    vbus_set_tx_stalled(&bus_p, node_platform, true);
+    const uint32_t aborts = can_if_tx_abort_count(CAN_PORT_PLATFORM);
+    can_port_state_t before;
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_state(&bus_p, node_platform, &before));
+    uint8_t seq = 0u;
+    uint32_t refused = 0u;
+    bool retry = false;
+    for (uint32_t ms = 0u; ms < 2u * CAN_SM_TX_TIMEOUT_MS; ms++) {
+        tick(CAN_PORT_PLATFORM);
+        if ((ms % 50u) == 0u) { /* a writer with a 50 ms cycle, retrying in the next pass */
+            seq++;
+            retry = true;
+        }
+        if (retry) {
+            const can_frame_t d = test_frame(ID_A, false, seq);
+            const can_port_status_t st = can_if_write(CAN_PORT_PLATFORM, &d);
+            refused += (st == CAN_PORT_TX_FULL) ? 1u : 0u;
+            retry = (st == CAN_PORT_TX_FULL);
+        }
+    }
+    TEST_ASSERT_FALSE(retry);
+    TEST_ASSERT_EQUAL_UINT32(2u * CAN_SM_TX_TIMEOUT_MS / 50u - 1u, refused); /* all but the first */
+    /* the pending count drops to 0 at every replace, so N_As never fires: each frame is
+     * at most one write old, never an abort of the ISO-TP links */
+    TEST_ASSERT_EQUAL_UINT32(aborts, can_if_tx_abort_count(CAN_PORT_PLATFORM));
+    TEST_ASSERT_EQUAL_UINT32(0u, can_sm_stats(CAN_PORT_PLATFORM)->tx_timeouts);
+    TEST_ASSERT_EQUAL_UINT32(refused, vbus_tx_replaced(&bus_p, node_platform));
+    can_port_state_t after;
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_state(&bus_p, node_platform, &after));
+    TEST_ASSERT_EQUAL_UINT32(before.tx_done, after.tx_done); /* a replace is not a TX */
+    vbus_set_tx_stalled(&bus_p, node_platform, false);
+    can_frame_t got;
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_recv(&bus_p, node_ppeer, &got));
+    TEST_ASSERT_EQUAL_UINT8(seq, got.data[0]); /* the newest only */
+    TEST_ASSERT_EQUAL(CAN_PORT_EMPTY, vbus_recv(&bus_p, node_ppeer, &got));
+}
+
+static void test_a_bus_off_drops_a_pending_dedicated_frame_for_good(void)
+{
+    use_dedicated_a();
+    vbus_set_tx_stalled(&bus_p, node_platform, true);
+    const can_frame_t d = test_frame(ID_A, false, 0x63u);
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, can_if_write(CAN_PORT_PLATFORM, &d));
+    vbus_set_bus_off(&bus_p, node_platform, true);
+    can_sm_step(CAN_PORT_PLATFORM);
+    TEST_ASSERT_EQUAL_UINT32(0u, pending(&bus_p, node_platform));
+    TEST_ASSERT_EQUAL(CAN_PORT_ERR_IO, can_if_write(CAN_PORT_PLATFORM, &d));
+    vbus_set_tx_stalled(&bus_p, node_platform, false);
+    tick_n(CAN_PORT_PLATFORM, CAN_SM_PLATFORM_BACKOFF_INITIAL_MS + 1u);
+    TEST_ASSERT_EQUAL(CAN_SM_ERROR_ACTIVE, can_sm_state(CAN_PORT_PLATFORM));
+    TEST_ASSERT_EQUAL_UINT32(0u, vbus_frame_count(&bus_p)); /* no stale frame after recovery */
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, can_if_write(CAN_PORT_PLATFORM, &d));
+    TEST_ASSERT_EQUAL_UINT32(1u, vbus_frame_count(&bus_p));
+}
+
+static void test_a_replace_that_comes_too_late_lets_the_old_frame_out_once(void)
+{
+    use_dedicated_a();
+    vbus_set_tx_stalled(&bus_p, node_platform, true);
+    const can_frame_t d1 = test_frame(ID_A, false, 1u);
+    const can_frame_t d2 = test_frame(ID_A, false, 2u);
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, can_if_write(CAN_PORT_PLATFORM, &d1));
+    vbus_set_tx_cancel_late(&bus_p, node_platform, true); /* d1 already in arbitration */
+    TEST_ASSERT_EQUAL(CAN_PORT_TX_FULL, can_if_write(CAN_PORT_PLATFORM, &d2));
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, can_if_write(CAN_PORT_PLATFORM, &d2));
+    TEST_ASSERT_EQUAL_UINT32(0u, vbus_tx_replaced(&bus_p, node_platform));
+    vbus_set_tx_stalled(&bus_p, node_platform, false);
+    can_frame_t got;
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_recv(&bus_p, node_ppeer, &got));
+    TEST_ASSERT_EQUAL_UINT8(1u, got.data[0]);
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_recv(&bus_p, node_ppeer, &got));
+    TEST_ASSERT_EQUAL_UINT8(2u, got.data[0]);
+    TEST_ASSERT_EQUAL_UINT32(0u, can_if_tx_abort_count(CAN_PORT_PLATFORM));
+}
+
 int main(void)
 {
     capture_before_init();
@@ -818,6 +928,10 @@ int main(void)
     RUN_TEST(test_without_the_state_manager_an_unstalled_port_sends_the_stale_frame_late);
     RUN_TEST(test_a_frame_that_is_sent_within_n_as_is_not_aborted);
     RUN_TEST(test_bus_off_aborts_the_pending_tx_and_recovery_does_not_deliver_it);
+    RUN_TEST(test_a_dedicated_frame_nobody_replaces_is_aborted_by_n_as);
+    RUN_TEST(test_a_dedicated_frame_written_every_cycle_is_replaced_without_aborts);
+    RUN_TEST(test_a_bus_off_drops_a_pending_dedicated_frame_for_good);
+    RUN_TEST(test_a_replace_that_comes_too_late_lets_the_old_frame_out_once);
     RUN_TEST(test_a_port_whose_state_cannot_be_read_refuses_tx_and_drops_its_pending_frames);
     RUN_TEST(test_the_platform_filters_take_a_full_receiver_table);
     RUN_TEST(test_unbound_ports_and_unknown_port_ids_are_safe);

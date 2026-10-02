@@ -978,7 +978,8 @@ static void test_a_stalled_multi_frame_answer_is_aborted_after_n_as_and_never_go
         can_sm_step(CAN_PORT_PLATFORM);
         tick();
     }
-    TEST_ASSERT_EQUAL_UINT32(VBUS_TX_DEPTH, bus_platform.nodes[node_dut].tx_pending_count);
+    /* one Tx FIFO element pending at a time on FDCAN2 (M_CAN erratum, hal/README.md) */
+    TEST_ASSERT_EQUAL_UINT32(1u, bus_platform.nodes[node_dut].tx_pending_count);
     /* the cut answer would end the tester's reception with N_Cr, which this harness treats
      * as a failure; the tester's side is not under test, so it starts over */
     tester_init();

@@ -25,6 +25,15 @@
  * are refused (CAN_IF_ERR_SEALED), so the receiver table and the hardware filters never
  * differ.
  *
+ * Dedicated TX buffers (D-054 item 6, D-056): a feature that sends a platform safety-
+ * range or heartbeat frame registers its ID at boot with can_if_register_tx_dedicated();
+ * can_if_apply_filters() hands the list to the port with the filters. Such a frame gets
+ * its own replace-on-new buffer (hal/can_port.h): can_if_write() of that ID returns
+ * CAN_PORT_TX_FULL while the previous one is still unsent (it is cancelled; write again
+ * in a later pass), and does not depend on can_if_tx_free(), which describes the Tx
+ * FIFO. can_if_write() itself is unchanged: the vehicle-bus guard and the port state
+ * come first, and the port routes by ID. The vehicle port has no dedicated list.
+ *
  * Static table of CAN_IF_MAX_RECEIVERS entries, no heap. A frame with no receiver is
  * counted and dropped. Main loop only (not ISR-safe).
  */
@@ -41,6 +50,9 @@ extern "C" {
 /* Vehicle: link RX + 2 physical + 2 functional request-ID watches (D-039, D-040);
  * platform: UDS server physical + functional; room for the SIL tester and growth. */
 #define CAN_IF_MAX_RECEIVERS 12u
+
+/* Dedicated TX IDs on the platform port: 0x020-0x022 and 0x081-0x085 at most (D-056). */
+#define CAN_IF_MAX_TX_DEDICATED CAN_PORT_MAX_TX_DEDICATED
 
 typedef void (*can_if_rx_fn)(void* ctx, const can_frame_t* frame);
 
@@ -59,6 +71,12 @@ void can_if_init(void);
 can_if_status_t can_if_register_rx(can_port_id_t port, uint32_t id, bool extended,
                                    can_if_rx_fn fn, void* ctx);
 
+/* Gives (id, extended) a dedicated replace-on-new TX buffer on the port (boot only).
+ * CAN_IF_ERR_ARG: not CAN_PORT_PLATFORM (the vehicle tester's single TX buffer is fixed,
+ * D-021) or an invalid ID; CAN_IF_ERR_SEALED after can_if_apply_filters(port);
+ * CAN_IF_ERR_DUP if already listed; CAN_IF_ERR_FULL past CAN_IF_MAX_TX_DEDICATED. */
+can_if_status_t can_if_register_tx_dedicated(can_port_id_t port, uint32_t id, bool extended);
+
 /* Reads up to max_frames frames from the port and dispatches them. Returns the count read. */
 uint32_t can_if_dispatch(can_port_id_t port, uint32_t max_frames);
 
@@ -76,8 +94,9 @@ uint32_t can_if_tx_abort_count(can_port_id_t port);
 /* Writes refused because the port was bus-off or latched (diagnostics). */
 uint32_t can_if_tx_blocked_count(can_port_id_t port);
 
-/* Sets the port's acceptance filters to the registered receivers of that port and seals
- * it. On CAN_PORT_PLATFORM the gen/ platform UDS IDs (diagnostics, 0x7xx) go to FIFO1,
+/* Hands the port its dedicated TX list (can_port_set_tx_dedicated(), empty on the vehicle
+ * port), then sets its acceptance filters to the registered receivers of that port, and
+ * seals it once both were accepted. On CAN_PORT_PLATFORM the gen/ platform UDS IDs (diagnostics, 0x7xx) go to FIFO1,
  * every other ID to FIFO0. Returns the port's status (CAN_PORT_ERR_ARG for an unknown
  * port). The receiver table always fits the filters (static assertion). */
 can_port_status_t can_if_apply_filters(can_port_id_t port);
