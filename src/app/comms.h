@@ -5,18 +5,23 @@
  * The comms pass (Ç1, ISSUES D-2): the fixed order of rt-core's CAN work, shared by the
  * host program and the H7 comms task (one task runs both UDS roles):
  *   can_sm_step(VEHICLE)  -> can_if_dispatch(VEHICLE)  -> uds_client_step()
- *   can_sm_step(PLATFORM) -> can_if_dispatch(PLATFORM) -> uds_server_step()
+ *   can_sm_step(PLATFORM) -> can_if_dispatch(PLATFORM) -> vehicle_republish_step()
+ *                                                      -> uds_server_step()
  * The client steps before the server: the server reports what the client wrote in the
  * same pass (services/diag, vehicle_signals), and the vehicle tester's step period
  * (D-053, VEHICLE_CL250_CLIENT_STEP_MAX_MS) never waits for a platform-bus answer.
  * Each port's state manager runs before its dispatch, so a bus-off or an N_As abort is
- * seen by the links in the same pass.
+ * seen by the links in the same pass. The republisher (D-056 item 4) sends the samples
+ * the client wrote in this pass, sees the platform port's current state, and its E2E
+ * frame never waits behind server work. The pass period therefore bounds 0x021's
+ * freshness: the 20 ms EKF work (0x020) must not join this task (CLAUDE.md rule 4).
  *
  * Portable: services and feature headers only, never hal/.
  */
 
 #include "features/uds/uds_client.h"
 #include "features/uds/uds_server.h"
+#include "features/vehicle_republish/vehicle_republish.h"
 
 #include <stdint.h>
 
@@ -27,11 +32,12 @@ extern "C" {
 /* Frames dispatched per port and pass at most (bounds the pass). */
 #define COMMS_RX_PER_PASS 32u
 
-/* Applies the acceptance filters of both ports (services/can_if) after the client and
- * the server opened. False if a port refused them. */
+/* Applies the acceptance filters (and the platform port's dedicated TX buffers) of both
+ * ports (services/can_if) after the client, the server and the republisher opened.
+ * False if a port refused them. */
 bool comms_apply_filters(void);
 
-void comms_pass(uds_client_t* client, uds_server_t* server);
+void comms_pass(uds_client_t* client, uds_server_t* server, vehicle_republish_t* republisher);
 
 #ifdef __cplusplus
 }

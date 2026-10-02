@@ -4,21 +4,27 @@ add_library(moto_rtcore_logic STATIC
     features/uds/isotp_core.c
     features/uds/uds_client_core.c
     features/uds/uds_server_core.c
+    features/vehicle_republish/vehicle_republish_core.c
     hal/can_frame.c
     services/can_sm_core.c
 )
 target_include_directories(moto_rtcore_logic PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
-# The UDS client and server cores use the generated tables, gates and timings (pure C).
+# The UDS cores and the republisher core use the generated tables, gates, timings,
+# platform pack functions and E2E (pure C).
 target_link_libraries(moto_rtcore_logic PUBLIC moto_defs_gen)
 target_compile_options(moto_rtcore_logic PRIVATE ${MOTO_WARNINGS})
 
-# Generated moto-vehicle-defs code for this node (D-003): the CL250 DID table and the
-# D-020 request/frame gates. Built with its own flags (generated code).
+# Generated moto-vehicle-defs code for this node (D-003): the CL250 DID table, the
+# D-020 request/frame gates, the platform UDS tables, and the platform.dbc pack/encode
+# functions with the E2E protection (D-005, D-026). Built with its own flags.
 add_library(moto_defs_gen STATIC
     ${MOTO_DEFS_GEN}/vehicle_cl250.c
     ${MOTO_DEFS_GEN}/platform_uds.c
+    ${MOTO_DEFS_GEN}/platform.c
+    ${MOTO_DEFS_GEN}/platform_e2e.c
+    ${MOTO_DEFS_GEN}/moto_e2e.c
 )
 target_include_directories(moto_defs_gen PUBLIC ${MOTO_DEFS_GEN})
 
@@ -34,6 +40,7 @@ add_library(moto_rtcore_fw STATIC
     features/uds/isotp_link.c
     features/uds/uds_client.c
     features/uds/uds_server.c
+    features/vehicle_republish/vehicle_republish.c
     app/comms.c
 )
 target_link_libraries(moto_rtcore_fw PUBLIC moto_rtcore_logic moto_defs_gen)
@@ -55,6 +62,7 @@ if(NOT CMAKE_CROSSCOMPILING)
     add_library(moto_rtcore_sim STATIC
         app/host/sim_ecu.c
         app/host/sim_tester.c
+        app/host/sim_listener.c
     )
     target_link_libraries(moto_rtcore_sim PUBLIC moto_rtcore_hal_host moto_defs_gen)
     target_compile_options(moto_rtcore_sim PRIVATE ${MOTO_WARNINGS})

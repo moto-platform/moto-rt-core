@@ -382,12 +382,12 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
   - If the server ran first and more than `PLATFORM_UDS_VEHICLE_TESTER_STATUS_MAX_AGE_MS` passed between `diag_init()` and the first pass, U3000-00 would be confirmed at every boot.
   - That error is in the fail-safe direction, but it is a false fault.
 - **Ç1 requirement, one comms task** (safety review MINOR-3; `src/app/comms.c` `comms_pass()` fixes the order for the host and the H7 task):
-  - `can_if`, `services/diag`, `services/vehicle_signals`, `uds_client` and `uds_server` run in the same FreeRTOS task.
+  - `can_if`, `services/diag`, `services/vehicle_signals`, `uds_client`, `uds_server` and `vehicle_republish` (D-056) run in the same FreeRTOS task.
   - Every `can_if_register_rx()` happens before the scheduler starts.
   - If this is ever split, those services need a critical section or a snapshot. Otherwise the 0xFD00 status, a sample, or the one-pass 0x14 window can tear.
-- **Ç1 requirement, FDCAN2 queueing** (safety review MINOR-4):
-  - One pass can queue up to 9 server frames (First Frame + 8 CF at STmin 0), about 2.5 ms at 500 kbit/s. That is well inside the 3 × 20 ms E2E timeout, but it is a priority inversion.
-  - FDCAN2 TX must use the Tx-Queue (priority) mode, or keep dedicated TX buffers for the safety range 0x010-0x08F.
+- **Ç1 requirement, FDCAN2 queueing** (safety review MINOR-4; done in D-054 item 6 and D-056):
+  - The safety range and the heartbeats have dedicated replace-on-new TX buffers (`can_if_register_tx_dedicated()`), so server frames never delay an E2E frame.
+  - The Tx FIFO requests one element at a time (M_CAN erratum "Tx FIFO message sequence inversion", `src/hal/README.md`): `can_if_tx_free()` turns false while a server frame is pending, so the server sends one frame per comms pass (a 4-frame 0xFD02 answer takes about 4 ms, far inside P2).
   - The RX filters must route 0x700-0x7FF to FIFO1 and the safety range and heartbeats to FIFO0.
   - The FDCAN2 filters must pass 0x710 and 0x7DF.
 

@@ -17,6 +17,7 @@
 #include "features/uds/uds_server.h"
 #include "hal/host/can_port_host.h"
 #include "hal/host/hal_time_host.h"
+#include "platform.h"
 #include "platform_uds.h"
 #include "services/can_if.h"
 #include "services/can_sm.h"
@@ -694,6 +695,7 @@ static void test_apply_filters_on_an_unbound_or_unknown_port_reports_it_and_does
 
 static uds_client_t client;
 static uds_server_t server;
+static vehicle_republish_t republisher;
 static sim_ecu_t ecu;
 
 static void test_comms_applies_the_filters_and_the_sil_exchange_still_works(void)
@@ -706,6 +708,7 @@ static void test_comms_applies_the_filters_and_the_sil_exchange_still_works(void
     memset(&server, 0, sizeof server);
     TEST_ASSERT_EQUAL(ISOTP_OK, uds_client_open(&client));
     TEST_ASSERT_EQUAL(ISOTP_OK, uds_server_open(&server));
+    TEST_ASSERT_TRUE(vehicle_republish_open(&republisher));
     TEST_ASSERT_TRUE(comms_apply_filters());
     TEST_ASSERT_TRUE(bus_v.nodes[node_vehicle].filtered);
     TEST_ASSERT_TRUE(bus_p.nodes[node_platform].filtered);
@@ -733,11 +736,15 @@ static void test_comms_applies_the_filters_and_the_sil_exchange_still_works(void
     TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_send(&bus_p, node_ppeer, &req));
 
     bool answered = false;
+    uint32_t speed_frames = 0u;
+    uint32_t engine_frames = 0u;
     for (uint32_t i = 0u; i < 300u; i++) {
         sim_ecu_step(&ecu, timebase_now_ms());
-        comms_pass(&client, &server);
+        comms_pass(&client, &server, &republisher);
         can_frame_t got;
         while (vbus_recv(&bus_p, node_ppeer, &got) == CAN_PORT_OK) {
+            speed_frames += (got.id == PLATFORM_VEHICLE_SPEED_FRAME_ID) ? 1u : 0u;
+            engine_frames += (got.id == PLATFORM_VEHICLE_ENGINE_FRAME_ID) ? 1u : 0u;
             if ((got.id == PLATFORM_UDS_PHYS_RESPONSE_ID) &&
                 (got.data[1] == (uint8_t)(UDS_SID_TESTER_PRESENT + UDS_POSITIVE_RESPONSE_OFFSET))) {
                 answered = true;
@@ -746,6 +753,9 @@ static void test_comms_applies_the_filters_and_the_sil_exchange_still_works(void
         hal_time_host_advance(1u);
     }
     TEST_ASSERT_TRUE(answered);
+    /* the republisher's frames share the pass: 300 ms at the gen/ cycle times */
+    TEST_ASSERT_EQUAL_UINT32(300u / PLATFORM_VEHICLE_SPEED_CYCLE_TIME_MS, speed_frames);
+    TEST_ASSERT_EQUAL_UINT32(300u / PLATFORM_VEHICLE_ENGINE_CYCLE_TIME_MS, engine_frames);
     TEST_ASSERT_GREATER_THAN_UINT32(0u, uds_client_stats(&client)->reads_ok);
     TEST_ASSERT_TRUE(uds_client_session_up(&client));
     TEST_ASSERT_FALSE(uds_client_failed(&client));
