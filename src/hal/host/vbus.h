@@ -19,6 +19,12 @@
  *  - Error counters (TEC/REC) as the controller would report them.
  *  - Acceptance filters (can_port_set_filters()): exact (ID, format) matches; the FIFO
  *    is ignored (one RX queue).
+ *  - Dedicated TX buffers (can_port_set_tx_dedicated(), D-056): one replace-on-new slot
+ *    per listed ID beside the TX queue. A write to a slot that still holds an unsent
+ *    frame drops that frame (the cancellation completes at once here; with
+ *    vbus_set_tx_cancel_late() the frame goes out instead) and returns
+ *    CAN_PORT_TX_FULL; the next write is accepted. When a stall ends, the slots and the
+ *    queue head go out by ID arbitration (lowest first), the queue in its own order.
  */
 
 #include "hal/can_port.h"
@@ -33,6 +39,7 @@ extern "C" {
 #define VBUS_MAX_NODES 6u
 #define VBUS_RX_DEPTH 64u /* frames queued per node until it reads them */
 #define VBUS_TX_DEPTH 3u  /* TX buffers per node (like a bxCAN/FDCAN TX queue) */
+#define VBUS_TX_DEDICATED CAN_PORT_MAX_TX_DEDICATED /* replace-on-new slots per node */
 
 typedef struct {
     can_frame_t queue[VBUS_RX_DEPTH];
@@ -41,6 +48,12 @@ typedef struct {
     uint32_t overruns;
     can_frame_t tx_pending[VBUS_TX_DEPTH];
     uint32_t tx_pending_count;
+    can_port_tx_id_t tx_ded_ids[VBUS_TX_DEDICATED];
+    can_frame_t tx_ded_frames[VBUS_TX_DEDICATED];
+    bool tx_ded_pending[VBUS_TX_DEDICATED];
+    uint32_t tx_ded_count;
+    uint32_t tx_replaced; /* unsent dedicated frames dropped by a newer write */
+    bool tx_cancel_late;  /* the next replace finds its frame already in arbitration */
     uint32_t tx_done;
     uint32_t bus_off_events;
     uint32_t recover_count;
@@ -74,7 +87,7 @@ void vbus_set_tx_blocked(vbus_t* bus, uint8_t node, bool blocked);
 /* TX stall on: accepted frames wait in the TX buffers. Off: they are sent now, in order. */
 void vbus_set_tx_stalled(vbus_t* bus, uint8_t node, bool stalled);
 
-/* Drops the node's pending TX frames (can_port_tx_abort()). */
+/* Drops the node's pending TX frames, dedicated slots included (can_port_tx_abort()). */
 void vbus_tx_abort(vbus_t* bus, uint8_t node);
 
 /* Bus-off on (counted once per entry) or off. */
@@ -93,6 +106,26 @@ void vbus_set_error_counters(vbus_t* bus, uint8_t node, uint8_t tec, uint8_t rec
 /* CAN_PORT_ERR_ARG for count > CAN_PORT_MAX_FILTERS or a NULL list with count > 0. */
 can_port_status_t vbus_set_filters(vbus_t* bus, uint8_t node, const can_port_filter_t* filters,
                                    uint32_t count);
+
+/* Replaces the node's dedicated TX slots (can_port_set_tx_dedicated()); drops their
+ * pending frames. CAN_PORT_ERR_ARG for count > VBUS_TX_DEDICATED, a NULL list with
+ * count > 0, an invalid ID or a duplicate. */
+can_port_status_t vbus_set_tx_dedicated(vbus_t* bus, uint8_t node, const can_port_tx_id_t* ids,
+                                        uint32_t count);
+
+/* Frames waiting in the TX queue (dedicated slots not included). */
+uint32_t vbus_tx_queue_pending(const vbus_t* bus, uint8_t node);
+
+/* True if the frame's (ID, format) has a dedicated slot on the node. */
+bool vbus_tx_is_dedicated(const vbus_t* bus, uint8_t node, const can_frame_t* frame);
+
+/* Test hook: the next replace request comes too late, as on FDCAN when the old frame is
+ * already in arbitration and wins: the old frame goes out instead of being cancelled
+ * (counted in tx_done, not in tx_replaced) and the write still returns CAN_PORT_TX_FULL. */
+void vbus_set_tx_cancel_late(vbus_t* bus, uint8_t node, bool late);
+
+/* Dedicated frames dropped unsent by a newer write of their ID (test hook). */
+uint32_t vbus_tx_replaced(const vbus_t* bus, uint8_t node);
 
 /* The node's controller state, as can_port_get_state() reports it. */
 can_port_status_t vbus_state(const vbus_t* bus, uint8_t node, can_port_state_t* state);

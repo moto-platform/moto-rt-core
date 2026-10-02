@@ -190,6 +190,12 @@ can_port_status_t can_port_write(can_port_id_t port, const can_frame_t* frame)
     }
     switch (b->backend) {
     case BACKEND_VBUS:
+        /* FDCAN2 keeps one Tx FIFO element pending at a time (M_CAN erratum "Tx FIFO
+         * message sequence inversion", hal/README.md); the dedicated buffers do not wait. */
+        if ((port == CAN_PORT_PLATFORM) && !vbus_tx_is_dedicated(b->bus, b->node, frame) &&
+            (vbus_tx_queue_pending(b->bus, b->node) > 0u)) {
+            return CAN_PORT_TX_FULL;
+        }
         return vbus_send(b->bus, b->node, frame);
 #if HAVE_SOCKETCAN
     case BACKEND_SOCKETCAN: {
@@ -213,11 +219,13 @@ bool can_port_tx_free(can_port_id_t port)
     }
     switch (b->backend) {
     case BACKEND_VBUS: {
-        /* The H7 vehicle port has one TX buffer (hal/can_port.h): free only when empty. */
+        /* The H7 vehicle port has one TX buffer (hal/can_port.h): free only when empty.
+         * The platform port's Tx FIFO holds one pending element at a time (erratum). */
         can_port_state_t st;
-        const bool empty = (port != CAN_PORT_VEHICLE) ||
-                           ((vbus_state(b->bus, b->node, &st) == CAN_PORT_OK) &&
-                            (st.tx_pending == 0u));
+        const bool empty = (port == CAN_PORT_VEHICLE)
+                               ? ((vbus_state(b->bus, b->node, &st) == CAN_PORT_OK) &&
+                                  (st.tx_pending == 0u))
+                               : (vbus_tx_queue_pending(b->bus, b->node) == 0u);
         return empty && vbus_tx_free(b->bus, b->node);
     }
 #if HAVE_SOCKETCAN
@@ -324,6 +332,36 @@ can_port_status_t can_port_set_filters(can_port_id_t port, const can_port_filter
 #if HAVE_SOCKETCAN
     case BACKEND_SOCKETCAN:
         return socketcan_set_filters(b->fd, filters, count);
+#endif
+    default:
+        return CAN_PORT_ERR_CLOSED;
+    }
+}
+
+can_port_status_t can_port_set_tx_dedicated(can_port_id_t port, const can_port_tx_id_t* ids,
+                                            uint32_t count)
+{
+    const port_binding_t* b = binding_of(port);
+    if ((b == NULL) || (count > CAN_PORT_MAX_TX_DEDICATED) || ((ids == NULL) && (count > 0u)) ||
+        ((port == CAN_PORT_VEHICLE) && (count > 0u))) {
+        return CAN_PORT_ERR_ARG; /* the tester's single TX buffer is fixed (D-021) */
+    }
+    for (uint32_t i = 0u; i < count; i++) { /* the same checks on every backend */
+        if (!can_id_valid(ids[i].id, ids[i].extended)) {
+            return CAN_PORT_ERR_ARG;
+        }
+        for (uint32_t j = 0u; j < i; j++) {
+            if ((ids[j].id == ids[i].id) && (ids[j].extended == ids[i].extended)) {
+                return CAN_PORT_ERR_ARG;
+            }
+        }
+    }
+    switch (b->backend) {
+    case BACKEND_VBUS:
+        return vbus_set_tx_dedicated(b->bus, b->node, ids, count);
+#if HAVE_SOCKETCAN
+    case BACKEND_SOCKETCAN:
+        return CAN_PORT_OK; /* no dedicated buffers on a raw socket (development path) */
 #endif
     default:
         return CAN_PORT_ERR_CLOSED;

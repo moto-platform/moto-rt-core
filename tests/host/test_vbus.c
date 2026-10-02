@@ -461,6 +461,138 @@ static void test_vbus_state_reports_every_field(void)
     TEST_ASSERT_EQUAL(CAN_PORT_ERR_ARG, vbus_state(NULL, a, &st));
 }
 
+/* Dedicated replace-on-new TX slots (D-056). Test-only IDs. */
+static void test_set_tx_dedicated_checks_its_arguments(void)
+{
+    uint8_t a;
+    TEST_ASSERT_TRUE(vbus_attach(&bus, &a));
+    can_port_tx_id_t ids[VBUS_TX_DEDICATED + 1u];
+    for (uint32_t i = 0u; i <= VBUS_TX_DEDICATED; i++) {
+        ids[i].id = 0x040u + i;
+        ids[i].extended = false;
+    }
+    TEST_ASSERT_EQUAL(CAN_PORT_ERR_ARG, vbus_set_tx_dedicated(&bus, a, ids, VBUS_TX_DEDICATED + 1u));
+    TEST_ASSERT_EQUAL(CAN_PORT_ERR_ARG, vbus_set_tx_dedicated(&bus, a, NULL, 1u));
+    TEST_ASSERT_EQUAL(CAN_PORT_ERR_ARG, vbus_set_tx_dedicated(&bus, (uint8_t)(a + 1u), ids, 1u));
+    ids[1].id = 0x800u; /* not an 11-bit ID */
+    TEST_ASSERT_EQUAL(CAN_PORT_ERR_ARG, vbus_set_tx_dedicated(&bus, a, ids, 2u));
+    ids[1].id = 0x040u; /* duplicate of ids[0] */
+    TEST_ASSERT_EQUAL(CAN_PORT_ERR_ARG, vbus_set_tx_dedicated(&bus, a, ids, 2u));
+    ids[1].extended = true; /* same number, other format: a different ID */
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_set_tx_dedicated(&bus, a, ids, 2u));
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_set_tx_dedicated(&bus, a, NULL, 0u));
+    TEST_ASSERT_EQUAL_UINT32(0u, vbus_tx_replaced(NULL, a));
+}
+
+static void test_a_dedicated_frame_is_replaced_never_queued_behind_the_old_one(void)
+{
+    uint8_t a, b;
+    TEST_ASSERT_TRUE(vbus_attach(&bus, &a));
+    TEST_ASSERT_TRUE(vbus_attach(&bus, &b));
+    const can_port_tx_id_t ded = {0x040u, false};
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_set_tx_dedicated(&bus, a, &ded, 1u));
+    can_frame_t got;
+
+    /* free bus: out at once */
+    const can_frame_t f0 = frame(0x040u, false, 8u, 0x00u);
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_send(&bus, a, &f0));
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_recv(&bus, b, &got));
+
+    /* stalled, the queue full: the slot is independent of the queue */
+    vbus_set_tx_stalled(&bus, a, true);
+    for (uint8_t i = 0u; i < VBUS_TX_DEPTH; i++) {
+        const can_frame_t q = frame(0x100u, false, 1u, i);
+        TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_send(&bus, a, &q));
+    }
+    TEST_ASSERT_FALSE(vbus_tx_free(&bus, a));
+    const can_frame_t f1 = frame(0x040u, false, 8u, 0x10u);
+    const can_frame_t f2 = frame(0x040u, false, 8u, 0x20u);
+    const can_frame_t f3 = frame(0x040u, false, 8u, 0x30u);
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_send(&bus, a, &f1));
+    can_port_state_t st;
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_state(&bus, a, &st));
+    TEST_ASSERT_EQUAL_UINT32(VBUS_TX_DEPTH + 1u, st.tx_pending);
+
+    /* replace: the unsent f1 is cancelled, f2 refused; the next write is accepted */
+    TEST_ASSERT_EQUAL(CAN_PORT_TX_FULL, vbus_send(&bus, a, &f2));
+    TEST_ASSERT_EQUAL_UINT32(1u, vbus_tx_replaced(&bus, a));
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_state(&bus, a, &st));
+    TEST_ASSERT_EQUAL_UINT32(VBUS_TX_DEPTH, st.tx_pending);
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_send(&bus, a, &f3));
+
+    /* the stall ends: only the newest dedicated frame goes out, before the queue (lower ID) */
+    const uint32_t done = st.tx_done;
+    vbus_set_tx_stalled(&bus, a, false);
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_recv(&bus, b, &got));
+    TEST_ASSERT_EQUAL_MEMORY(&f3, &got, sizeof f3);
+    for (uint8_t i = 0u; i < VBUS_TX_DEPTH; i++) {
+        TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_recv(&bus, b, &got));
+        TEST_ASSERT_EQUAL_UINT32(0x100u, got.id);
+        TEST_ASSERT_EQUAL_UINT8(i, got.data[0]);
+    }
+    TEST_ASSERT_EQUAL(CAN_PORT_EMPTY, vbus_recv(&bus, b, &got));
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_state(&bus, a, &st));
+    TEST_ASSERT_EQUAL_UINT32(done + VBUS_TX_DEPTH + 1u, st.tx_done); /* a replace is not a TX */
+    TEST_ASSERT_EQUAL_UINT32(0u, st.tx_pending);
+}
+
+static void test_pending_frames_leave_by_arbitration_and_the_queue_keeps_its_order(void)
+{
+    uint8_t a, b;
+    TEST_ASSERT_TRUE(vbus_attach(&bus, &a));
+    TEST_ASSERT_TRUE(vbus_attach(&bus, &b));
+    const can_port_tx_id_t ded[4] = {
+        {0x050u, false}, {0x040u, false}, {(0x03Fu << 18) | 0x1u, true}, {(0x040u << 18), true}};
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_set_tx_dedicated(&bus, a, ded, 4u));
+    vbus_set_tx_stalled(&bus, a, true);
+    const can_frame_t q0 = frame(0x060u, false, 1u, 0u);
+    const can_frame_t q1 = frame(0x010u, false, 1u, 1u); /* lower ID, but behind q0 in the queue */
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_send(&bus, a, &q0));
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_send(&bus, a, &q1));
+    for (uint32_t i = 0u; i < 4u; i++) {
+        const can_frame_t d = frame(ded[i].id, ded[i].extended, 1u, (uint8_t)(0x80u + i));
+        TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_send(&bus, a, &d));
+    }
+    vbus_set_tx_stalled(&bus, a, false);
+    /* base 0x03F (29-bit) < 0x040 (11-bit) < 0x040 base (29-bit, IDE recessive) < 0x050
+     * < queue head 0x060, then the queue in order */
+    const uint32_t expected[6] = {ded[2].id, 0x040u, ded[3].id, 0x050u, 0x060u, 0x010u};
+    for (uint32_t i = 0u; i < 6u; i++) {
+        can_frame_t got;
+        TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_recv(&bus, b, &got));
+        TEST_ASSERT_EQUAL_HEX32(expected[i], got.id);
+    }
+}
+
+static void test_abort_and_bus_off_cover_the_dedicated_slots(void)
+{
+    uint8_t a, b;
+    TEST_ASSERT_TRUE(vbus_attach(&bus, &a));
+    TEST_ASSERT_TRUE(vbus_attach(&bus, &b));
+    const can_port_tx_id_t ded = {0x040u, false};
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_set_tx_dedicated(&bus, a, &ded, 1u));
+    const can_frame_t d = frame(0x040u, false, 8u, 0x10u);
+    vbus_set_tx_stalled(&bus, a, true);
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_send(&bus, a, &d));
+    vbus_tx_abort(&bus, a);
+    can_port_state_t st;
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_state(&bus, a, &st));
+    TEST_ASSERT_EQUAL_UINT32(0u, st.tx_pending);
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_send(&bus, a, &d)); /* the slot is free again */
+    TEST_ASSERT_EQUAL_UINT32(0u, vbus_tx_replaced(&bus, a));
+    /* reconfiguring drops the pending frame too */
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_set_tx_dedicated(&bus, a, &ded, 1u));
+    vbus_set_tx_stalled(&bus, a, false);
+    can_frame_t got;
+    TEST_ASSERT_EQUAL(CAN_PORT_EMPTY, vbus_recv(&bus, b, &got));
+
+    vbus_set_tx_blocked(&bus, a, true);
+    TEST_ASSERT_EQUAL(CAN_PORT_TX_FULL, vbus_send(&bus, a, &d));
+    vbus_set_tx_blocked(&bus, a, false);
+    vbus_set_bus_off(&bus, a, true);
+    TEST_ASSERT_EQUAL(CAN_PORT_ERR_IO, vbus_send(&bus, a, &d));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -481,5 +613,9 @@ int main(void)
     RUN_TEST(test_set_filters_checks_its_arguments_and_keeps_the_old_filters_on_error);
     RUN_TEST(test_a_filtered_node_receives_only_the_matching_id_and_format);
     RUN_TEST(test_vbus_state_reports_every_field);
+    RUN_TEST(test_set_tx_dedicated_checks_its_arguments);
+    RUN_TEST(test_a_dedicated_frame_is_replaced_never_queued_behind_the_old_one);
+    RUN_TEST(test_pending_frames_leave_by_arbitration_and_the_queue_keeps_its_order);
+    RUN_TEST(test_abort_and_bus_off_cover_the_dedicated_slots);
     return UNITY_END();
 }

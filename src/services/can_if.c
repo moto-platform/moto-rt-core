@@ -25,6 +25,8 @@ static uint32_t unrouted[CAN_PORT_COUNT];
 static uint32_t tx_refused[CAN_PORT_COUNT];
 static uint32_t tx_blocked[CAN_PORT_COUNT];
 static bool sealed[CAN_PORT_COUNT];
+static can_port_tx_id_t tx_dedicated[CAN_IF_MAX_TX_DEDICATED]; /* CAN_PORT_PLATFORM only */
+static uint32_t tx_dedicated_count;
 
 static void inc_saturated(uint32_t* counter)
 {
@@ -62,6 +64,7 @@ void can_if_init(void)
         tx_blocked[p] = 0u;
         sealed[p] = false;
     }
+    tx_dedicated_count = 0u;
     can_sm_init();
 }
 
@@ -90,6 +93,28 @@ can_if_status_t can_if_register_rx(can_port_id_t port, uint32_t id, bool extende
         }
     }
     return CAN_IF_ERR_FULL;
+}
+
+can_if_status_t can_if_register_tx_dedicated(can_port_id_t port, uint32_t id, bool extended)
+{
+    if ((port != CAN_PORT_PLATFORM) || !can_id_valid(id, extended)) {
+        return CAN_IF_ERR_ARG;
+    }
+    if (sealed[port]) {
+        return CAN_IF_ERR_SEALED; /* the port's TX buffers are configured */
+    }
+    for (uint32_t i = 0u; i < tx_dedicated_count; i++) {
+        if ((tx_dedicated[i].id == id) && (tx_dedicated[i].extended == extended)) {
+            return CAN_IF_ERR_DUP;
+        }
+    }
+    if (tx_dedicated_count >= CAN_IF_MAX_TX_DEDICATED) {
+        return CAN_IF_ERR_FULL;
+    }
+    tx_dedicated[tx_dedicated_count].id = id;
+    tx_dedicated[tx_dedicated_count].extended = extended;
+    tx_dedicated_count++;
+    return CAN_IF_OK;
 }
 
 uint32_t can_if_dispatch(can_port_id_t port, uint32_t max_frames)
@@ -184,6 +209,11 @@ can_port_status_t can_if_apply_filters(can_port_id_t port)
 {
     if (!port_ok(port)) {
         return CAN_PORT_ERR_ARG;
+    }
+    const uint32_t dedicated = (port == CAN_PORT_PLATFORM) ? tx_dedicated_count : 0u;
+    const can_port_status_t tx_st = can_port_set_tx_dedicated(port, tx_dedicated, dedicated);
+    if (tx_st != CAN_PORT_OK) {
+        return tx_st;
     }
     can_port_filter_t filters[CAN_PORT_MAX_FILTERS];
     uint32_t n = 0u;

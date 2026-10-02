@@ -75,6 +75,17 @@ typedef struct {
  * The FDCAN message RAM holds up to 128 standard + 64 extended filter elements. */
 #define CAN_PORT_MAX_FILTERS 16u
 
+/* One TX identifier with a dedicated, replace-on-new TX buffer (hal/can_port.h
+ * can_port_set_tx_dedicated()). */
+typedef struct {
+    uint32_t id;
+    bool extended;
+} can_port_tx_id_t;
+
+/* Dedicated TX buffers per port: the platform safety range (0x010-0x07F) and the
+ * heartbeats that rt-core sends (D-054 item 6, D-056). FDCAN: TXBC.NDTB of the port. */
+#define CAN_PORT_MAX_TX_DEDICATED 8u
+
 /* True if the ID fits its format (11-bit or 29-bit). */
 bool can_id_valid(uint32_t id, bool extended);
 
