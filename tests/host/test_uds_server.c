@@ -1346,6 +1346,37 @@ static void test_error_passive_and_bus_off_ports_are_reported_and_the_platform_s
     TEST_ASSERT_EQUAL_HEX8(0u, bus_off_latched_status() & UDS_DTC_STATUS_TEST_FAILED);
 }
 
+static void test_port_counters_above_0xffff_read_0xffff_and_the_burst_latches_the_vehicle(void)
+{
+    sm_on = true;
+    pump(2u);
+    vbus_add_bus_off_events(&bus_vehicle, node_vehicle, 0x10000u + 7u);
+    vbus_add_bus_off_events(&bus_platform, node_dut, UINT32_MAX);
+    pump(2u);
+    TEST_ASSERT_GREATER_THAN_UINT32(0xFFFFu, can_sm_stats(CAN_PORT_VEHICLE)->bus_off_events);
+    TEST_ASSERT_GREATER_THAN_UINT32(0xFFFFu, can_sm_stats(CAN_PORT_PLATFORM)->bus_off_events);
+    read_health();
+    TEST_ASSERT_EQUAL_UINT16(0xFFFFu, be16_at(H(VEHICLE_BUS_OFFS)));  /* clamped, not 0x0007 */
+    TEST_ASSERT_EQUAL_UINT16(0xFFFFu, be16_at(H(PLATFORM_BUS_OFFS))); /* not 0xFFFF by wrap */
+    TEST_ASSERT_EQUAL_HEX8(PLATFORM_UDS_RT_CORE_HEALTH_VEHICLE_STATE_LATCHED, got[H(VEHICLE_STATE)]);
+    TEST_ASSERT_EQUAL_HEX8(LATCH_BIT, (uint8_t)(got[H(VEHICLE_LATCHED)] & LATCH_BIT));
+    TEST_ASSERT_NOT_EQUAL(PLATFORM_UDS_RT_CORE_HEALTH_PLATFORM_STATE_LATCHED, got[H(PLATFORM_STATE)]);
+}
+
+static void test_a_latched_client_still_writes_fresh_step_counters(void)
+{
+    sm_on = true;
+    start_client();
+    pump(600u);
+    inject_vehicle_frame(vehicle_cl250_functional_watch[0].id,
+                         vehicle_cl250_functional_watch[0].extended);
+    pump(PLATFORM_UDS_RT_CORE_HEALTH_MAX_AGE_MS + 100u);
+    TEST_ASSERT_EQUAL(UDS_CLIENT_FAULT_FOREIGN_TESTER, uds_client_fault(&client));
+    read_health();
+    TEST_ASSERT_EQUAL_HEX8(FRESH_BIT, (uint8_t)(got[H(STEP_STATS_FRESH)] & FRESH_BIT));
+    TEST_ASSERT_EQUAL_HEX8(0u, (uint8_t)(got[H(VEHICLE_LATCHED)] & LATCH_BIT)); /* client, not port */
+}
+
 static void test_four_health_reads_make_the_longest_segmented_answer(void)
 {
     sm_on = true;
@@ -1375,6 +1406,8 @@ int main(void)
     RUN_TEST(test_a_latched_vehicle_port_shows_in_the_did_and_the_dtc_and_survives_a_clear);
     RUN_TEST(test_an_unreadable_vehicle_controller_reads_unknown_and_leaves_the_dtc_alone);
     RUN_TEST(test_error_passive_and_bus_off_ports_are_reported_and_the_platform_still_answers);
+    RUN_TEST(test_port_counters_above_0xffff_read_0xffff_and_the_burst_latches_the_vehicle);
+    RUN_TEST(test_a_latched_client_still_writes_fresh_step_counters);
     RUN_TEST(test_four_health_reads_make_the_longest_segmented_answer);
     RUN_TEST(test_getters_and_step_are_safe_for_null_and_unopened_servers);
     RUN_TEST(test_a_full_receiver_table_fails_open_and_leaves_the_server_closed);

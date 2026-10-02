@@ -430,6 +430,11 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
 - Checks after the fixes: see the PR description (ctest, coverage, MISRA, cross builds, SIL).
 
 
+**Reviews of the health DID (D-055, 2026-10-02).**
+- architecture-guard on the plan: no blocker. The server reads `services/can_sm` directly (features → services), the client's step counters go through `services/diag`, `diag` includes no other service, and the U0001-88 monitor sits in the server glue next to `diag_supervise()`.
+- vss-schema-guardian: CLEAN (defs v0.4.0).
+- safety-reviewer: no blocker; R1-R7 of D-055 met. Applied: MINOR-1 (every counter's gen/ `*_MAX` is asserted equal to the clamp value), MINOR-2 (tests: port counters above 0xFFFF read 0xFFFF, through a host-only `vbus_add_bus_off_events()` hook; a latched client keeps `STEP_STATS_FRESH`), NIT-1 (`can_sm_state_known()` and `can_sm_state()` agree only within the comms task). Open: NIT-2 (defs codegen comments STATE `*_MAX` as a counter limit); the HIL `uds_server_health_flood` below. A 4 × 0xFD02 answer is 101 B (15 frames on 0x718); E2E frames not waiting behind it on the H7 still needs the D-054 item 6 dedicated TX buffers.
+
 ## Proposed HIL scenarios (moto-hil-bench, once the host schema exists)
 
 - `isotp_vehicle_segmented_response_refused` (vehicle bus, today's behaviour):
@@ -494,6 +499,9 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
 - `uds_server_health_vehicle_latch` (D-055, both buses):
   - Short CANH/CANL on the vehicle bus 5 times, each held past its bus-off and released after the recovery.
   - Pass when 0xFD02 reads `VEHICLE_STATE` LATCHED with the `VEHICLE_LATCHED` flag, `VEHICLE_BUS_OFFS` 5 and `VEHICLE_RECOVERIES` 4; U0001-88 and U0100-00 are testFailed and U3000-00 is not; after 0x14 U0001-88 is testFailed again within one loop and the vehicle bus stays silent until reboot.
+- `uds_server_health_flood` (D-055, safety review):
+  - A tester requests 4 × 0xFD02 back to back at STmin 0 while the rt-core heartbeat (0x081) and the lean / µ frames are timed.
+  - Pass when no E2E frame is later than one cycle and safety-node never marks them INVALID.
 - `uds_server_health_platform_bus_off` (D-055):
   - Platform bus-off for 5 s, then released.
   - Pass when, after recovery, 0xFD02 reads `PLATFORM_STATE` ERROR_ACTIVE (never LATCHED), `PLATFORM_BUS_OFFS` and `PLATFORM_RECOVERIES` went up, and `STEP_STATS_FRESH` is set.

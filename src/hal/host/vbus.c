@@ -186,6 +186,13 @@ void vbus_set_bus_off(vbus_t* bus, uint8_t node, bool bus_off)
     n->bus_off = bus_off;
 }
 
+void vbus_add_bus_off_events(vbus_t* bus, uint8_t node, uint32_t count)
+{
+    if (node_ok(bus, node)) {
+        bus->nodes[node].bus_off_events += count; /* wraps like the hardware counter */
+    }
+}
+
 void vbus_recover(vbus_t* bus, uint8_t node)
 {
     if (!node_ok(bus, node)) {
