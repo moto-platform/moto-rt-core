@@ -17,6 +17,7 @@
 #include "hal/host/hal_time_host.h"
 #include "platform_uds.h"
 #include "services/can_if.h"
+#include "services/can_sm.h"
 #include "services/diag.h"
 #include "services/timebase.h"
 #include "services/vehicle_signals.h"
@@ -936,6 +937,70 @@ static void test_a_blocked_tx_queue_drops_the_answer_after_p2_star_but_s3_still_
     TEST_ASSERT_EQUAL_HEX8(UDS_SESSION_DEFAULT, got[3]);
 }
 
+/* Ç1: a multi-frame answer whose Consecutive Frames get stuck on the platform bus is
+ * aborted by services/can_sm after N_As; the link ends the message (tx_failed) and the
+ * stale frames never go out when the bus recovers. */
+static void test_a_stalled_multi_frame_answer_is_aborted_after_n_as_and_never_goes_out_late(void)
+{
+    can_sm_step(CAN_PORT_PLATFORM); /* baseline of the controller counters */
+    /* A 35-byte answer: a First Frame and five Consecutive Frames, more than the three TX
+     * buffers hold, so the message is still under way when the bus stalls. (A message whose
+     * last frames all sit in the buffers already counts as sent: the tester's N_Cr covers it.) */
+    const uint8_t req[] = {UDS_SID_READ_DATA_BY_IDENTIFIER, DID_BYTES(PLATFORM_UDS_DID_SW_VERSION),
+                           DID_BYTES(PLATFORM_UDS_DID_UPTIME),
+                           DID_BYTES(PLATFORM_UDS_DID_VEHICLE_ENGINE_SPEED),
+                           DID_BYTES(PLATFORM_UDS_DID_VEHICLE_BATTERY_VOLTAGE)};
+    const uint32_t mark = sniff_count;
+    have_got = false;
+    TEST_ASSERT_EQUAL(ISOTP_OK, isotp_send(&tester, req, sizeof req));
+    bool first_frame = false;
+    for (uint32_t i = 0u; (i < 100u) && !first_frame; i++) {
+        can_sm_step(CAN_PORT_PLATFORM);
+        tick();
+        for (uint32_t k = mark; k < sniff_count; k++) {
+            first_frame = first_frame || ((sniffed[k].f.id == PLATFORM_UDS_PHYS_RESPONSE_ID) &&
+                                          ((sniffed[k].f.data[0] & PCI_MASK) == PCI_FF));
+        }
+    }
+    TEST_ASSERT_TRUE(first_frame);
+    /* the First Frame and the tester's Flow Control got through; now the bus stalls, so
+     * the Consecutive Frames the server writes next stay in its TX buffers */
+    vbus_set_tx_stalled(&bus_platform, node_dut, true);
+    const uint32_t stall_mark = sniff_count;
+    const uint32_t failed = uds_server_glue_stats(&server)->tx_failed;
+    for (uint32_t i = 0u; i < 3u; i++) {
+        can_sm_step(CAN_PORT_PLATFORM);
+        tick();
+    }
+    TEST_ASSERT_EQUAL_UINT32(VBUS_TX_DEPTH, bus_platform.nodes[node_dut].tx_pending_count);
+    /* the cut answer would end the tester's reception with N_Cr, which this harness treats
+     * as a failure; the tester's side is not under test, so it starts over */
+    tester_init();
+
+    for (uint32_t i = 0u; i < CAN_SM_TX_TIMEOUT_MS + 100u; i++) {
+        can_sm_step(CAN_PORT_PLATFORM);
+        tick();
+    }
+    TEST_ASSERT_EQUAL_UINT32(0u, bus_platform.nodes[node_dut].tx_pending_count);
+    TEST_ASSERT_EQUAL_UINT32(1u, can_sm_stats(CAN_PORT_PLATFORM)->tx_timeouts);
+    TEST_ASSERT_EQUAL_UINT32(failed + 1u, uds_server_glue_stats(&server)->tx_failed);
+    TEST_ASSERT_EQUAL_UINT32(1u, isotp_link_tx_timeout_count(&server.link));
+
+    vbus_set_tx_stalled(&bus_platform, node_dut, false);
+    for (uint32_t i = 0u; i < 200u; i++) {
+        can_sm_step(CAN_PORT_PLATFORM);
+        tick();
+    }
+    TEST_ASSERT_EQUAL_UINT32(0u, response_frames_since(stall_mark)); /* nothing went out late */
+    TEST_ASSERT_FALSE(have_got);
+    TEST_ASSERT_EQUAL_UINT32(0u, extra_messages);
+    TEST_ASSERT_EQUAL_UINT32(failed + 1u, uds_server_glue_stats(&server)->tx_failed);
+
+    /* and the server serves again */
+    TEST_ASSERT_TRUE(read_did(PLATFORM_UDS_DID_ACTIVE_DIAGNOSTIC_SESSION));
+    TEST_ASSERT_EQUAL_HEX8(UDS_SESSION_DEFAULT, got[3]);
+}
+
 /* Safety re-review MINOR-A: a functional request that arrives while an answer waits for
  * the link is dropped and counted, never run seconds later. */
 static void test_a_functional_request_while_an_answer_is_queued_is_dropped_not_run_late(void)
@@ -1143,6 +1208,7 @@ int main(void)
     RUN_TEST(test_without_a_client_the_tester_status_reads_not_running_and_the_dtc_fails);
     RUN_TEST(test_a_status_that_stops_being_written_goes_stale_in_the_did_and_the_dtc);
     RUN_TEST(test_a_blocked_tx_queue_drops_the_answer_after_p2_star_but_s3_still_runs);
+    RUN_TEST(test_a_stalled_multi_frame_answer_is_aborted_after_n_as_and_never_goes_out_late);
     RUN_TEST(test_a_functional_request_while_an_answer_is_queued_is_dropped_not_run_late);
     RUN_TEST(test_functional_single_frame_with_a_short_dlc_is_accepted);
     RUN_TEST(test_functional_frame_with_dlc_zero_is_dropped);

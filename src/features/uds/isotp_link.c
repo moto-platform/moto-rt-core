@@ -45,6 +45,8 @@ static isotp_status_t open_link(isotp_can_link_t* link, const isotp_link_addr_t*
     link->rx_buf = rx_buf;
     link->tx_error_count = 0u;
     link->tx_refused_count = 0u;
+    link->abort_seen = can_if_tx_abort_count(addr->port);
+    link->tx_timeouts = 0u;
     link->vehicle = vehicle;
     if (can_if_register_rx(addr->port, addr->rx_id, addr->extended, on_rx, link) != CAN_IF_OK) {
         return ISOTP_ERR_ARG;
@@ -87,11 +89,25 @@ isotp_status_t isotp_link_open_vehicle_cl250(isotp_can_link_t* link, uint8_t* rx
     return open_link(link, &addr, &cfg, true, rx_buf, rx_cap, tx_buf, tx_cap);
 }
 
+/* N_As: the port aborted its pending TX since the link last looked. */
+static void sync_abort(isotp_can_link_t* link)
+{
+    const uint32_t seq = can_if_tx_abort_count(link->addr.port);
+    if (seq != link->abort_seen) {
+        link->abort_seen = seq;
+        if (!isotp_tx_idle(&link->iso)) {
+            isotp_abort_tx(&link->iso, ISOTP_N_TIMEOUT_A);
+            link_count(&link->tx_timeouts);
+        }
+    }
+}
+
 isotp_status_t isotp_link_send(isotp_can_link_t* link, const uint8_t* data, uint16_t len)
 {
     if ((link == NULL) || !link->open || (data == NULL)) {
         return ISOTP_ERR_ARG;
     }
+    sync_abort(link); /* an older abort never ends the new message */
     if (link->vehicle) {
         if (!vehicle_cl250_request_allowed(data, (size_t)len)) {
             link_count(&link->tx_refused_count);
@@ -129,6 +145,7 @@ void isotp_link_step(isotp_can_link_t* link)
     if ((link == NULL) || !link->open) {
         return;
     }
+    sync_abort(link);
     const uint32_t now = timebase_now_ms();
     bool more = true;
     for (uint32_t n = 0u; more && (n < ISOTP_LINK_MAX_TX_PER_STEP); n++) {
@@ -171,6 +188,11 @@ bool isotp_link_take_tx_confirm(isotp_can_link_t* link, isotp_n_result_t* result
 uint32_t isotp_link_tx_error_count(const isotp_can_link_t* link)
 {
     return (link != NULL) ? link->tx_error_count : 0u;
+}
+
+uint32_t isotp_link_tx_timeout_count(const isotp_can_link_t* link)
+{
+    return (link != NULL) ? link->tx_timeouts : 0u;
 }
 
 uint32_t isotp_link_tx_refused_count(const isotp_can_link_t* link)

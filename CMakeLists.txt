@@ -6,7 +6,7 @@ cmake_minimum_required(VERSION 3.20)
 #   target-m7  : arm-none-eabi-gcc (cmake/arm-none-eabi.cmake), the same pure logic
 #                cross-compiled for Cortex-M7. The CubeMX project, startup code and
 #                linker script arrive once the board (H743 or H723) is decided.
-project(moto_rt_core VERSION 0.5.1 LANGUAGES C) # semver, tagged vX.Y.Z (D-036)
+project(moto_rt_core VERSION 0.6.0 LANGUAGES C) # semver, tagged vX.Y.Z (D-036)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)

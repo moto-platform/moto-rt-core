@@ -42,6 +42,39 @@ typedef enum {
     CAN_PORT_ERR_REFUSED  /* services/can_if: vehicle-bus guard (D-020) refused the frame */
 } can_port_status_t;
 
+/* Controller state snapshot (hal/can_port.h can_port_get_state()), read by services/can_sm.
+ * The counters wrap; readers compare them with unsigned subtraction. On the H7 the FDCAN
+ * ISR counts bus-off entries (IR.BO set AND PSR.BO = 1: IR.BO flags every change of the
+ * bus-off status, entry and exit) and completed transmissions (new TXBTO bits), so an
+ * event between two reads is never lost. */
+typedef struct {
+    uint8_t tec;              /* transmit error counter (ISO 11898-1), 0..255 */
+    uint8_t rec;              /* receive error counter, 0..127 (128+ reported as 128) */
+    bool error_passive;       /* TEC or REC above 127 */
+    bool bus_off;             /* controller is bus-off (TX and RX stopped) */
+    uint32_t bus_off_events;  /* bus-off entries since the port was bound (wraps) */
+    uint32_t tx_pending;      /* frames accepted by can_port_write() and not sent yet */
+    uint32_t tx_done;         /* frames sent with an ACK since the port was bound (wraps) */
+} can_port_state_t;
+
+/* RX FIFOs of a port. On FDCAN2 the diagnostic IDs (UDS, 0x7xx) go to FIFO1, so the
+ * periodic platform traffic in FIFO0 cannot overrun them. The host port has one queue. */
+typedef enum {
+    CAN_PORT_FIFO0 = 0,
+    CAN_PORT_FIFO1
+} can_port_fifo_t;
+
+/* One acceptance filter: an exact ID match (FDCAN: dual-ID or classic filter element). */
+typedef struct {
+    uint32_t id;
+    bool extended;
+    can_port_fifo_t fifo;
+} can_port_filter_t;
+
+/* Filters per port: rt-core receives a handful of IDs per port (services/can_if table).
+ * The FDCAN message RAM holds up to 128 standard + 64 extended filter elements. */
+#define CAN_PORT_MAX_FILTERS 16u
+
 /* True if the ID fits its format (11-bit or 29-bit). */
 bool can_id_valid(uint32_t id, bool extended);
 

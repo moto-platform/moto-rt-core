@@ -10,7 +10,8 @@
  *  - Single Frame, First Frame (12-bit FF_DL, max 4095 bytes), Consecutive Frame and
  *    Flow Control (CTS / WAIT / OVFLW), block size, STmin, SN wrap.
  *  - Timeouts N_Bs (sender waits for FC) and N_Cr (receiver waits for CF), FC.WAIT
- *    limit N_WFTmax. N_As/N_Ar (driver transmit confirmation) are left to the glue.
+ *    limit N_WFTmax. N_As/N_Ar (driver transmit confirmation) are left to the glue, which
+ *    ends a message whose frames were aborted with isotp_abort_tx(N_TIMEOUT_A).
  *  - Out of scope: CAN FD frames, the 32-bit FF_DL escape, extended/mixed addressing,
  *    sending FC.WAIT as a receiver.
  *
@@ -57,7 +58,8 @@ typedef enum {
     ISOTP_N_INVALID_FS,    /* sender: FC with a reserved flow status */
     ISOTP_N_UNEXP_PDU,     /* receiver: SF/FF arrived during a reception, which is dropped */
     ISOTP_N_WFT_OVRN,      /* sender: more than N_WFTmax FC.WAIT in a row */
-    ISOTP_N_BUFFER_OVFLW   /* sender: FC.OVFLW received; receiver: message too long */
+    ISOTP_N_BUFFER_OVFLW,  /* sender: FC.OVFLW received; receiver: message too long */
+    ISOTP_N_TIMEOUT_A      /* sender: a frame was not sent within N_As (glue, Ç1) */
 } isotp_n_result_t;
 
 typedef struct {
@@ -157,6 +159,10 @@ bool isotp_take_rx_indication(isotp_link_t* link, isotp_n_result_t* result, uint
 
 /* Frees the rx buffer after an ISOTP_N_OK indication was consumed. */
 void isotp_rx_release(isotp_link_t* link);
+
+/* Ends a transmission under way (any state but idle) with a confirmation of `result`,
+ * e.g. ISOTP_N_TIMEOUT_A when the driver aborted its frames. No-op while idle. */
+void isotp_abort_tx(isotp_link_t* link, isotp_n_result_t result);
 
 /* N_USData.confirm: true once per finished transmission (success or error). */
 bool isotp_take_tx_confirm(isotp_link_t* link, isotp_n_result_t* result);

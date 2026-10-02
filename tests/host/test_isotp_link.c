@@ -13,6 +13,8 @@
 #include "features/uds/isotp_link.h"
 #include "hal/host/can_port_host.h"
 #include "hal/host/hal_time_host.h"
+#include "services/can_if.h"
+#include "services/can_sm.h"
 #include "services/timebase.h"
 #include "vehicle_cl250.h"
 
@@ -22,6 +24,7 @@
 /* Test-only identifiers for generic links (not platform or vehicle IDs). */
 #define TEST_ID_A 0x100u /* DUT -> peer */
 #define TEST_ID_B 0x101u /* peer -> DUT */
+#define TEST_ID_RAW 0x1F0u /* a raw frame the tests write through can_if (never delivered) */
 #define BUF 4095u
 #define SNIFF_MAX 1024u
 
@@ -480,6 +483,155 @@ static void test_open_rejects_bad_arguments_and_double_open(void)
     TEST_ASSERT_NULL(isotp_link_rx_data(&other));
 }
 
+/* ------------------------------------------------------------------------- */
+/* N_As (Ç1): services/can_sm aborts stuck frames, the link ends the message  */
+/* ------------------------------------------------------------------------- */
+
+/* run_ms() with the platform port's state manager in front, like app/comms.c. */
+static void run_ms_sm(uint32_t ms)
+{
+    for (uint32_t i = 0u; i < ms; i++) {
+        can_sm_step(CAN_PORT_PLATFORM);
+        run_ms(1u);
+    }
+}
+
+/* A raw frame through can_if on the stalled platform node: it sits in the TX buffers. */
+static void write_raw_frame_into_the_stalled_node(void)
+{
+    can_frame_t raw;
+    memset(&raw, 0, sizeof raw);
+    raw.id = TEST_ID_RAW;
+    raw.dlc = 1u;
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, can_if_write(CAN_PORT_PLATFORM, &raw));
+}
+
+static uint32_t consecutive_frames_from_dut(void)
+{
+    uint32_t n = 0u;
+    for (uint32_t i = 0u; i < sniff_count; i++) {
+        n += (sniffed[i].from_dut && ((sniffed[i].f.data[0] >> 4u) == 2u)) ? 1u : 0u;
+    }
+    return n;
+}
+
+static void test_n_as_abort_ends_a_stalled_multi_frame_message_with_n_timeout_a(void)
+{
+    isotp_config_t cfg;
+    isotp_default_config(&cfg);
+    open_generic_pair(&cfg, &cfg);
+    can_sm_step(CAN_PORT_PLATFORM); /* baseline of the controller counters */
+    uint8_t msg[100];
+    memset(msg, 0x6B, sizeof msg);
+    TEST_ASSERT_EQUAL(ISOTP_OK, isotp_link_send(&dut, msg, (uint16_t)sizeof msg));
+    run_ms_sm(2u); /* the First Frame goes out, the peer answers with FC.CTS */
+    TEST_ASSERT_GREATER_THAN_UINT32(0u, sniff_count); /* the First Frame */
+    vbus_set_tx_stalled(&bus, node_platform, true); /* the Consecutive Frames get stuck */
+
+    run_ms_sm(CAN_SM_TX_TIMEOUT_MS - 10u);
+    isotp_n_result_t res;
+    TEST_ASSERT_FALSE(isotp_link_take_tx_confirm(&dut, &res)); /* still within N_As */
+    TEST_ASSERT_EQUAL_UINT32(0u, isotp_link_tx_timeout_count(&dut));
+
+    run_ms_sm(20u); /* N_As expires, can_sm aborts, the link ends the message */
+    TEST_ASSERT_TRUE(isotp_link_take_tx_confirm(&dut, &res));
+    TEST_ASSERT_EQUAL(ISOTP_N_TIMEOUT_A, res);
+    TEST_ASSERT_EQUAL_UINT32(1u, isotp_link_tx_timeout_count(&dut));
+    TEST_ASSERT_EQUAL_UINT32(1u, can_sm_stats(CAN_PORT_PLATFORM)->tx_timeouts);
+    TEST_ASSERT_FALSE(isotp_link_take_tx_confirm(&dut, &res)); /* once only */
+
+    /* the stale Consecutive Frames never go out when the stall ends */
+    vbus_set_tx_stalled(&bus, node_platform, false);
+    run_ms_sm(50u);
+    TEST_ASSERT_EQUAL_UINT32(0u, consecutive_frames_from_dut());
+    TEST_ASSERT_EQUAL_UINT32(1u, isotp_link_tx_timeout_count(&dut));
+
+    /* the peer's reception of the cut message dies with N_Cr; the link is usable again */
+    uint16_t len;
+    TEST_ASSERT_TRUE(isotp_take_rx_indication(&peer, &res, &len));
+    TEST_ASSERT_EQUAL(ISOTP_N_TIMEOUT_CR, res);
+    TEST_ASSERT_TRUE(isotp_link_tx_ready(&dut));
+    uint8_t again[20];
+    memset(again, 0x2C, sizeof again);
+    TEST_ASSERT_EQUAL(ISOTP_OK, isotp_link_send(&dut, again, (uint16_t)sizeof again));
+    run_ms_sm(100u);
+    TEST_ASSERT_TRUE(isotp_link_take_tx_confirm(&dut, &res));
+    TEST_ASSERT_EQUAL(ISOTP_N_OK, res);
+    TEST_ASSERT_TRUE(isotp_take_rx_indication(&peer, &res, &len));
+    TEST_ASSERT_EQUAL(ISOTP_N_OK, res);
+    TEST_ASSERT_EQUAL_UINT16(sizeof again, len);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(again, peer_rx, sizeof again);
+}
+
+static void test_an_abort_before_isotp_link_send_does_not_end_the_new_message(void)
+{
+    isotp_config_t cfg;
+    isotp_default_config(&cfg);
+    open_generic_pair(&cfg, &cfg);
+    can_sm_step(CAN_PORT_PLATFORM);
+    /* An N_As abort of a frame that is not the link's, with the link not stepping meanwhile. */
+    vbus_set_tx_stalled(&bus, node_platform, true);
+    write_raw_frame_into_the_stalled_node();
+    can_sm_step(CAN_PORT_PLATFORM);
+    hal_time_host_advance(CAN_SM_TX_TIMEOUT_MS);
+    can_sm_step(CAN_PORT_PLATFORM);
+    TEST_ASSERT_EQUAL_UINT32(1u, can_sm_stats(CAN_PORT_PLATFORM)->tx_timeouts);
+    TEST_ASSERT_NOT_EQUAL_UINT32(dut.abort_seen, can_if_tx_abort_count(CAN_PORT_PLATFORM));
+    vbus_set_tx_stalled(&bus, node_platform, false);
+
+    /* The new message is multi-frame, so it is under way for several steps. */
+    uint8_t msg[30];
+    for (uint16_t i = 0u; i < sizeof msg; i++) {
+        msg[i] = (uint8_t)(0x40u + i);
+    }
+    TEST_ASSERT_EQUAL(ISOTP_OK, isotp_link_send(&dut, msg, (uint16_t)sizeof msg));
+    run_ms_sm(100u);
+    isotp_n_result_t res;
+    TEST_ASSERT_TRUE(isotp_link_take_tx_confirm(&dut, &res));
+    TEST_ASSERT_EQUAL(ISOTP_N_OK, res); /* not N_TIMEOUT_A */
+    TEST_ASSERT_EQUAL_UINT32(0u, isotp_link_tx_timeout_count(&dut));
+    uint16_t len;
+    TEST_ASSERT_TRUE(isotp_take_rx_indication(&peer, &res, &len));
+    TEST_ASSERT_EQUAL(ISOTP_N_OK, res);
+    TEST_ASSERT_EQUAL_UINT16(sizeof msg, len);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(msg, peer_rx, sizeof msg);
+}
+
+static void test_an_abort_while_the_link_is_idle_is_not_counted_and_confirms_nothing(void)
+{
+    isotp_config_t cfg;
+    isotp_default_config(&cfg);
+    open_generic_pair(&cfg, &cfg);
+    can_sm_step(CAN_PORT_PLATFORM);
+    vbus_set_tx_stalled(&bus, node_platform, true);
+    write_raw_frame_into_the_stalled_node();
+    run_ms_sm(CAN_SM_TX_TIMEOUT_MS + 10u); /* the link steps all the time and sees the abort */
+    TEST_ASSERT_EQUAL_UINT32(1u, can_sm_stats(CAN_PORT_PLATFORM)->tx_timeouts);
+    TEST_ASSERT_EQUAL_UINT32(can_if_tx_abort_count(CAN_PORT_PLATFORM), dut.abort_seen);
+    isotp_n_result_t res;
+    TEST_ASSERT_FALSE(isotp_link_take_tx_confirm(&dut, &res));
+    TEST_ASSERT_EQUAL_UINT32(0u, isotp_link_tx_timeout_count(&dut));
+}
+
+static void test_isotp_abort_tx_on_an_idle_link_is_a_no_op(void)
+{
+    isotp_config_t cfg;
+    isotp_default_config(&cfg);
+    open_generic_pair(&cfg, &cfg);
+    isotp_n_result_t res;
+    isotp_abort_tx(&dut.iso, ISOTP_N_TIMEOUT_A); /* never sent anything */
+    TEST_ASSERT_FALSE(isotp_link_take_tx_confirm(&dut, &res));
+
+    const uint8_t msg[5] = {1u, 2u, 3u, 4u, 5u};
+    TEST_ASSERT_EQUAL(ISOTP_OK, isotp_link_send(&dut, msg, 5u));
+    run_ms_sm(5u);
+    TEST_ASSERT_TRUE(isotp_link_take_tx_confirm(&dut, &res));
+    TEST_ASSERT_EQUAL(ISOTP_N_OK, res);
+    isotp_abort_tx(&dut.iso, ISOTP_N_TIMEOUT_A); /* finished: idle again, nothing to end */
+    TEST_ASSERT_FALSE(isotp_link_take_tx_confirm(&dut, &res));
+    TEST_ASSERT_EQUAL_UINT32(0u, isotp_link_tx_timeout_count(&dut));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -497,5 +649,9 @@ int main(void)
     RUN_TEST(test_sender_going_silent_mid_message_gives_n_cr_on_the_receiver);
     RUN_TEST(test_one_step_writes_at_most_the_per_step_limit);
     RUN_TEST(test_open_rejects_bad_arguments_and_double_open);
+    RUN_TEST(test_n_as_abort_ends_a_stalled_multi_frame_message_with_n_timeout_a);
+    RUN_TEST(test_an_abort_before_isotp_link_send_does_not_end_the_new_message);
+    RUN_TEST(test_an_abort_while_the_link_is_idle_is_not_counted_and_confirms_nothing);
+    RUN_TEST(test_isotp_abort_tx_on_an_idle_link_is_a_no_op);
     return UNITY_END();
 }
