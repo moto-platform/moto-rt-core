@@ -677,6 +677,173 @@ static void test_sil_first_frames_at_and_above_the_client_buffer(void)
     TEST_ASSERT_EQUAL_UINT32(0u, can_if_tx_refused_count(CAN_PORT_VEHICLE));
 }
 
+/* Runs until the clock reads t (one pass per ms). */
+static void run_to(uint32_t t)
+{
+    while (timebase_now_ms() != t) {
+        run(1u, false);
+    }
+}
+
+/* An ECU NRC 0x78 for the pending 0x22 read (Single Frame). */
+static void ecu_response_pending(void)
+{
+    const uint8_t nrc[8] = {0x03u, UDS_SID_NEGATIVE_RESPONSE, UDS_SID_READ_DATA_BY_IDENTIFIER,
+                            UDS_NRC_RESPONSE_PENDING, 0xAAu, 0xAAu, 0xAAu, 0xAAu};
+    ecu_frame(nrc);
+}
+
+/* MINOR-4 (e) setup: a read the silent ECU keeps open with NRC 0x78 (D-050 doubling: the
+ * wait ends at +250, +600, +1350, then +2900 from the request) gets a First Frame of
+ * FF_DL UDS_CLIENT_RX_BUF 500 ms before the total cap, and its FC. Returns the send time
+ * of the read; *mark is the sniff index before the First Frame. The answer needs
+ * CAP_TEST_CFS Consecutive Frames, which the tests send CAP_TEST_CF_GAP_MS apart (below
+ * N_Cr), so the reception runs past the cap. */
+#define CAP_TEST_FF_AT_MS (VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS - 500u)
+#define CAP_TEST_CF_GAP_MS (VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS - 10u)
+#define CAP_TEST_CFS ((UDS_CLIENT_RX_BUF - 6u + 6u) / 7u) /* 6 bytes in the FF, 7 per CF */
+static uint32_t cap_test_t_ff; /* step that took the First Frame */
+static uint32_t read_in_reception_near_the_cap(uint32_t* mark)
+{
+    run(500u, false);
+    ecu.silent = true;
+    run_until_last_request(UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_CLIENT_REQ_READ);
+    const uint32_t t0 = client.core.sent_ms;
+    const uint32_t pending0 = uds_client_stats(&client)->response_pending;
+    const uint32_t nrc_at[4] = {50u, 200u, 550u, 1300u};
+    for (uint32_t i = 0u; i < 4u; i++) {
+        run_to(t0 + nrc_at[i]);
+        ecu_response_pending();
+    }
+    run_to(t0 + CAP_TEST_FF_AT_MS);
+    TEST_ASSERT_EQUAL(UDS_CLIENT_REQ_READ, uds_client_core_pending(&client.core));
+    TEST_ASSERT_EQUAL_UINT32(pending0 + 4u, uds_client_stats(&client)->response_pending);
+    *mark = sniff_count;
+    cap_test_t_ff = timebase_now_ms();
+    ecu_first_frame(UDS_CLIENT_RX_BUF);
+    run(1u, false);
+    TEST_ASSERT_EQUAL_UINT32(*mark + 1u, sniff_count); /* the silent ECU sent nothing else */
+    TEST_ASSERT_TRUE(is_tester(&sniffed[*mark]));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(vehicle_cl250_fc_cts, sniffed[*mark].f.data,
+                                 VEHICLE_CL250_FRAME_DLC);
+    TEST_ASSERT_TRUE(isotp_link_rx_busy(&client.link));
+    return t0;
+}
+
+/* Sends Consecutive Frames first..last (1-based, SN = index mod 16), frame k at
+ * cap_test_t_ff + k * CAP_TEST_CF_GAP_MS, so steps in between keep the gaps below N_Cr. */
+static void ecu_cfs_every_gap(uint32_t first, uint32_t last)
+{
+    for (uint32_t k = first; k <= last; k++) {
+        run_to(cap_test_t_ff + (k * CAP_TEST_CF_GAP_MS));
+        const uint8_t cf[8] = {(uint8_t)(0x20u | (k & 0x0Fu)), 1u, 2u, 3u, 4u, 5u, 6u, 7u};
+        ecu_frame(cf);
+    }
+}
+
+/* E-16 (3), MINOR-4 (e): the RESPONSE_TIMEOUT_MAX_MS cap ends a read whose segmented
+ * answer is still being received after the FC. The read is a timeout at the cap; the
+ * tester sends nothing until the reception ends; the completed answer then matches no
+ * request (no sample, not "unavailable") and polling resumes without a hold, since the
+ * ECU has finished. */
+static void test_sil_the_total_cap_fires_during_a_reception_after_the_fc(void)
+{
+    uint32_t mark = 0u;
+    const uint32_t t0 = read_in_reception_near_the_cap(&mark);
+    const uds_client_stats_t* st = uds_client_stats(&client);
+    const uint32_t idx = client.core.pending_idx;
+    vehicle_signal_sample_t before;
+    TEST_ASSERT_TRUE(vehicle_signals_get(idx, timebase_now_ms(), &before));
+    const uint32_t timeouts = st->timeouts;
+    const uint32_t unexpected = st->unexpected;
+    const uint32_t unavailable = st->unavailable;
+    const uint32_t reads_ok = st->reads_ok;
+    TEST_ASSERT_GREATER_THAN_UINT32(t0 + VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS,
+                                    t0 + CAP_TEST_FF_AT_MS + (CAP_TEST_CFS * CAP_TEST_CF_GAP_MS));
+
+    /* the CFs sent before the cap: the read stays pending (the base timeout pauses) */
+    const uint32_t before_cap = (VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS - CAP_TEST_FF_AT_MS - 1u) /
+                                CAP_TEST_CF_GAP_MS;
+    ecu_cfs_every_gap(1u, before_cap);
+    run_to(t0 + VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS); /* the last step ran at cap - 1 */
+    TEST_ASSERT_EQUAL(UDS_CLIENT_REQ_READ, uds_client_core_pending(&client.core));
+    TEST_ASSERT_EQUAL_UINT32(timeouts, st->timeouts);
+    run(1u, false); /* the step at the cap */
+    TEST_ASSERT_EQUAL(UDS_CLIENT_REQ_NONE, uds_client_core_pending(&client.core));
+    TEST_ASSERT_EQUAL_UINT32(timeouts + 1u, st->timeouts);
+    TEST_ASSERT_TRUE(isotp_link_rx_busy(&client.link));
+
+    ecu_cfs_every_gap(before_cap + 1u, CAP_TEST_CFS);
+    const uint32_t t_last_cf = timebase_now_ms();
+    TEST_ASSERT_EQUAL_UINT32(1u, tester_frames_since(mark)); /* only the FC so far */
+    run(5u, false);
+    TEST_ASSERT_FALSE(isotp_link_rx_busy(&client.link));
+    TEST_ASSERT_EQUAL_UINT32(unexpected + 1u, st->unexpected);
+    TEST_ASSERT_EQUAL_UINT32(unavailable, st->unavailable);
+    TEST_ASSERT_EQUAL_UINT32(reads_ok, st->reads_ok);
+    TEST_ASSERT_EQUAL_UINT32(timeouts + 1u, st->timeouts);
+    TEST_ASSERT_EQUAL_UINT16(0u, isotp_link_rx_error_count(&client.link));
+    vehicle_signal_sample_t after;
+    TEST_ASSERT_TRUE(vehicle_signals_get(idx, timebase_now_ms(), &after));
+    TEST_ASSERT_EQUAL_UINT32(before.timestamp_ms, after.timestamp_ms); /* no sample */
+
+    /* polling resumes right after the reception ended, with no FC and no hold */
+    TEST_ASSERT_GREATER_THAN_UINT32(1u, tester_frames_since(mark));
+    for (uint32_t i = mark + 1u; i < sniff_count; i++) { /* sniffed[mark] is the FC */
+        if (is_tester(&sniffed[i])) {
+            TEST_ASSERT_GREATER_OR_EQUAL_UINT32(t_last_cf, sniffed[i].t);
+            TEST_ASSERT_EQUAL_HEX8(0u, (uint8_t)(sniffed[i].f.data[0] & 0xF0u));
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(0u, st->fc_withheld);
+    TEST_ASSERT_FALSE(uds_client_failed(&client));
+    TEST_ASSERT_EQUAL_UINT32(0u, can_if_tx_refused_count(CAN_PORT_VEHICLE));
+}
+
+/* E-16 (3), MINOR-4 (e), second half: the cap ends the read during the reception, then
+ * the ECU stops sending. N_Cr fails the reception: "service unavailable" with the link's
+ * N_Bs hold (the ECU may still be sending), no second timeout, and the DID is not
+ * skipped for it (no read was pending any more). */
+static void test_sil_a_reception_failing_after_the_cap_holds_n_bs(void)
+{
+    uint32_t mark = 0u;
+    const uint32_t t0 = read_in_reception_near_the_cap(&mark);
+    const uds_client_stats_t* st = uds_client_stats(&client);
+    const uint32_t idx = client.core.pending_idx;
+    const uint32_t timeouts = st->timeouts;
+    const uint32_t unavailable = st->unavailable;
+    const uint32_t skips = st->did_skips;
+    const uint32_t past_cap = ((VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS - CAP_TEST_FF_AT_MS) /
+                               CAP_TEST_CF_GAP_MS) + 1u;
+    TEST_ASSERT_LESS_THAN_UINT32(CAP_TEST_CFS, past_cap);
+
+    ecu_cfs_every_gap(1u, past_cap); /* the last one after the cap, then silence */
+    const uint32_t t_last_cf = timebase_now_ms();
+    TEST_ASSERT_GREATER_THAN_UINT32(t0 + VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS, t_last_cf);
+    TEST_ASSERT_EQUAL_UINT32(timeouts + 1u, st->timeouts);
+    TEST_ASSERT_TRUE(isotp_link_rx_busy(&client.link));
+
+    const uint32_t n_bs = isotp_link_n_bs_ms(&client.link);
+    run(VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS + n_bs + 20u, false);
+    TEST_ASSERT_FALSE(isotp_link_rx_busy(&client.link));
+    TEST_ASSERT_EQUAL_UINT32(unavailable + 1u, st->unavailable);
+    TEST_ASSERT_EQUAL_UINT32(timeouts + 1u, st->timeouts);
+    TEST_ASSERT_EQUAL_UINT32(skips, st->did_skips);
+    TEST_ASSERT_FALSE(uds_client_core_did_skipped(&client.core, idx, timebase_now_ms()));
+    TEST_ASSERT_EQUAL_UINT16(1u, isotp_link_rx_error_count(&client.link));
+
+    /* nothing after the FC until N_Cr failed and the N_Bs hold ran out */
+    const uint32_t t_fail = t_last_cf + VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS;
+    TEST_ASSERT_GREATER_THAN_UINT32(1u, tester_frames_since(mark));
+    for (uint32_t i = mark + 1u; i < sniff_count; i++) {
+        if (is_tester(&sniffed[i])) {
+            TEST_ASSERT_GREATER_OR_EQUAL_UINT32(t_fail + n_bs, sniffed[i].t);
+            TEST_ASSERT_EQUAL_HEX8(0u, (uint8_t)(sniffed[i].f.data[0] & 0xF0u));
+        }
+    }
+    TEST_ASSERT_FALSE(uds_client_failed(&client));
+}
+
 /* M2 (architecture-guard): a latched tester sends no FC, even for a First Frame on its
  * response ID; the link withholds it. */
 static void test_sil_a_latched_client_sends_no_flow_control(void)
@@ -1088,6 +1255,8 @@ int main(void)
     RUN_TEST(test_sil_a_first_frame_after_tester_present_gets_no_flow_control);
     RUN_TEST(test_sil_a_foreign_frame_in_the_same_pass_as_a_first_frame_blocks_the_fc);
     RUN_TEST(test_sil_first_frames_at_and_above_the_client_buffer);
+    RUN_TEST(test_sil_the_total_cap_fires_during_a_reception_after_the_fc);
+    RUN_TEST(test_sil_a_reception_failing_after_the_cap_holds_n_bs);
     RUN_TEST(test_sil_guard_refusal_latches_the_client);
     RUN_TEST(test_sil_a_busy_link_does_not_latch_the_client);
     RUN_TEST(test_sil_short_tx_blockage_recovers_without_a_latch);
