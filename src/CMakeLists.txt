@@ -7,6 +7,7 @@ add_library(moto_rtcore_logic STATIC
     features/vehicle_republish/vehicle_republish_core.c
     hal/can_frame.c
     services/can_sm_core.c
+    services/com_core.c
 )
 target_include_directories(moto_rtcore_logic PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -37,6 +38,7 @@ add_library(moto_rtcore_fw STATIC
     services/can_sm.c
     services/vehicle_signals.c
     services/diag.c
+    services/com.c
     features/uds/isotp_link.c
     features/uds/uds_client.c
     features/uds/uds_server.c

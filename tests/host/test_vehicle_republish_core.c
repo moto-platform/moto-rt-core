@@ -1,6 +1,6 @@
 /*
  * L0 tests for features/vehicle_republish/vehicle_republish_core (ISSUES D-5, D-056):
- * the sample -> 0x021 / 0x110 mapping, E2E, and the cycle schedule. Every expected value
+ * the sample -> 0x021 / 0x110 mapping and E2E (the cycle schedule: test_com_core). Every expected value
  * comes from gen/ (encode, is_in_range, choices, E2E check), never a hand-written scale.
  */
 #include "features/vehicle_republish/vehicle_republish_core.h"
@@ -293,41 +293,6 @@ static void test_frame_builders_refuse_null_arguments(void)
     TEST_ASSERT_TRUE(vehicle_republish_engine_frame(&em, data));
 }
 
-/* ------------------------------------------------------------------ cycle */
-
-static void test_the_cycle_is_due_at_once_then_on_its_deadline_grid(void)
-{
-    const uint32_t p = PLATFORM_VEHICLE_SPEED_CYCLE_TIME_MS;
-    vehicle_republish_cycle_t c;
-    memset(&c, 0, sizeof c);
-    TEST_ASSERT_TRUE(vehicle_republish_cycle_due(&c, 500u));
-    vehicle_republish_cycle_done(&c, 500u, p); /* anchored at 500 */
-    TEST_ASSERT_FALSE(vehicle_republish_cycle_due(&c, 500u + p - 1u));
-    TEST_ASSERT_TRUE(vehicle_republish_cycle_due(&c, 500u + p));
-    vehicle_republish_cycle_done(&c, 500u + p + 10u, p); /* 10 ms late: the grid does not drift */
-    TEST_ASSERT_EQUAL_UINT32(500u + 2u * p, c.next_due_ms);
-    vehicle_republish_cycle_done(&c, 500u + 4u * p + 30u, p); /* missed two: skipped, no burst */
-    TEST_ASSERT_EQUAL_UINT32(500u + 5u * p, c.next_due_ms);
-    TEST_ASSERT_FALSE(vehicle_republish_cycle_due(&c, 500u + 4u * p + 31u));
-}
-
-static void test_the_cycle_survives_the_ms_counter_wrap(void)
-{
-    const uint32_t p = PLATFORM_VEHICLE_ENGINE_CYCLE_TIME_MS;
-    vehicle_republish_cycle_t c;
-    memset(&c, 0, sizeof c);
-    const uint32_t start = UINT32_MAX - 20u;
-    vehicle_republish_cycle_done(&c, start, p);
-    TEST_ASSERT_FALSE(vehicle_republish_cycle_due(&c, start + 10u));
-    TEST_ASSERT_FALSE(vehicle_republish_cycle_due(&c, (uint32_t)(start + p - 1u)));
-    TEST_ASSERT_TRUE(vehicle_republish_cycle_due(&c, (uint32_t)(start + p)));
-    vehicle_republish_cycle_done(&c, (uint32_t)(start + p), p);
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)(start + 2u * p), c.next_due_ms);
-    /* a zero period re-anchors at now (defensive) */
-    vehicle_republish_cycle_done(&c, 7u, 0u);
-    TEST_ASSERT_EQUAL_UINT32(7u, c.next_due_ms);
-}
-
 int main(void)
 {
     UNITY_BEGIN();
@@ -342,7 +307,5 @@ int main(void)
     RUN_TEST(test_every_engine_did_raw_value_arrives_unchanged_on_0x110);
     RUN_TEST(test_speed_frames_pass_the_receiver_e2e_check_and_the_counter_moves_only_when_committed);
     RUN_TEST(test_frame_builders_refuse_null_arguments);
-    RUN_TEST(test_the_cycle_is_due_at_once_then_on_its_deadline_grid);
-    RUN_TEST(test_the_cycle_survives_the_ms_counter_wrap);
     return UNITY_END();
 }
