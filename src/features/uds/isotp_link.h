@@ -18,11 +18,15 @@
  * in a Single Frame; its frames are checked with vehicle_cl250_frame_allowed() before
  * they are written. These are early rejects with proper errors. The hard control is
  * the fail-closed guard in services/can_if, which every vehicle frame passes as well.
- * The generated frame gate passes Single Frames only, so this link cannot send a Flow
- * Control and cannot receive segmented responses (see README). It withholds every Flow
- * Control the core queues on a First Frame: the reception is cancelled at once (no
- * indication, no N_Cr wait) and isotp_link_take_fc_withheld() reports it, so the
- * client can wait until the ECU has given up its segmented send.
+ * Segmented responses (D-059): requests stay Single Frame. The only other frame the
+ * generated gate passes is the one FC.CTS vehicle_cl250_fc_cts[] (BS, STmin and padding
+ * from gen/). The gate is stateless; this link sends that FC only while a response is
+ * expected (isotp_link_expect_response(), armed by the client after its allowed
+ * request went out), once per request, for a First Frame with FF_DL <= rx_cap <=
+ * VEHICLE_CL250_MAX_FF_DL that starts with the expected positive response SID. Every other Flow Control the core queues is withheld: the
+ * reception is cancelled at once (no indication, no N_Cr wait) and
+ * isotp_link_take_fc_withheld() reports it, so the client can wait until the ECU has
+ * given up its segmented send.
  *
  * The link registers itself as a can_if receiver, so it must have static storage
  * duration.
@@ -68,6 +72,8 @@ typedef struct {
     uint32_t tx_timeouts; /* messages ended with ISOTP_N_TIMEOUT_A */
     uint32_t fc_withheld_count; /* Flow Controls the vehicle link did not send */
     bool fc_withheld; /* one was withheld since isotp_link_take_fc_withheld() */
+    bool response_open; /* vehicle link: one FC.CTS may answer the next First Frame */
+    uint8_t response_sid; /* ... whose first data byte is this positive response SID */
     bool vehicle;     /* CL250 tester link: D-020 checks apply */
     bool open;
 } isotp_can_link_t;
@@ -84,7 +90,9 @@ isotp_status_t isotp_link_open(isotp_can_link_t* link, const isotp_link_addr_t* 
 /*
  * The vehicle link to the CL250 engine ECU (D-019), everything from gen/vehicle_cl250.h:
  * vehicle port, VEHICLE_CL250_REQUEST_ID -> VEHICLE_CL250_RESPONSE_ID (29-bit), 8-byte
- * frames padded with VEHICLE_CL250_PADDING_BYTE, ISO default BS/STmin/N_Bs/N_Cr.
+ * frames padded with VEHICLE_CL250_PADDING_BYTE, the D-059 FC block size and STmin,
+ * N_Cr = VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS, the ISO default N_Bs. rx_cap is
+ * clamped to VEHICLE_CL250_MAX_FF_DL: a longer First Frame gets no reception.
  */
 isotp_status_t isotp_link_open_vehicle_cl250(isotp_can_link_t* link, uint8_t* rx_buf,
                                              uint16_t rx_cap, uint8_t* tx_buf, uint16_t tx_cap);
@@ -117,6 +125,16 @@ uint32_t isotp_link_tx_timeout_count(const isotp_can_link_t* link);
 /* Vehicle link: requests and frames refused by the D-020 checks (never written). A
  * withheld Flow Control is not counted here (see isotp_link_fc_withheld_count()). */
 uint32_t isotp_link_tx_refused_count(const isotp_can_link_t* link);
+
+/* Vehicle link (D-059): the client's allowed request went out and it waits for the
+ * answer, whose first byte is positive_sid; the next First Frame starting with it may
+ * get the one FC.CTS. Fail-closed: only this call arms it, never isotp_link_send().
+ * Ignored on other links. */
+void isotp_link_expect_response(isotp_can_link_t* link, uint8_t positive_sid);
+
+/* Vehicle link: no answer is expected any more (answered, timed out, latched); no FC
+ * goes out until the next isotp_link_expect_response(). */
+void isotp_link_close_response(isotp_can_link_t* link);
 
 /* Vehicle link: true once after the link withheld a Flow Control (a First Frame it did
  * not answer; its reception was cancelled). */

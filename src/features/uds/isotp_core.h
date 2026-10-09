@@ -179,6 +179,9 @@ bool isotp_rx_busy(const isotp_link_t* link);
  * reception error. A pending FC is dropped. No-op while no reception runs. */
 void isotp_rx_cancel(isotp_link_t* link);
 
+/* FF_DL of the segmented reception under way; 0 while none runs. */
+uint16_t isotp_rx_pending_len(const isotp_link_t* link);
+
 /* True when no message is being sent: isotp_send() would accept a new one. */
 bool isotp_tx_idle(const isotp_link_t* link);
 

@@ -10,6 +10,7 @@
 _Static_assert(CAN_IF_MAX_RECEIVERS <= CAN_PORT_MAX_FILTERS, "a port could need more filters");
 
 #define SF_DL_MASK 0x0Fu /* ISO 15765-2 Single Frame data length (low nibble of PCI) */
+#define PCI_TYPE_FC 0x3u /* ISO 15765-2 N_PCI type of a Flow Control (high nibble) */
 
 typedef struct {
     bool used;
@@ -154,6 +155,15 @@ bool can_if_tx_allowed(can_port_id_t port, const can_frame_t* frame)
         (frame->dlc != VEHICLE_CL250_FRAME_DLC) ||
         !vehicle_cl250_frame_allowed(frame->data, (size_t)frame->dlc)) {
         return false;
+    }
+    /* D-059: the gate also passes the one FC.CTS. Stateless here: whether one may go out
+     * now (our own allowed request, its First Frame, once) is the vehicle link's check. */
+    if ((frame->data[0] >> 4) == PCI_TYPE_FC) {
+        bool exact = true;
+        for (uint8_t i = 0u; i < VEHICLE_CL250_FRAME_DLC; i++) {
+            exact = exact && (frame->data[i] == vehicle_cl250_fc_cts[i]);
+        }
+        return exact;
     }
     /* The gate accepted a Single Frame: every byte after its payload must be padding. */
     const uint8_t sf_len = (uint8_t)(frame->data[0] & SF_DL_MASK);

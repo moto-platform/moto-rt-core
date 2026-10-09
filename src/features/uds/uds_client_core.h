@@ -49,6 +49,8 @@
  *   - A failed reception (e.g. ISOTP_N_TIMEOUT_CR or a wrong sequence number) means
  *     "service unavailable": the DID goes into skip cooldown at once, and nothing is sent
  *     for the link's N_Bs, so the ECU has given up its segmented send first.
+ *   - A complete segmented answer (longer than a Single Frame, D-059) to the pending
+ *     read: "service unavailable" (skip cooldown), not a timeout, no hold.
  *   - A First Frame the link did not answer with a Flow Control
  *     (uds_client_core_on_fc_withheld(), Q-020 / D-059): the pending request ends
  *     without a timeout (a read is "service unavailable" as above), and nothing is sent
@@ -223,6 +225,9 @@ bool uds_client_core_did_skipped(const uds_client_core_t* c, uint32_t idx, uint3
 
 /* Pending request kind (UDS_CLIENT_REQ_NONE when the slot is free). */
 uds_client_req_kind_t uds_client_core_pending(const uds_client_core_t* c);
+
+/* The positive response SID of the pending request (its SID + 0x40); 0 when none. */
+uint8_t uds_client_core_pending_response_sid(const uds_client_core_t* c);
 
 const uds_client_stats_t* uds_client_core_stats(const uds_client_core_t* c);
 

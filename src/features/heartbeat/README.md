@@ -10,7 +10,7 @@ Sends the gen/ `platform.dbc` message 0x081:
 |---|---|---|---|---|
 | `HeartbeatRtCore` | `PLATFORM_HEARTBEAT_RT_CORE_FRAME_ID`, `PLATFORM_HEARTBEAT_RT_CORE_CYCLE_TIME_MS` (0x081, 100 ms) | E2E (D-005, D-026): `platform_heartbeat_rt_core_e2e_protect()`, DataID `PLATFORM_HEARTBEAT_RT_CORE_E2E_DATA_ID`, receiver timeout `PLATFORM_HEARTBEAT_RT_CORE_E2E_TIMEOUT_MS` (300 ms) | dedicated replace-on-new buffer (D-054 item 6, D-056 item 6) | SAFETY, IO, CONN, LINUX |
 
-Every ID, length, choice value, cycle time and E2E parameter comes from gen/ (`platform.h`, `platform_e2e.h`, `platform_uds.h`, defs v0.5.0). The module names no CAN literal.
+Every ID, length, choice value, cycle time and E2E parameter comes from gen/ (`platform.h`, `platform_e2e.h`, `platform_uds.h`, defs v0.8.0). The module names no CAN literal.
 
 ## Fields (D-064)
 

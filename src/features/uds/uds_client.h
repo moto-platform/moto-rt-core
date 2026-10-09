@@ -20,8 +20,8 @@
  *     are never received back, so it is a second tester (D-021)
  *                                                             -> UDS_CLIENT_FAULT_FOREIGN_TESTER
  * Not a fault: a request the link cannot take because it is busy (dropped, retried on
- * schedule; the client waits for isotp_link_tx_ready() anyway), and the FC.CTS the link
- * drops for a segmented response (Q-020).
+ * schedule; the client waits for isotp_link_tx_ready() anyway), and a Flow Control the
+ * link withholds (a First Frame it may not answer, D-059).
  * The values then go STALE in services/vehicle_signals; it expires them every step.
  *
  * Diagnostics (D-040): every step reports the DTCs VEHICLE_ECU_COMM_LOST and
@@ -42,9 +42,9 @@
 extern "C" {
 #endif
 
-/* Link buffers. Requests are at most UDS_CLIENT_REQ_MAX bytes. The receive buffer is
- * larger than a Single Frame, so a segmented response starts a reception that ends in
- * ISOTP_N_TIMEOUT_CR ("service unavailable") instead of being dropped silently. */
+/* Link buffers. Requests are at most UDS_CLIENT_REQ_MAX bytes. The receive buffer takes
+ * a segmented answer of up to 64 bytes (D-059; <= VEHICLE_CL250_MAX_FF_DL, at most 9
+ * CFs); a longer First Frame gets no Flow Control (withheld). */
 #define UDS_CLIENT_RX_BUF 64u
 #define UDS_CLIENT_TX_BUF 8u
 

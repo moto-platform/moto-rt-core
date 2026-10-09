@@ -433,6 +433,14 @@ bool uds_client_core_on_indication(uds_client_core_t* c, uint32_t now_ms,
         on_negative(c, now_ms, data[1], data[2]);
         return false;
     }
+    if ((c->pending == UDS_CLIENT_REQ_READ) && (len > ISOTP_SF_MAX_LEN)) {
+        /* D-059: a table DID answers in a Single Frame. A segmented answer is "service
+         * unavailable", not a timeout; the ECU has finished, so no hold. */
+        count(&c->stats.unavailable);
+        skip_did(c, c->pending_idx, now_ms);
+        c->pending = UDS_CLIENT_REQ_NONE;
+        return false;
+    }
     if ((c->pending == UDS_CLIENT_REQ_SESSION) && (len >= 2u) &&
         (data[0] == (uint8_t)VEHICLE_CL250_SESSION_POSITIVE_SID) &&
         (data[1] == (uint8_t)VEHICLE_CL250_SESSION_SUBFUNCTION)) {
@@ -480,6 +488,13 @@ bool uds_client_core_did_skipped(const uds_client_core_t* c, uint32_t idx, uint3
 uds_client_req_kind_t uds_client_core_pending(const uds_client_core_t* c)
 {
     return (c == NULL) ? UDS_CLIENT_REQ_NONE : c->pending;
+}
+
+uint8_t uds_client_core_pending_response_sid(const uds_client_core_t* c)
+{
+    return ((c == NULL) || (c->pending == UDS_CLIENT_REQ_NONE))
+               ? 0u
+               : (uint8_t)(c->pending_sid + UDS_POSITIVE_RESPONSE_OFFSET);
 }
 
 const uds_client_stats_t* uds_client_core_stats(const uds_client_core_t* c)

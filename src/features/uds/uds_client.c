@@ -11,6 +11,11 @@
 
 _Static_assert(UDS_CLIENT_TX_BUF >= UDS_CLIENT_REQ_MAX, "request buffer too small");
 _Static_assert(UDS_CLIENT_RX_BUF > ISOTP_SF_MAX_LEN, "rx buffer must exceed a Single Frame");
+_Static_assert(UDS_CLIENT_RX_BUF <= VEHICLE_CL250_MAX_FF_DL, "rx buffer above the D-059 cap");
+/* A lost CF must show as a wrong SN (or N_Cr for the last one): at most 15 CFs, so the
+ * 4-bit sequence number cannot wrap within one answer (YAML flow_control rule). */
+/* CFs = ceil((RX_BUF - 6 FF data bytes) / 7 CF data bytes). */
+_Static_assert((((UDS_CLIENT_RX_BUF - 6u) + 6u) / 7u) <= 15u, "rx buffer allows an SN wrap");
 
 #define FALLBACK_IDS_EXTENDED (VEHICLE_CL250_FALLBACK_REQUEST_ID > CAN_PORT_STD_ID_MAX)
 #define REQUEST_IDS_EXTENDED (VEHICLE_CL250_REQUEST_ID > CAN_PORT_STD_ID_MAX)
@@ -35,6 +40,7 @@ static void latch(uds_client_t* client, uds_client_fault_t fault)
         client->fault = fault;
     }
     uds_client_core_latch(&client->core);
+    isotp_link_close_response(&client->link); /* a latched tester sends no FC either */
 }
 
 isotp_status_t uds_client_open(uds_client_t* client)
@@ -159,9 +165,16 @@ void uds_client_step(uds_client_t* client)
             uds_client_core_not_sent(&client->core); /* its schedule is restored */
         } else if (st != ISOTP_OK) {
             latch(client, UDS_CLIENT_FAULT_GATE); /* D-020 gate or length: a bug */
+        } else if (uds_client_core_pending(&client->core) != UDS_CLIENT_REQ_NONE) {
+            /* D-059: its answer (positive response SID) may get the FC */
+            isotp_link_expect_response(&client->link,
+                                       uds_client_core_pending_response_sid(&client->core));
         } else {
-            /* sent */
+            /* tester present: no answer is expected */
         }
+    }
+    if (uds_client_core_pending(&client->core) == UDS_CLIENT_REQ_NONE) {
+        isotp_link_close_response(&client->link); /* answered, timed out or latched */
     }
     isotp_link_step(&client->link);
 

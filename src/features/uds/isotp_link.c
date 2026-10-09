@@ -9,6 +9,9 @@ _Static_assert(ISOTP_CAN_DL == CAN_PORT_MAX_DLC, "ISO-TP and CAN frame sizes dif
 
 #define PCI_TYPE_FC 0x3u /* ISO 15765-2 N_PCI type of a Flow Control */
 
+_Static_assert(VEHICLE_CL250_FC_ST_MIN_MS <= 0x7Fu, "STmin must be a whole-ms STmin byte");
+_Static_assert(VEHICLE_CL250_MAX_FF_DL <= ISOTP_FF_MAX_LEN, "MAX_FF_DL needs no FF escape");
+
 static void link_count(uint32_t* counter)
 {
     if (*counter < UINT32_MAX) {
@@ -51,6 +54,8 @@ static isotp_status_t open_link(isotp_can_link_t* link, const isotp_link_addr_t*
     link->tx_timeouts = 0u;
     link->fc_withheld_count = 0u;
     link->fc_withheld = false;
+    link->response_open = false;
+    link->response_sid = 0u;
     link->vehicle = vehicle;
     if (can_if_register_rx(addr->port, addr->rx_id, addr->extended, on_rx, link) != CAN_IF_OK) {
         return ISOTP_ERR_ARG;
@@ -90,7 +95,12 @@ isotp_status_t isotp_link_open_vehicle_cl250(isotp_can_link_t* link, uint8_t* rx
     isotp_default_config(&cfg);
     cfg.padding_enabled = (VEHICLE_CL250_FRAME_DLC == ISOTP_CAN_DL);
     cfg.padding_byte = VEHICLE_CL250_PADDING_BYTE;
-    return open_link(link, &addr, &cfg, true, rx_buf, rx_cap, tx_buf, tx_cap);
+    cfg.block_size = (uint8_t)VEHICLE_CL250_FC_BLOCK_SIZE; /* D-059 */
+    cfg.st_min = (uint8_t)VEHICLE_CL250_FC_ST_MIN_MS;
+    cfg.n_cr_ms = (uint16_t)VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS;
+    const uint16_t cap =
+        (rx_cap > (uint16_t)VEHICLE_CL250_MAX_FF_DL) ? (uint16_t)VEHICLE_CL250_MAX_FF_DL : rx_cap;
+    return open_link(link, &addr, &cfg, true, rx_buf, cap, tx_buf, tx_cap);
 }
 
 /* N_As: the port aborted its pending TX since the link last looked. */
@@ -138,8 +148,18 @@ static void withhold_fc(isotp_can_link_t* link)
 static void transmit(isotp_can_link_t* link, const isotp_frame_t* f)
 {
     if (link->vehicle && (f->dlc > 0u) && ((f->data[0] >> 4) == PCI_TYPE_FC)) {
-        withhold_fc(link); /* Q-020: the frame gate passes no Flow Control */
-        return;
+        /* D-059: the FC.CTS for the First Frame of our own expected answer, once; the
+         * reception runs, so FF_DL <= rx_cap <= MAX_FF_DL (an OVFLW starts none), and
+         * its first data byte (already in rx_buf) is the expected response SID, so a
+         * late answer to an earlier request gets none. */
+        const bool may = link->response_open && (isotp_rx_pending_len(&link->iso) > 0u) &&
+                         (link->rx_buf[0] == link->response_sid) &&
+                         vehicle_cl250_frame_allowed(f->data, (size_t)f->dlc);
+        if (!may) {
+            withhold_fc(link);
+            return;
+        }
+        link->response_open = false; /* one FC per request (BS 0) */
     }
     if (link->vehicle && !vehicle_cl250_frame_allowed(f->data, (size_t)f->dlc)) {
         link_count(&link->tx_refused_count);
@@ -215,6 +235,21 @@ uint32_t isotp_link_tx_timeout_count(const isotp_can_link_t* link)
 uint32_t isotp_link_tx_refused_count(const isotp_can_link_t* link)
 {
     return (link != NULL) ? link->tx_refused_count : 0u;
+}
+
+void isotp_link_expect_response(isotp_can_link_t* link, uint8_t positive_sid)
+{
+    if ((link != NULL) && link->open && link->vehicle) {
+        link->response_open = true;
+        link->response_sid = positive_sid;
+    }
+}
+
+void isotp_link_close_response(isotp_can_link_t* link)
+{
+    if (link != NULL) {
+        link->response_open = false;
+    }
 }
 
 bool isotp_link_take_fc_withheld(isotp_can_link_t* link)

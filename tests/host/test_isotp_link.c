@@ -157,6 +157,168 @@ static void inject(uint32_t id, bool ext, const uint8_t* data, uint8_t dlc)
 
 /* ------------------------------------------------------------------------- */
 /* CL250 vehicle link: configuration from gen/, wire format, simulated ECU    */
+/* ---------------------------------------------------- D-059 Flow Control (vehicle) */
+
+static const uint8_t ff10[8] = {0x10u, 0x0Au, 0x62u, 0xF4u, 0x0Cu, 0x01u, 0x02u, 0x03u};
+
+/* An allowed read goes out and the client arms the link for its answer. */
+static void request_and_expect(void)
+{
+    open_cl250();
+    const uint8_t req[3] = {0x22u, (uint8_t)(VEHICLE_CL250_DID_ENGINE_SPEED >> 8u),
+                            (uint8_t)(VEHICLE_CL250_DID_ENGINE_SPEED & 0xFFu)};
+    TEST_ASSERT_EQUAL(ISOTP_OK, isotp_link_send(&dut, req, 3u));
+    isotp_link_expect_response(&dut, 0x62u); /* ReadDataByIdentifier positive response */
+    run_ms(1u);
+    sniff_count = 0u;
+}
+
+static uint32_t dut_frames(void)
+{
+    uint32_t n = 0u;
+    for (uint32_t i = 0u; i < sniff_count; i++) {
+        n += sniffed[i].from_dut ? 1u : 0u;
+    }
+    return n;
+}
+
+static void test_cl250_first_frame_of_the_expected_answer_gets_the_one_gen_fc(void)
+{
+    request_and_expect();
+    inject(VEHICLE_CL250_RESPONSE_ID, true, ff10, 8u);
+    run_ms(2u);
+    TEST_ASSERT_EQUAL_UINT32(2u, sniff_count); /* the FF, then our FC */
+    TEST_ASSERT_TRUE(sniffed[1].from_dut);
+    TEST_ASSERT_EQUAL_HEX32(VEHICLE_CL250_REQUEST_ID, sniffed[1].f.id); /* physical, never fallback */
+    TEST_ASSERT_TRUE(sniffed[1].f.extended);
+    TEST_ASSERT_EQUAL_UINT8(VEHICLE_CL250_FRAME_DLC, sniffed[1].f.dlc);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(vehicle_cl250_fc_cts, sniffed[1].f.data, VEHICLE_CL250_FRAME_DLC);
+    TEST_ASSERT_FALSE(dut.response_open); /* one FC per request */
+    const uint8_t cf[8] = {0x21u, 0x04u, 0x05u, 0x06u, 0x07u, 0xAAu, 0xAAu, 0xAAu};
+    inject(VEHICLE_CL250_RESPONSE_ID, true, cf, 8u);
+    run_ms(1u);
+    isotp_n_result_t res;
+    uint16_t len;
+    TEST_ASSERT_TRUE(isotp_link_take_rx(&dut, &res, &len));
+    TEST_ASSERT_EQUAL(ISOTP_N_OK, res);
+    TEST_ASSERT_EQUAL_UINT16(10u, len);
+    TEST_ASSERT_EQUAL_UINT32(0u, isotp_link_fc_withheld_count(&dut));
+    TEST_ASSERT_EQUAL_UINT32(0u, isotp_link_tx_refused_count(&dut));
+    TEST_ASSERT_EQUAL_UINT32(0u, can_if_tx_refused_count(CAN_PORT_VEHICLE));
+}
+
+static void test_cl250_a_second_first_frame_in_one_request_gets_no_second_fc(void)
+{
+    request_and_expect();
+    inject(VEHICLE_CL250_RESPONSE_ID, true, ff10, 8u);
+    run_ms(2u);
+    inject(VEHICLE_CL250_RESPONSE_ID, true, ff10, 8u); /* restarts the reception */
+    run_ms(2u);
+    TEST_ASSERT_EQUAL_UINT32(1u, dut_frames());
+    TEST_ASSERT_EQUAL_UINT32(1u, isotp_link_fc_withheld_count(&dut));
+    TEST_ASSERT_TRUE(isotp_link_take_fc_withheld(&dut));
+    isotp_n_result_t res;
+    uint16_t len;
+    TEST_ASSERT_TRUE(isotp_link_take_rx(&dut, &res, &len));
+    TEST_ASSERT_EQUAL(ISOTP_N_UNEXP_PDU, res); /* the first reception, ended by the second FF */
+    TEST_ASSERT_FALSE(isotp_link_rx_busy(&dut));
+}
+
+static void test_cl250_first_frame_above_the_cap_gets_nothing_on_the_bus(void)
+{
+    request_and_expect();
+    const uint16_t ff_dl = (uint16_t)(VEHICLE_CL250_MAX_FF_DL + 1u);
+    uint8_t ff[8];
+    memcpy(ff, ff10, sizeof ff);
+    ff[0] = (uint8_t)(0x10u | (ff_dl >> 8u));
+    ff[1] = (uint8_t)(ff_dl & 0xFFu);
+    inject(VEHICLE_CL250_RESPONSE_ID, true, ff, 8u);
+    run_ms(2u);
+    TEST_ASSERT_EQUAL_UINT32(0u, dut_frames()); /* no FC.OVFLW either */
+    TEST_ASSERT_EQUAL_UINT32(1u, isotp_link_fc_withheld_count(&dut));
+    TEST_ASSERT_EQUAL_UINT32(0u, isotp_link_tx_refused_count(&dut));
+    TEST_ASSERT_FALSE(isotp_link_rx_busy(&dut));
+}
+
+static void test_cl250_missing_cf_after_the_fc_ends_in_n_cr_base(void)
+{
+    request_and_expect();
+    inject(VEHICLE_CL250_RESPONSE_ID, true, ff10, 8u);
+    run_ms(2u);
+    TEST_ASSERT_EQUAL_UINT32(1u, dut_frames());
+    run_ms(VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS - 3u);
+    isotp_n_result_t res;
+    uint16_t len;
+    TEST_ASSERT_FALSE(isotp_link_take_rx(&dut, &res, &len));
+    run_ms(3u);
+    TEST_ASSERT_TRUE(isotp_link_take_rx(&dut, &res, &len));
+    TEST_ASSERT_EQUAL(ISOTP_N_TIMEOUT_CR, res);
+}
+
+static void test_cl250_wrong_sequence_number_after_the_fc_aborts(void)
+{
+    request_and_expect();
+    inject(VEHICLE_CL250_RESPONSE_ID, true, ff10, 8u);
+    run_ms(2u);
+    const uint8_t cf[8] = {0x22u, 0x04u, 0x05u, 0x06u, 0x07u, 0xAAu, 0xAAu, 0xAAu};
+    inject(VEHICLE_CL250_RESPONSE_ID, true, cf, 8u);
+    run_ms(1u);
+    isotp_n_result_t res;
+    uint16_t len;
+    TEST_ASSERT_TRUE(isotp_link_take_rx(&dut, &res, &len));
+    TEST_ASSERT_EQUAL(ISOTP_N_WRONG_SN, res);
+}
+
+/* MINOR-2: an FF that starts with another response SID (a late answer to an earlier
+ * request of another service) gets no FC. */
+static void test_cl250_first_frame_with_another_response_sid_gets_no_fc(void)
+{
+    request_and_expect();
+    uint8_t ff[8];
+    memcpy(ff, ff10, sizeof ff);
+    ff[2] = 0x50u; /* a session answer, not the expected 0x62 */
+    inject(VEHICLE_CL250_RESPONSE_ID, true, ff, 8u);
+    run_ms(2u);
+    TEST_ASSERT_EQUAL_UINT32(0u, dut_frames());
+    TEST_ASSERT_EQUAL_UINT32(1u, isotp_link_fc_withheld_count(&dut));
+    TEST_ASSERT_TRUE(dut.response_open); /* the expected answer may still come */
+}
+
+/* The clamp's upper boundary: FF_DL = VEHICLE_CL250_MAX_FF_DL is received. */
+static void test_cl250_first_frame_at_the_cap_gets_the_fc(void)
+{
+    request_and_expect();
+    uint8_t ff[8];
+    memcpy(ff, ff10, sizeof ff);
+    ff[0] = (uint8_t)(0x10u | ((uint16_t)VEHICLE_CL250_MAX_FF_DL >> 8u));
+    ff[1] = (uint8_t)((uint16_t)VEHICLE_CL250_MAX_FF_DL & 0xFFu);
+    inject(VEHICLE_CL250_RESPONSE_ID, true, ff, 8u);
+    run_ms(2u);
+    TEST_ASSERT_EQUAL_UINT32(1u, dut_frames());
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(vehicle_cl250_fc_cts, sniffed[1].f.data, VEHICLE_CL250_FRAME_DLC);
+    TEST_ASSERT_TRUE(isotp_link_rx_busy(&dut));
+}
+
+static void test_cl250_closed_or_unarmed_response_gets_no_fc(void)
+{
+    request_and_expect();
+    isotp_link_close_response(&dut); /* answered, timed out or latched */
+    inject(VEHICLE_CL250_RESPONSE_ID, true, ff10, 8u);
+    run_ms(2u);
+    TEST_ASSERT_EQUAL_UINT32(0u, dut_frames());
+    TEST_ASSERT_EQUAL_UINT32(1u, isotp_link_fc_withheld_count(&dut));
+
+    /* a request sent without arming (tester present expects no answer) */
+    const uint8_t tp[2] = {VEHICLE_CL250_TESTER_PRESENT_SID, VEHICLE_CL250_TESTER_PRESENT_SUBFUNCTION};
+    TEST_ASSERT_EQUAL(ISOTP_OK, isotp_link_send(&dut, tp, 2u));
+    run_ms(1u);
+    sniff_count = 0u;
+    inject(VEHICLE_CL250_RESPONSE_ID, true, ff10, 8u);
+    run_ms(2u);
+    TEST_ASSERT_EQUAL_UINT32(0u, dut_frames());
+    TEST_ASSERT_EQUAL_UINT32(2u, isotp_link_fc_withheld_count(&dut));
+}
+
 /* ------------------------------------------------------------------------- */
 
 static void test_cl250_link_takes_ids_and_padding_from_gen(void)
@@ -170,7 +332,11 @@ static void test_cl250_link_takes_ids_and_padding_from_gen(void)
     TEST_ASSERT_TRUE(dut.iso.cfg.padding_enabled);
     TEST_ASSERT_EQUAL_HEX8(VEHICLE_CL250_PADDING_BYTE, dut.iso.cfg.padding_byte);
     TEST_ASSERT_EQUAL_UINT16(ISOTP_DEFAULT_N_BS_MS, dut.iso.cfg.n_bs_ms);
-    TEST_ASSERT_EQUAL_UINT16(ISOTP_DEFAULT_N_CR_MS, dut.iso.cfg.n_cr_ms);
+    /* D-059: N_Cr = response_timeout_base_ms, FC parameters from gen/ */
+    TEST_ASSERT_EQUAL_UINT16(VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS, dut.iso.cfg.n_cr_ms);
+    TEST_ASSERT_EQUAL_UINT8(VEHICLE_CL250_FC_BLOCK_SIZE, dut.iso.cfg.block_size);
+    TEST_ASSERT_EQUAL_UINT8(VEHICLE_CL250_FC_ST_MIN_MS, dut.iso.cfg.st_min);
+    TEST_ASSERT_FALSE(dut.response_open); /* fail-closed until the client arms it */
 }
 
 static void test_cl250_request_is_a_padded_single_frame_on_the_request_id(void)
@@ -264,7 +430,7 @@ static void test_cl250_refuses_a_request_that_needs_a_first_frame(void)
 
 /* Documents the open question: the D-020 frame gate refuses FC frames, so the vehicle
  * link cannot receive a segmented response (e.g. a long 0x19 or 0x09 answer). */
-static void test_cl250_segmented_response_gets_no_flow_control(void)
+static void test_cl250_unsolicited_first_frame_gets_no_flow_control(void)
 {
     open_cl250();
     const uint8_t ff[8] = {0x10u, 0x0Au, 0x62u, 0xF4u, 0x0Cu, 0x01u, 0x02u, 0x03u};
@@ -646,7 +812,15 @@ int main(void)
     RUN_TEST(test_cl250_every_gen_did_round_trips_through_the_simulated_ecu);
     RUN_TEST(test_cl250_refuses_forbidden_services);
     RUN_TEST(test_cl250_refuses_a_request_that_needs_a_first_frame);
-    RUN_TEST(test_cl250_segmented_response_gets_no_flow_control);
+    RUN_TEST(test_cl250_unsolicited_first_frame_gets_no_flow_control);
+    RUN_TEST(test_cl250_first_frame_of_the_expected_answer_gets_the_one_gen_fc);
+    RUN_TEST(test_cl250_a_second_first_frame_in_one_request_gets_no_second_fc);
+    RUN_TEST(test_cl250_first_frame_above_the_cap_gets_nothing_on_the_bus);
+    RUN_TEST(test_cl250_missing_cf_after_the_fc_ends_in_n_cr_base);
+    RUN_TEST(test_cl250_wrong_sequence_number_after_the_fc_aborts);
+    RUN_TEST(test_cl250_closed_or_unarmed_response_gets_no_fc);
+    RUN_TEST(test_cl250_first_frame_with_another_response_sid_gets_no_fc);
+    RUN_TEST(test_cl250_first_frame_at_the_cap_gets_the_fc);
     RUN_TEST(test_cl250_link_ignores_other_ids_and_formats);
     RUN_TEST(test_generic_link_cannot_open_on_the_vehicle_port);
     RUN_TEST(test_segmented_message_with_block_size_and_st_min_over_the_bus);
