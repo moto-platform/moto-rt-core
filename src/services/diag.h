@@ -30,6 +30,10 @@
  * PLATFORM_UDS_RT_CORE_HEALTH_MAX_AGE_MS reads as the last values, not fresh (sticky
  * until the next write, like the status). Freshness is their only health signal.
  *
+ * Fault summary (D-064, rt-core heartbeat 0x081): every monitor's last result is kept
+ * apart from the status bytes, so diag_fault_active() and diag_fault_onsets() follow
+ * the monitored conditions, not what a tester cleared.
+ *
  * RAM only: the memory is lost on reset until the H7 flash driver exists (D-040).
  * Static storage, no heap. Main loop only (not ISR-safe).
  */
@@ -67,7 +71,19 @@ void diag_dtc_report(uint32_t idx, bool failed);
 /* DTCStatusMask of DTC index idx; 0 if out of range. */
 uint8_t diag_dtc_status(uint32_t idx);
 
-/* ClearDiagnosticInformation for all groups: every status byte to 0. */
+/* True while any DTC monitor's last reported result is failed (D-064: the heartbeat's
+ * DEGRADED). Not changed by diag_dtc_clear_all(): a clear hides no active fault.
+ * Every DTC in the gen/ table counts: a new DTC must be classified for the heartbeat
+ * first, since DEGRADED switches safety-node to its fallback lean (D-042 item 3). */
+bool diag_fault_active(void);
+
+/* Faults detected since diag_init() (D-064: the heartbeat's ERROR_COUNT): the number of
+ * times a monitor's result went from passed (or not yet reported) to failed. Saturates
+ * at UINT32_MAX; diag_dtc_clear_all() neither resets nor re-triggers it. */
+uint32_t diag_fault_onsets(void);
+
+/* ClearDiagnosticInformation for all groups: every status byte to 0 (monitor results
+ * and the onset count are kept). */
 void diag_dtc_clear_all(void);
 
 /* Latest vehicle-tester status (writer: the UDS client glue, every step). */

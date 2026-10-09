@@ -53,21 +53,6 @@ bool vehicle_republish_speed_frame(const struct platform_vehicle_speed_t* msg,
 bool vehicle_republish_engine_frame(const struct platform_vehicle_engine_t* msg,
                                     uint8_t out[PLATFORM_VEHICLE_ENGINE_LENGTH]);
 
-/* Deadline-anchored cycle (D-056 item 3). Zero-initialised: due at once. */
-typedef struct {
-    uint32_t next_due_ms;
-    bool started;
-} vehicle_republish_cycle_t;
-
-/* True at the first call and whenever now_ms reached the deadline (wrap-safe). */
-bool vehicle_republish_cycle_due(const vehicle_republish_cycle_t* cycle, uint32_t now_ms);
-
-/* The cycle's frame went out (or was dropped for good): the next deadline is one period
- * after the last one; deadlines already missed are skipped, never sent as a burst. The
- * first call anchors the schedule at now_ms. */
-void vehicle_republish_cycle_done(vehicle_republish_cycle_t* cycle, uint32_t now_ms,
-                                  uint32_t period_ms);
-
 #ifdef __cplusplus
 }
 #endif

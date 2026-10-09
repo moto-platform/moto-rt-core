@@ -12,7 +12,8 @@ bool comms_apply_filters(void)
 }
 
 // cppcheck-suppress misra-c2012-8.7 ; DEV-002: called by the host program and the H7 task
-void comms_pass(uds_client_t* client, uds_server_t* server, vehicle_republish_t* republisher)
+void comms_pass(uds_client_t* client, uds_server_t* server, vehicle_republish_t* republisher,
+                heartbeat_t* heartbeat)
 {
     can_sm_step(CAN_PORT_VEHICLE);
     (void)can_if_dispatch(CAN_PORT_VEHICLE, COMMS_RX_PER_PASS);
@@ -21,5 +22,6 @@ void comms_pass(uds_client_t* client, uds_server_t* server, vehicle_republish_t*
     can_sm_step(CAN_PORT_PLATFORM);
     (void)can_if_dispatch(CAN_PORT_PLATFORM, COMMS_RX_PER_PASS);
     vehicle_republish_step(republisher);
+    heartbeat_step(heartbeat);
     uds_server_step(server);
 }

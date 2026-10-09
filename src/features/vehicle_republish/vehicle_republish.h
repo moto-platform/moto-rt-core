@@ -14,6 +14,7 @@
  */
 
 #include "features/vehicle_republish/vehicle_republish_core.h"
+#include "services/com.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -22,16 +23,12 @@
 extern "C" {
 #endif
 
-/* Saturating counters (a dead bus can refuse a write every pass). */
-typedef struct {
-    uint32_t sent;     /* frames the port accepted */
-    uint32_t retried;  /* writes refused with CAN_PORT_TX_FULL, tried again next pass */
-    uint32_t dropped;  /* cycles given up: port bus-off/latched or a packing failure */
-} vehicle_republish_msg_stats_t;
+/* The shared send counters (services/com). */
+typedef com_msg_stats_t vehicle_republish_msg_stats_t;
 
 typedef struct {
-    vehicle_republish_cycle_t speed_cycle;
-    vehicle_republish_cycle_t engine_cycle;
+    com_cycle_t speed_cycle;
+    com_cycle_t engine_cycle;
     moto_e2e_tx_state_t speed_e2e; /* committed: advanced only by accepted frames */
     vehicle_republish_msg_stats_t speed;
     vehicle_republish_msg_stats_t engine;

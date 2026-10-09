@@ -13,6 +13,7 @@
  */
 #include "app/comms.h"
 #include "app/host/sim_ecu.h"
+#include "app/host/sim_listener.h"
 #include "features/uds/uds_client.h"
 #include "features/uds/uds_server.h"
 #include "hal/host/can_port_host.h"
@@ -696,6 +697,7 @@ static void test_apply_filters_on_an_unbound_or_unknown_port_reports_it_and_does
 static uds_client_t client;
 static uds_server_t server;
 static vehicle_republish_t republisher;
+static heartbeat_t heartbeat;
 static sim_ecu_t ecu;
 
 static void test_comms_applies_the_filters_and_the_sil_exchange_still_works(void)
@@ -709,6 +711,7 @@ static void test_comms_applies_the_filters_and_the_sil_exchange_still_works(void
     TEST_ASSERT_EQUAL(ISOTP_OK, uds_client_open(&client));
     TEST_ASSERT_EQUAL(ISOTP_OK, uds_server_open(&server));
     TEST_ASSERT_TRUE(vehicle_republish_open(&republisher));
+    TEST_ASSERT_TRUE(heartbeat_open(&heartbeat));
     TEST_ASSERT_TRUE(comms_apply_filters());
     TEST_ASSERT_TRUE(bus_v.nodes[node_vehicle].filtered);
     TEST_ASSERT_TRUE(bus_p.nodes[node_platform].filtered);
@@ -738,13 +741,15 @@ static void test_comms_applies_the_filters_and_the_sil_exchange_still_works(void
     bool answered = false;
     uint32_t speed_frames = 0u;
     uint32_t engine_frames = 0u;
+    uint32_t heartbeat_frames = 0u;
     for (uint32_t i = 0u; i < 300u; i++) {
         sim_ecu_step(&ecu, timebase_now_ms());
-        comms_pass(&client, &server, &republisher);
+        comms_pass(&client, &server, &republisher, &heartbeat);
         can_frame_t got;
         while (vbus_recv(&bus_p, node_ppeer, &got) == CAN_PORT_OK) {
             speed_frames += (got.id == PLATFORM_VEHICLE_SPEED_FRAME_ID) ? 1u : 0u;
             engine_frames += (got.id == PLATFORM_VEHICLE_ENGINE_FRAME_ID) ? 1u : 0u;
+            heartbeat_frames += (got.id == PLATFORM_HEARTBEAT_RT_CORE_FRAME_ID) ? 1u : 0u;
             if ((got.id == PLATFORM_UDS_PHYS_RESPONSE_ID) &&
                 (got.data[1] == (uint8_t)(UDS_SID_TESTER_PRESENT + UDS_POSITIVE_RESPONSE_OFFSET))) {
                 answered = true;
@@ -756,6 +761,7 @@ static void test_comms_applies_the_filters_and_the_sil_exchange_still_works(void
     /* the republisher's frames share the pass: 300 ms at the gen/ cycle times */
     TEST_ASSERT_EQUAL_UINT32(300u / PLATFORM_VEHICLE_SPEED_CYCLE_TIME_MS, speed_frames);
     TEST_ASSERT_EQUAL_UINT32(300u / PLATFORM_VEHICLE_ENGINE_CYCLE_TIME_MS, engine_frames);
+    TEST_ASSERT_EQUAL_UINT32(300u / PLATFORM_HEARTBEAT_RT_CORE_CYCLE_TIME_MS, heartbeat_frames);
     TEST_ASSERT_GREATER_THAN_UINT32(0u, uds_client_stats(&client)->reads_ok);
     TEST_ASSERT_TRUE(uds_client_session_up(&client));
     TEST_ASSERT_FALSE(uds_client_failed(&client));
@@ -764,6 +770,152 @@ static void test_comms_applies_the_filters_and_the_sil_exchange_still_works(void
     TEST_ASSERT_EQUAL_UINT32(0u, can_if_tx_refused_count(CAN_PORT_VEHICLE));
     TEST_ASSERT_EQUAL(CAN_SM_ERROR_ACTIVE, can_sm_state(CAN_PORT_VEHICLE));
     TEST_ASSERT_EQUAL(CAN_SM_ERROR_ACTIVE, can_sm_state(CAN_PORT_PLATFORM));
+}
+
+/* D-064 boot window (safety-reviewer MINOR-1): with the ECU silent from boot, U0100-00 arms
+ * only VEHICLE_CL250_ECU_ABSENT_TIMEOUT_MS after the client opened, so the frames between
+ * the first (INIT) and that point read NORMAL. Pinned here as the decided behaviour. */
+static void test_comms_heartbeat_reads_normal_until_a_silent_ecu_arms_u0100(void)
+{
+    diag_init(timebase_now_ms());
+    vehicle_signals_init();
+    memset(&client, 0, sizeof client);
+    memset(&server, 0, sizeof server);
+    TEST_ASSERT_EQUAL(ISOTP_OK, uds_client_open(&client));
+    TEST_ASSERT_EQUAL(ISOTP_OK, uds_server_open(&server));
+    TEST_ASSERT_TRUE(vehicle_republish_open(&republisher));
+    TEST_ASSERT_TRUE(heartbeat_open(&heartbeat));
+    TEST_ASSERT_TRUE(comms_apply_filters());
+    const uint32_t open_ms = timebase_now_ms();
+
+    uint32_t frames = 0u;
+    uint32_t init = 0u;
+    uint32_t normal = 0u;
+    bool degraded = false;
+    uint32_t degraded_at_ms = 0u;
+    uint8_t error_count = 0u;
+    const uint32_t run_ms =
+        VEHICLE_CL250_ECU_ABSENT_TIMEOUT_MS + (3u * PLATFORM_HEARTBEAT_RT_CORE_CYCLE_TIME_MS);
+    for (uint32_t i = 0u; i < run_ms; i++) {
+        comms_pass(&client, &server, &republisher, &heartbeat);
+        can_frame_t got;
+        while (vbus_recv(&bus_p, node_ppeer, &got) == CAN_PORT_OK) {
+            if (got.id != PLATFORM_HEARTBEAT_RT_CORE_FRAME_ID) {
+                continue;
+            }
+            struct platform_heartbeat_rt_core_t m;
+            sim_listener_heartbeat_decode(got.data, &m);
+            frames++;
+            if (m.node_mode == PLATFORM_HEARTBEAT_RT_CORE_NODE_MODE_INIT_CHOICE) {
+                TEST_ASSERT_EQUAL_UINT32_MESSAGE(1u, frames, "INIT only on the first frame");
+                init++;
+            } else if (!degraded) {
+                if (m.node_mode == PLATFORM_HEARTBEAT_RT_CORE_NODE_MODE_DEGRADED_CHOICE) {
+                    degraded = true;
+                    degraded_at_ms = timebase_now_ms() - open_ms;
+                    error_count = m.error_count;
+                } else {
+                    TEST_ASSERT_EQUAL_UINT8(PLATFORM_HEARTBEAT_RT_CORE_NODE_MODE_NORMAL_CHOICE,
+                                            m.node_mode);
+                    TEST_ASSERT_EQUAL_UINT8(0u, m.error_count);
+                    normal++;
+                }
+            } else {
+                TEST_ASSERT_EQUAL_UINT8(PLATFORM_HEARTBEAT_RT_CORE_NODE_MODE_DEGRADED_CHOICE,
+                                        m.node_mode);
+                TEST_ASSERT_EQUAL_UINT8(error_count, m.error_count); /* one onset, no flapping */
+            }
+        }
+        hal_time_host_advance(1u);
+    }
+    TEST_ASSERT_EQUAL_UINT32(1u, init);
+    TEST_ASSERT_GREATER_THAN_UINT32(0u, normal);
+    TEST_ASSERT_TRUE(degraded);
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT32(VEHICLE_CL250_ECU_ABSENT_TIMEOUT_MS, degraded_at_ms);
+    TEST_ASSERT_LESS_OR_EQUAL_UINT32(
+        VEHICLE_CL250_ECU_ABSENT_TIMEOUT_MS + PLATFORM_HEARTBEAT_RT_CORE_CYCLE_TIME_MS, degraded_at_ms);
+    TEST_ASSERT_EQUAL_UINT8(1u, error_count);
+}
+
+/* comms_pass() without uds_client_step(): the client task stalled, the rest runs on. */
+static void comms_pass_without_client(void)
+{
+    can_sm_step(CAN_PORT_VEHICLE);
+    (void)can_if_dispatch(CAN_PORT_VEHICLE, COMMS_RX_PER_PASS);
+    can_sm_step(CAN_PORT_PLATFORM);
+    (void)can_if_dispatch(CAN_PORT_PLATFORM, COMMS_RX_PER_PASS);
+    vehicle_republish_step(&republisher);
+    heartbeat_step(&heartbeat);
+    uds_server_step(&server);
+}
+
+/* Runs ms passes and returns the last 0x081 seen; counts its NODE_MODEs. */
+static struct platform_heartbeat_rt_core_t run_comms(uint32_t ms, bool client_runs,
+                                                     uint32_t* normal, uint32_t* degraded)
+{
+    struct platform_heartbeat_rt_core_t last;
+    memset(&last, 0, sizeof last);
+    for (uint32_t i = 0u; i < ms; i++) {
+        sim_ecu_step(&ecu, timebase_now_ms());
+        if (client_runs) {
+            comms_pass(&client, &server, &republisher, &heartbeat);
+        } else {
+            comms_pass_without_client();
+        }
+        can_frame_t got;
+        while (vbus_recv(&bus_p, node_ppeer, &got) == CAN_PORT_OK) {
+            if (got.id == PLATFORM_HEARTBEAT_RT_CORE_FRAME_ID) {
+                sim_listener_heartbeat_decode(got.data, &last);
+                *normal += (last.node_mode == PLATFORM_HEARTBEAT_RT_CORE_NODE_MODE_NORMAL_CHOICE) ? 1u : 0u;
+                *degraded +=
+                    (last.node_mode == PLATFORM_HEARTBEAT_RT_CORE_NODE_MODE_DEGRADED_CHOICE) ? 1u : 0u;
+            }
+        }
+        hal_time_host_advance(1u);
+    }
+    return last;
+}
+
+/* U3000-00 has two writers: the client glue (status every step) and the server's
+ * supervision (stale status). Each client stall past the max age is exactly one onset;
+ * the writers never make ERROR_COUNT oscillate (safety-reviewer, D-064 item 2). */
+static void test_comms_each_client_stall_is_one_onset_and_the_writers_never_flap(void)
+{
+    diag_init(timebase_now_ms());
+    vehicle_signals_init();
+    TEST_ASSERT_TRUE(sim_ecu_init(&ecu, &bus_v));
+    ecu.require_session = true;
+    memset(&client, 0, sizeof client);
+    memset(&server, 0, sizeof server);
+    TEST_ASSERT_EQUAL(ISOTP_OK, uds_client_open(&client));
+    TEST_ASSERT_EQUAL(ISOTP_OK, uds_server_open(&server));
+    TEST_ASSERT_TRUE(vehicle_republish_open(&republisher));
+    TEST_ASSERT_TRUE(heartbeat_open(&heartbeat));
+    TEST_ASSERT_TRUE(comms_apply_filters());
+
+    uint32_t normal = 0u;
+    uint32_t degraded = 0u;
+    struct platform_heartbeat_rt_core_t m = run_comms(1000u, true, &normal, &degraded);
+    TEST_ASSERT_EQUAL_UINT8(PLATFORM_HEARTBEAT_RT_CORE_NODE_MODE_NORMAL_CHOICE, m.node_mode);
+    TEST_ASSERT_EQUAL_UINT8(0u, m.error_count);
+    TEST_ASSERT_EQUAL_UINT32(0u, degraded);
+
+    const uint32_t stalls = 3u;
+    for (uint32_t k = 1u; k <= stalls; k++) {
+        normal = 0u;
+        degraded = 0u;
+        m = run_comms(PLATFORM_UDS_VEHICLE_TESTER_STATUS_MAX_AGE_MS + 100u, false, &normal,
+                      &degraded);
+        TEST_ASSERT_EQUAL_UINT8(PLATFORM_HEARTBEAT_RT_CORE_NODE_MODE_DEGRADED_CHOICE, m.node_mode);
+        TEST_ASSERT_EQUAL_UINT8((uint8_t)k, m.error_count);
+        normal = 0u;
+        degraded = 0u;
+        m = run_comms(1000u, true, &normal, &degraded);
+        TEST_ASSERT_EQUAL_UINT8(PLATFORM_HEARTBEAT_RT_CORE_NODE_MODE_NORMAL_CHOICE, m.node_mode);
+        TEST_ASSERT_EQUAL_UINT8((uint8_t)k, m.error_count); /* no onset from the resume */
+        TEST_ASSERT_LESS_OR_EQUAL_UINT32(1u, degraded);       /* at most the frame before it */
+    }
+    TEST_ASSERT_FALSE(uds_client_failed(&client));
 }
 
 /* ------------------------------------------------ state known (D-055, health DID) */
@@ -954,5 +1106,7 @@ int main(void)
     RUN_TEST(test_registering_after_the_filters_is_sealed_and_init_clears_the_seal);
     RUN_TEST(test_apply_filters_on_an_unbound_or_unknown_port_reports_it_and_does_not_seal);
     RUN_TEST(test_comms_applies_the_filters_and_the_sil_exchange_still_works);
+    RUN_TEST(test_comms_heartbeat_reads_normal_until_a_silent_ecu_arms_u0100);
+    RUN_TEST(test_comms_each_client_stall_is_one_onset_and_the_writers_never_flap);
     return UNITY_END();
 }

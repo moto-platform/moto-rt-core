@@ -29,7 +29,7 @@ Every ID, length, scale, range, choice, cycle time and E2E parameter comes from 
 
 ## Timing and order
 
-- **Cycle:** deadline-anchored at the gen/ cycle times. Both messages go out in the same pass. The first frames go out at the first step, INVALID until samples exist. A late pass skips the missed deadlines and never sends a burst (`vehicle_republish_cycle_done()`).
+- **Cycle:** deadline-anchored at the gen/ cycle times. Both messages go out in the same pass. The first frames go out at the first step, INVALID until samples exist. A late pass skips the missed deadlines and never sends a burst (`com_cycle_done()` of `services/com_core`, D-056 item 7; the write and its result classification are `com_send()`).
 - **Order:** `app/comms` `comms_pass()`: platform `can_sm_step()` → `can_if_dispatch()` → `vehicle_republish_step()` → `uds_server_step()` (D-056 item 4).
   - The step sends the samples the client wrote in the same pass and sees the platform port's current state.
   - Its E2E frame never waits behind server work.
