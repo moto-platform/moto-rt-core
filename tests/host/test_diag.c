@@ -285,6 +285,56 @@ static void test_clear_and_init_of_the_step_counters(void)
     TEST_ASSERT_FALSE(diag_client_steps(T0 + 3u).fresh);
 }
 
+/* ------------------------------------------------------------------ fault summary (D-064) */
+
+static void test_fault_onsets_count_passed_to_failed_transitions_only(void)
+{
+    diag_init(0u);
+    TEST_ASSERT_FALSE(diag_fault_active());
+    TEST_ASSERT_EQUAL_UINT32(0u, diag_fault_onsets());
+    diag_dtc_report(PLATFORM_UDS_DTC_IDX_VEHICLE_ECU_COMM_LOST, false);
+    TEST_ASSERT_EQUAL_UINT32(0u, diag_fault_onsets());
+    for (uint32_t i = 0u; i < 5u; i++) { /* level-triggered: every pass */
+        diag_dtc_report(PLATFORM_UDS_DTC_IDX_VEHICLE_ECU_COMM_LOST, true);
+    }
+    TEST_ASSERT_TRUE(diag_fault_active());
+    TEST_ASSERT_EQUAL_UINT32(1u, diag_fault_onsets());
+    diag_dtc_report(PLATFORM_UDS_DTC_IDX_VEHICLE_BUS_OFF_LATCHED, true);
+    TEST_ASSERT_EQUAL_UINT32(2u, diag_fault_onsets());
+    diag_dtc_report(PLATFORM_UDS_DTC_IDX_VEHICLE_ECU_COMM_LOST, false);
+    TEST_ASSERT_TRUE(diag_fault_active()); /* U0001-88 still failed */
+    diag_dtc_report(PLATFORM_UDS_DTC_IDX_VEHICLE_BUS_OFF_LATCHED, false);
+    TEST_ASSERT_FALSE(diag_fault_active());
+    diag_dtc_report(PLATFORM_UDS_DTC_IDX_VEHICLE_ECU_COMM_LOST, true); /* a new onset */
+    TEST_ASSERT_EQUAL_UINT32(3u, diag_fault_onsets());
+    diag_dtc_report(PLATFORM_UDS_DTC_COUNT, true); /* out of range: ignored */
+    TEST_ASSERT_EQUAL_UINT32(3u, diag_fault_onsets());
+}
+
+static void test_a_clear_keeps_the_fault_summary_and_init_resets_it(void)
+{
+    diag_init(0u);
+    diag_dtc_report(PLATFORM_UDS_DTC_IDX_VEHICLE_TESTER_LATCHED, true);
+    diag_dtc_clear_all();
+    TEST_ASSERT_EQUAL_HEX8(0u, diag_dtc_status(PLATFORM_UDS_DTC_IDX_VEHICLE_TESTER_LATCHED));
+    TEST_ASSERT_TRUE(diag_fault_active()); /* a clear hides no active fault */
+    diag_dtc_report(PLATFORM_UDS_DTC_IDX_VEHICLE_TESTER_LATCHED, true);
+    TEST_ASSERT_EQUAL_UINT32(1u, diag_fault_onsets()); /* and is no new onset */
+    diag_init(0u);
+    TEST_ASSERT_FALSE(diag_fault_active());
+    TEST_ASSERT_EQUAL_UINT32(0u, diag_fault_onsets());
+}
+
+static void test_supervise_of_a_missing_status_is_one_onset(void)
+{
+    diag_init(0u);
+    for (uint32_t t = 0u; t < 3u * PLATFORM_UDS_VEHICLE_TESTER_STATUS_MAX_AGE_MS; t++) {
+        diag_supervise(t);
+    }
+    TEST_ASSERT_TRUE(diag_fault_active());
+    TEST_ASSERT_EQUAL_UINT32(1u, diag_fault_onsets());
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -312,5 +362,8 @@ int main(void)
     RUN_TEST(test_stale_step_counters_stay_not_fresh_across_the_clock_wrap_until_a_new_write);
     RUN_TEST(test_supervise_keeps_regularly_written_step_counters_fresh);
     RUN_TEST(test_clear_and_init_of_the_step_counters);
+    RUN_TEST(test_fault_onsets_count_passed_to_failed_transitions_only);
+    RUN_TEST(test_a_clear_keeps_the_fault_summary_and_init_resets_it);
+    RUN_TEST(test_supervise_of_a_missing_status_is_one_onset);
     return UNITY_END();
 }

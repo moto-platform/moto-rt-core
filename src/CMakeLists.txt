@@ -5,6 +5,7 @@ add_library(moto_rtcore_logic STATIC
     features/uds/uds_client_core.c
     features/uds/uds_server_core.c
     features/vehicle_republish/vehicle_republish_core.c
+    features/heartbeat/heartbeat_core.c
     hal/can_frame.c
     services/can_sm_core.c
     services/com_core.c
@@ -43,6 +44,7 @@ add_library(moto_rtcore_fw STATIC
     features/uds/uds_client.c
     features/uds/uds_server.c
     features/vehicle_republish/vehicle_republish.c
+    features/heartbeat/heartbeat.c
     app/comms.c
 )
 target_link_libraries(moto_rtcore_fw PUBLIC moto_rtcore_logic moto_defs_gen)

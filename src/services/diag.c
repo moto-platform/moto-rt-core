@@ -12,6 +12,10 @@
     ((uint8_t)(UDS_DTC_STATUS_TEST_FAILED & PLATFORM_UDS_DTC_STATUS_AVAILABILITY_MASK))
 
 static uint8_t dtc_status[PLATFORM_UDS_DTC_COUNT];
+/* Each monitor's last test result, apart from the status bytes: a 0x14 clear neither
+ * hides an active fault from diag_fault_active() nor re-counts it as an onset (D-064). */
+static bool monitor_failed[PLATFORM_UDS_DTC_COUNT];
+static uint32_t fault_onsets; /* passed -> failed transitions since diag_init(), saturating */
 static diag_vehicle_tester_t vehicle_tester;
 static uint32_t tester_stamp_ms; /* last status, or diag_init() while none arrived */
 static bool tester_seen;
@@ -38,6 +42,10 @@ static bool steps_fresh(uint32_t now_ms)
 void diag_init(uint32_t now_ms)
 {
     diag_dtc_clear_all();
+    for (uint32_t i = 0u; i < PLATFORM_UDS_DTC_COUNT; i++) {
+        monitor_failed[i] = false;
+    }
+    fault_onsets = 0u;
     client_steps.overruns = 0u;
     client_steps.gap_max_ms = 0u;
     client_steps.fresh = false;
@@ -58,6 +66,10 @@ void diag_dtc_report(uint32_t idx, bool failed)
     if (idx >= PLATFORM_UDS_DTC_COUNT) {
         return;
     }
+    if (failed && !monitor_failed[idx] && (fault_onsets < UINT32_MAX)) {
+        fault_onsets++;
+    }
+    monitor_failed[idx] = failed;
     if (failed) {
         dtc_status[idx] = (uint8_t)(dtc_status[idx] | DTC_FAILED_BITS);
     } else {
@@ -68,6 +80,20 @@ void diag_dtc_report(uint32_t idx, bool failed)
 uint8_t diag_dtc_status(uint32_t idx)
 {
     return (idx < PLATFORM_UDS_DTC_COUNT) ? dtc_status[idx] : 0u;
+}
+
+bool diag_fault_active(void)
+{
+    bool active = false;
+    for (uint32_t i = 0u; i < PLATFORM_UDS_DTC_COUNT; i++) {
+        active = active || monitor_failed[i];
+    }
+    return active;
+}
+
+uint32_t diag_fault_onsets(void)
+{
+    return fault_onsets;
 }
 
 void diag_dtc_clear_all(void)

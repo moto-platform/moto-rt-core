@@ -29,6 +29,7 @@
 #include "app/host/sim_ecu.h"
 #include "app/host/sim_listener.h"
 #include "app/host/sim_tester.h"
+#include "features/heartbeat/heartbeat.h"
 #include "features/uds/uds_client.h"
 #include "features/uds/uds_server.h"
 #include "features/vehicle_republish/vehicle_republish.h"
@@ -126,6 +127,7 @@ static sim_tester_t tester;
 static uds_client_t client;
 static uds_server_t server;
 static vehicle_republish_t republisher;
+static heartbeat_t heartbeat;
 static sim_listener_t listener;
 
 static const char* state_name(vehicle_signal_state_t st)
@@ -216,6 +218,10 @@ int main(int argc, char** argv)
         fprintf(stderr, "platform-bus republisher setup failed\n");
         return 1;
     }
+    if (!heartbeat_open(&heartbeat)) {
+        fprintf(stderr, "heartbeat setup failed\n");
+        return 1;
+    }
     if (!comms_apply_filters()) {
         fprintf(stderr, "CAN acceptance filter setup failed\n");
         return 1;
@@ -244,7 +250,7 @@ int main(int argc, char** argv)
                 break;
             }
         }
-        comms_pass(&client, &server, &republisher);
+        comms_pass(&client, &server, &republisher, &heartbeat);
         sim_listener_step(&listener, now);
 
         if (!opt.quiet && timebase_expired(now, printed_at, PRINT_PERIOD_MS)) {
@@ -288,6 +294,16 @@ int main(int argc, char** argv)
            (unsigned)republisher.speed.retried, (unsigned)republisher.speed.dropped,
            (unsigned)PLATFORM_VEHICLE_ENGINE_FRAME_ID, (unsigned)republisher.engine.sent,
            (unsigned)republisher.engine.retried, (unsigned)republisher.engine.dropped);
+    printf("moto_rtcore_host: heartbeat 0x%03X %u sent, %u retried, %u dropped; listener %u frames "
+           "(E2E %u ok, %u bad, longest gap %u ms), %u NORMAL, %u DEGRADED, %u bad mode, "
+           "%u uptime decreases, last uptime %u s\n",
+           (unsigned)PLATFORM_HEARTBEAT_RT_CORE_FRAME_ID, (unsigned)heartbeat.stats.sent,
+           (unsigned)heartbeat.stats.retried, (unsigned)heartbeat.stats.dropped,
+           (unsigned)listener.heartbeat.frames, (unsigned)listener.heartbeat_e2e_ok,
+           (unsigned)listener.heartbeat_e2e_bad, (unsigned)listener.heartbeat.gap_max_ms,
+           (unsigned)listener.heartbeat_normal, (unsigned)listener.heartbeat_degraded,
+           (unsigned)listener.heartbeat_bad_mode, (unsigned)listener.heartbeat_uptime_back,
+           (unsigned)listener.heartbeat_uptime);
     printf("moto_rtcore_host: listener 0x%03X %u frames (E2E %u ok, %u bad, longest gap %u ms), "
            "0x%03X %u frames (longest gap %u ms): %s\n",
            (unsigned)PLATFORM_VEHICLE_SPEED_FRAME_ID, (unsigned)listener.speed.frames,
