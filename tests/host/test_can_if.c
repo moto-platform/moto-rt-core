@@ -159,6 +159,35 @@ static void test_vehicle_guard_passes_only_allowed_single_frames_on_the_request_
     TEST_ASSERT_EQUAL_UINT32(n, can_if_tx_refused_count(CAN_PORT_VEHICLE));
     TEST_ASSERT_EQUAL_UINT32(1u, vbus_frame_count(&bus)); /* only the allowed one */
 
+    /* D-059: exactly the gen/ FC.CTS passes (stateless; when is the link's check) */
+    can_frame_t fc = ok;
+    for (uint8_t i = 0u; i < VEHICLE_CL250_FRAME_DLC; i++) {
+        fc.data[i] = vehicle_cl250_fc_cts[i];
+    }
+    TEST_ASSERT_TRUE(can_if_tx_allowed(CAN_PORT_VEHICLE, &fc));
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, can_if_write(CAN_PORT_VEHICLE, &fc));
+    TEST_ASSERT_EQUAL_UINT32(2u, vbus_frame_count(&bus));
+    can_frame_t fc_bad[9];
+    for (uint32_t i = 0u; i < 9u; i++) {
+        fc_bad[i] = fc;
+    }
+    fc_bad[0].data[0] = 0x31u; /* FC.WAIT */
+    fc_bad[1].data[0] = 0x32u; /* FC.OVFLW */
+    fc_bad[2].data[1] = 0x01u; /* another block size */
+    fc_bad[3].data[2] = 0x01u; /* another STmin */
+    fc_bad[4].data[7] = 0x00u; /* another padding byte */
+    fc_bad[5].dlc = 3u;        /* short FC */
+    fc_bad[6].id = VEHICLE_CL250_FALLBACK_REQUEST_ID; /* another ID */
+    fc_bad[7].id = VEHICLE_CL250_REQUEST_ID & CAN_PORT_STD_ID_MAX;
+    fc_bad[7].extended = false; /* 11-bit */
+    fc_bad[8].data[0] = 0x21u;  /* a Consecutive Frame */
+    for (uint32_t i = 0u; i < 9u; i++) {
+        TEST_ASSERT_FALSE_MESSAGE(can_if_tx_allowed(CAN_PORT_VEHICLE, &fc_bad[i]), "FC variant");
+        TEST_ASSERT_EQUAL(CAN_PORT_ERR_REFUSED, can_if_write(CAN_PORT_VEHICLE, &fc_bad[i]));
+    }
+    TEST_ASSERT_EQUAL_UINT32(n + 9u, can_if_tx_refused_count(CAN_PORT_VEHICLE));
+    TEST_ASSERT_EQUAL_UINT32(2u, vbus_frame_count(&bus));
+
     /* the platform port has no vehicle guard */
     TEST_ASSERT_TRUE(can_if_tx_allowed(CAN_PORT_PLATFORM, &bad[0]));
     TEST_ASSERT_EQUAL_UINT32(0u, can_if_tx_refused_count(CAN_PORT_PLATFORM));

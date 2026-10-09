@@ -30,6 +30,20 @@ void uds_client_core_init(uds_client_core_t* c, uint32_t abort_hold_ms)
     c->abort_hold_ms = abort_hold_ms;
 }
 
+/* Sends nothing for ms from now_ms; a hold that ends later is kept. */
+static void hold_for(uds_client_core_t* c, uint32_t now_ms, uint32_t ms)
+{
+    if (c->hold) {
+        const uint32_t elapsed = now_ms - c->hold_start_ms;
+        if ((elapsed < c->hold_ms) && ((c->hold_ms - elapsed) >= ms)) {
+            return;
+        }
+    }
+    c->hold = true;
+    c->hold_start_ms = now_ms;
+    c->hold_ms = ms;
+}
+
 static void start_request(uds_client_core_t* c, uds_client_req_kind_t kind, uint8_t sid,
                           uint32_t idx, uint32_t now_ms)
 {
@@ -230,7 +244,7 @@ bool uds_client_core_poll(uds_client_core_t* c, uint32_t now_ms, bool rx_busy, b
         return false; /* one request in flight; the ECU is mid-transfer; TX not free */
     }
     if (c->hold) {
-        if (!expired(now_ms, c->hold_start_ms, c->abort_hold_ms)) {
+        if (!expired(now_ms, c->hold_start_ms, c->hold_ms)) {
             return false;
         }
         c->hold = false;
@@ -375,6 +389,22 @@ static bool parse_read(const uds_client_core_t* c, const uint8_t* data, uint16_t
     return true;
 }
 
+void uds_client_core_on_fc_withheld(uds_client_core_t* c, uint32_t now_ms)
+{
+    if (c == NULL) {
+        return;
+    }
+    count(&c->stats.fc_withheld);
+    if (c->pending != UDS_CLIENT_REQ_NONE) {
+        count(&c->stats.unavailable); /* not a timeout: the ECU answered */
+        if (c->pending == UDS_CLIENT_REQ_READ) {
+            skip_did(c, c->pending_idx, now_ms);
+        }
+        c->pending = UDS_CLIENT_REQ_NONE;
+    }
+    hold_for(c, now_ms, VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS); /* the ECU waits its N_Bs */
+}
+
 bool uds_client_core_on_indication(uds_client_core_t* c, uint32_t now_ms,
                                    isotp_n_result_t result, const uint8_t* data, uint16_t len,
                                    uds_client_sample_t* sample)
@@ -383,14 +413,13 @@ bool uds_client_core_on_indication(uds_client_core_t* c, uint32_t now_ms,
         return false;
     }
     if (result != ISOTP_N_OK) {
-        /* Q-020: a segmented response cannot be received (no FC on the vehicle bus). */
+        /* A segmented reception failed (N_Cr, sequence): the ECU may still be sending. */
         count(&c->stats.unavailable);
         if (c->pending == UDS_CLIENT_REQ_READ) {
             skip_did(c, c->pending_idx, now_ms);
         }
         c->pending = UDS_CLIENT_REQ_NONE;
-        c->hold = true;
-        c->hold_start_ms = now_ms;
+        hold_for(c, now_ms, c->abort_hold_ms);
         return false;
     }
     if ((data == NULL) || (len == 0u)) {
@@ -402,6 +431,14 @@ bool uds_client_core_on_indication(uds_client_core_t* c, uint32_t now_ms,
 
     if ((len >= UDS_NEGATIVE_RESPONSE_LEN) && (data[0] == UDS_SID_NEGATIVE_RESPONSE)) {
         on_negative(c, now_ms, data[1], data[2]);
+        return false;
+    }
+    if ((c->pending == UDS_CLIENT_REQ_READ) && (len > ISOTP_SF_MAX_LEN)) {
+        /* D-059: a table DID answers in a Single Frame. A segmented answer is "service
+         * unavailable", not a timeout; the ECU has finished, so no hold. */
+        count(&c->stats.unavailable);
+        skip_did(c, c->pending_idx, now_ms);
+        c->pending = UDS_CLIENT_REQ_NONE;
         return false;
     }
     if ((c->pending == UDS_CLIENT_REQ_SESSION) && (len >= 2u) &&
@@ -451,6 +488,13 @@ bool uds_client_core_did_skipped(const uds_client_core_t* c, uint32_t idx, uint3
 uds_client_req_kind_t uds_client_core_pending(const uds_client_core_t* c)
 {
     return (c == NULL) ? UDS_CLIENT_REQ_NONE : c->pending;
+}
+
+uint8_t uds_client_core_pending_response_sid(const uds_client_core_t* c)
+{
+    return ((c == NULL) || (c->pending == UDS_CLIENT_REQ_NONE))
+               ? 0u
+               : (uint8_t)(c->pending_sid + UDS_POSITIVE_RESPONSE_OFFSET);
 }
 
 const uds_client_stats_t* uds_client_core_stats(const uds_client_core_t* c)

@@ -13,7 +13,7 @@ Reads the last sample of every gen/ DID (`vehicle_signals_get()`) and the ECU pr
 
 0x021 is **not a safety input**. The Layer 1 cornering decision needs no speed (D-041). The DBC says no safety decision may use 0x021. rt-core's own EKF uses the sample with the D-048 age rule, never this frame.
 
-Every ID, length, scale, range, choice, cycle time and E2E parameter comes from gen/ (`platform.h`, `platform_e2e.h`, `vehicle_cl250.h`, defs v0.5.0). The module names no CAN literal.
+Every ID, length, scale, range, choice, cycle time and E2E parameter comes from gen/ (`platform.h`, `platform_e2e.h`, `vehicle_cl250.h`, defs v0.8.0). The module names no CAN literal.
 
 ## Mapping (D-056 item 2)
 

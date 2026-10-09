@@ -110,18 +110,36 @@ static bool is_tester(const sniffed_t* s)
 }
 
 /* The tester's frames: gate, format, and only the three request kinds. */
+/* FC.CTS frames the tester sent, counted by the last assert_tester_frames_ok(). */
+static uint32_t tester_fcs;
+
 static void assert_tester_frames_ok(void)
 {
     const uint8_t pad = VEHICLE_CL250_PADDING_BYTE;
+    bool answer_expected = false; /* the last tester request was a session or a read */
+    bool fc_due = false;          /* an ECU First Frame answers it, not yet given its FC */
+    tester_fcs = 0u;
     for (uint32_t i = 0u; i < sniff_count; i++) {
         const can_frame_t* f = &sniffed[i].f;
         if (!is_tester(&sniffed[i])) {
+            if ((f->id == VEHICLE_CL250_RESPONSE_ID) && ((f->data[0] & 0xF0u) == 0x10u)) {
+                fc_due = answer_expected; /* an FF; only the first one may get the FC */
+                answer_expected = false;
+            }
             continue;
         }
         TEST_ASSERT_TRUE(f->extended);
         TEST_ASSERT_EQUAL_UINT8(VEHICLE_CL250_FRAME_DLC, f->dlc);
         TEST_ASSERT_TRUE_MESSAGE(vehicle_cl250_frame_allowed(f->data, f->dlc), "D-020 frame gate");
-        TEST_ASSERT_EQUAL_HEX8_MESSAGE(0u, (uint8_t)(f->data[0] & 0xF0u), "not a Single Frame (FC?)");
+        if ((f->data[0] & 0xF0u) == 0x30u) {
+            /* D-059: only the gen/ FC.CTS, once, right after an ECU First Frame to an open request */
+            TEST_ASSERT_TRUE_MESSAGE(fc_due, "FC without an ECU First Frame to our request");
+            TEST_ASSERT_EQUAL_HEX8_ARRAY(vehicle_cl250_fc_cts, f->data, VEHICLE_CL250_FRAME_DLC);
+            fc_due = false;
+            tester_fcs++;
+            continue;
+        }
+        TEST_ASSERT_EQUAL_HEX8_MESSAGE(0u, (uint8_t)(f->data[0] & 0xF0u), "not a Single Frame");
         const uint8_t n = f->data[0];
         const bool session = (n == 2u) && (f->data[1] == VEHICLE_CL250_SESSION_SID) &&
                              (f->data[2] == VEHICLE_CL250_SESSION_SUBFUNCTION);
@@ -131,6 +149,10 @@ static void assert_tester_frames_ok(void)
                           (vehicle_cl250_find((uint16_t)(((uint16_t)f->data[2] << 8u) |
                                                          f->data[3])) != NULL);
         TEST_ASSERT_TRUE_MESSAGE(session || tp || read, "unexpected tester request");
+        if (session || read) {
+            answer_expected = true;
+            fc_due = false;
+        }
         for (uint8_t b = (uint8_t)(n + 1u); b < 8u; b++) {
             TEST_ASSERT_EQUAL_HEX8(pad, f->data[b]);
         }
@@ -481,41 +503,199 @@ static void test_sil_speed_sample_goes_stale_at_301_ms_when_the_ecu_stops_giving
 /* Q-020: a segmented answer cannot be received                               */
 /* ------------------------------------------------------------------------- */
 
-static void test_sil_segmented_answer_is_service_unavailable_without_flow_control(void)
+static void test_sil_segmented_answer_gets_one_flow_control_and_is_unavailable(void)
 {
     ecu.segmented_enabled = true;
     ecu.segmented_did = VEHICLE_CL250_DID_COOLANT_TEMP;
     run(9000u, false);
     const uds_client_stats_t* st = uds_client_stats(&client);
-    TEST_ASSERT_GREATER_OR_EQUAL_UINT32(1u, st->unavailable);
-    TEST_ASSERT_GREATER_OR_EQUAL_UINT32(1u, st->did_skips);
-    TEST_ASSERT_FALSE(uds_client_failed(&client)); /* the dropped FC does not latch */
+    TEST_ASSERT_FALSE(uds_client_failed(&client)); /* the FC is no guard refusal */
+    TEST_ASSERT_EQUAL_UINT32(0u, isotp_link_tx_refused_count(&client.link));
+    TEST_ASSERT_EQUAL_UINT32(0u, isotp_link_fc_withheld_count(&client.link));
+    TEST_ASSERT_EQUAL_UINT32(0u, st->fc_withheld);
 
-    /* Each First Frame: nothing from the tester for N_Cr + N_Bs, then polling resumes.
-     * The DID is retried after the skip cooldown and fails the same way. */
-    const uint32_t wait = ISOTP_DEFAULT_N_CR_MS + isotp_link_n_bs_ms(&client.link);
+    /* D-059: every ECU First Frame gets exactly one FC.CTS, the answer is received whole
+     * (no N_Cr / SN failure), then it is "service unavailable" for the DID (skip
+     * cooldown, not a timeout) and the DID is retried after the cooldown. */
+    assert_tester_frames_ok();
     uint32_t ffs = 0u;
     for (uint32_t i = 0u; i < sniff_count; i++) {
-        if (is_tester(&sniffed[i]) || ((sniffed[i].f.data[0] & 0xF0u) != 0x10u)) {
-            continue;
+        if (!is_tester(&sniffed[i]) && ((sniffed[i].f.data[0] & 0xF0u) == 0x10u)) {
+            ffs++;
         }
-        ffs++;
-        const uint32_t t_ff = sniffed[i].t;
-        uint32_t j = i + 1u;
-        while ((j < sniff_count) && !is_tester(&sniffed[j])) {
-            j++;
-        }
-        TEST_ASSERT_LESS_THAN_UINT32(sniff_count, j);
-        TEST_ASSERT_GREATER_OR_EQUAL_UINT32(wait, sniffed[j].t - t_ff);
     }
     TEST_ASSERT_EQUAL_UINT32(2u, ffs);
+    TEST_ASSERT_EQUAL_UINT32(ffs, tester_fcs);
+    TEST_ASSERT_EQUAL_UINT32(ffs, st->unavailable);
+    TEST_ASSERT_EQUAL_UINT32(ffs, st->did_skips);
+    TEST_ASSERT_EQUAL_UINT16(0u, isotp_link_rx_error_count(&client.link));
 
     vehicle_signal_sample_t s;
     TEST_ASSERT_TRUE(vehicle_signals_get(VEHICLE_CL250_IDX_COOLANT_TEMP, timebase_now_ms(), &s));
     TEST_ASSERT_EQUAL(VEHICLE_SIGNAL_NONE, s.state);
     TEST_ASSERT_TRUE(vehicle_signals_get(VEHICLE_CL250_IDX_ENGINE_SPEED, timebase_now_ms(), &s));
     TEST_ASSERT_EQUAL(VEHICLE_SIGNAL_VALID, s.state);
-    assert_tester_frames_ok(); /* includes: no FC ever left the tester */
+}
+
+static void foreign_frame_latches(uint32_t id, bool extended);
+
+/* A frame from the test node as if the ECU sent it (29-bit response ID). */
+static void ecu_frame(const uint8_t* d)
+{
+    can_frame_t f;
+    memset(&f, 0, sizeof f);
+    f.id = VEHICLE_CL250_RESPONSE_ID;
+    f.extended = true;
+    f.dlc = VEHICLE_CL250_FRAME_DLC;
+    memcpy(f.data, d, VEHICLE_CL250_FRAME_DLC);
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_send(&bus, node_sniff, &f));
+}
+
+/* An ECU First Frame of the positive 0x22 answer, FF_DL ff_dl. */
+static void ecu_first_frame(uint16_t ff_dl)
+{
+    const uint8_t ff[8] = {(uint8_t)(0x10u | (ff_dl >> 8u)), (uint8_t)(ff_dl & 0xFFu), 0x62u,
+                           0xF4u, 0x05u, 0x01u, 0x02u, 0x03u};
+    ecu_frame(ff);
+}
+
+/* Runs until the client's last frame was sid with the request still pending (kind)
+ * or, for tester present, with the slot free. The ECU is silent, so a read stays open. */
+static void run_until_last_request(uint8_t sid, uds_client_req_kind_t kind)
+{
+    for (uint32_t i = 0u; i < 10000u; i++) {
+        run(1u, false);
+        uint32_t j = sniff_count;
+        while ((j > 0u) && !is_tester(&sniffed[j - 1u])) {
+            j--;
+        }
+        if ((j > 0u) && (sniffed[j - 1u].f.data[1] == sid) &&
+            (uds_client_core_pending(&client.core) == kind)) {
+            return;
+        }
+    }
+    TEST_FAIL_MESSAGE("request not seen");
+}
+
+static uint32_t tester_frames_since(uint32_t mark)
+{
+    uint32_t n = 0u;
+    for (uint32_t i = mark; i < sniff_count; i++) {
+        n += is_tester(&sniffed[i]) ? 1u : 0u;
+    }
+    return n;
+}
+
+/* MINOR-4 (a), M1 in the glue: right after tester present (no answer expected, slot
+ * free) an ECU First Frame gets no FC, and the tester then waits RESPONSE_TIMEOUT_MAX_MS. */
+static void test_sil_a_first_frame_after_tester_present_gets_no_flow_control(void)
+{
+    run(500u, false);
+    run_until_last_request(VEHICLE_CL250_TESTER_PRESENT_SID, UDS_CLIENT_REQ_NONE);
+    const uint32_t mark = sniff_count;
+    const uint32_t t_ff = timebase_now_ms();
+    ecu_first_frame(10u);
+    run(VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS, false);
+    TEST_ASSERT_EQUAL_UINT32(0u, tester_frames_since(mark));
+    run(10u, false);
+    TEST_ASSERT_GREATER_THAN_UINT32(0u, tester_frames_since(mark)); /* polling resumes */
+    for (uint32_t i = mark; i < sniff_count; i++) {
+        if (is_tester(&sniffed[i])) {
+            TEST_ASSERT_GREATER_OR_EQUAL_UINT32(VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS,
+                                                sniffed[i].t - t_ff);
+            TEST_ASSERT_EQUAL_HEX8(0u, (uint8_t)(sniffed[i].f.data[0] & 0xF0u)); /* no FC */
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(1u, isotp_link_fc_withheld_count(&client.link));
+    TEST_ASSERT_FALSE(uds_client_failed(&client));
+}
+
+/* MINOR-4 (b), M2 in one pass: a second tester's frame and the ECU's First Frame arrive
+ * in the same pass while a read is armed: the client latches before the link steps, so
+ * no FC goes out. */
+static void test_sil_a_foreign_frame_in_the_same_pass_as_a_first_frame_blocks_the_fc(void)
+{
+    run(500u, false);
+    ecu.silent = true;
+    run_until_last_request(UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_CLIENT_REQ_READ);
+    TEST_ASSERT_TRUE(client.link.response_open);
+    const uint32_t mark = sniff_count;
+    can_frame_t foreign;
+    memset(&foreign, 0, sizeof foreign);
+    foreign.id = VEHICLE_CL250_REQUEST_ID;
+    foreign.extended = true;
+    foreign.dlc = VEHICLE_CL250_FRAME_DLC;
+    const uint8_t tp[8] = {0x02u, 0x3Eu, 0x00u, 0xAAu, 0xAAu, 0xAAu, 0xAAu, 0xAAu};
+    memcpy(foreign.data, tp, sizeof tp);
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_send(&bus, node_sniff, &foreign));
+    ecu_first_frame(10u);
+    run(50u, false);
+    TEST_ASSERT_TRUE(uds_client_failed(&client));
+    TEST_ASSERT_EQUAL(UDS_CLIENT_FAULT_FOREIGN_TESTER, uds_client_fault(&client));
+    TEST_ASSERT_EQUAL_UINT32(0u, tester_frames_since(mark));
+    TEST_ASSERT_EQUAL_UINT32(1u, isotp_link_fc_withheld_count(&client.link));
+}
+
+/* MINOR-4 (d): the client buffer's boundary. FF_DL 64 gets the one FC, is received and
+ * is "service unavailable" for the read; FF_DL 65 gets no FC and a RESPONSE_TIMEOUT_MAX_MS hold. */
+static void test_sil_first_frames_at_and_above_the_client_buffer(void)
+{
+    run(500u, false);
+    ecu.silent = true;
+    run_until_last_request(UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_CLIENT_REQ_READ);
+    const uds_client_stats_t* st = uds_client_stats(&client);
+    const uint32_t unavailable = st->unavailable;
+    uint32_t mark = sniff_count;
+    ecu_first_frame(UDS_CLIENT_RX_BUF);
+    run(1u, false);
+    TEST_ASSERT_EQUAL_UINT32(1u, tester_frames_since(mark));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(vehicle_cl250_fc_cts, sniffed[sniff_count - 1u].f.data,
+                                 VEHICLE_CL250_FRAME_DLC);
+    uint8_t sn = 1u;
+    for (uint32_t got = 6u; got < UDS_CLIENT_RX_BUF; got += 7u) {
+        const uint8_t cf[8] = {(uint8_t)(0x20u | sn), 1u, 2u, 3u, 4u, 5u, 6u, 7u};
+        ecu_frame(cf);
+        sn = (uint8_t)((sn + 1u) & 0x0Fu);
+    }
+    run(2u, false);
+    TEST_ASSERT_EQUAL_UINT32(unavailable + 1u, st->unavailable);
+    TEST_ASSERT_EQUAL_UINT16(0u, isotp_link_rx_error_count(&client.link));
+    TEST_ASSERT_EQUAL_UINT32(0u, st->fc_withheld);
+
+    run_until_last_request(UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_CLIENT_REQ_READ);
+    mark = sniff_count;
+    const uint32_t t_ff = timebase_now_ms();
+    ecu_first_frame((uint16_t)(UDS_CLIENT_RX_BUF + 1u));
+    run(VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS, false);
+    TEST_ASSERT_EQUAL_UINT32(0u, tester_frames_since(mark)); /* no FC, no OVFLW, held */
+    TEST_ASSERT_EQUAL_UINT32(1u, st->fc_withheld);
+    TEST_ASSERT_EQUAL_UINT32(unavailable + 2u, st->unavailable);
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT32(VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS,
+                                        timebase_now_ms() - t_ff);
+    TEST_ASSERT_FALSE(uds_client_failed(&client));
+    /* injected frames are not sniffed back, so assert_tester_frames_ok() cannot pair the FC */
+    TEST_ASSERT_EQUAL_UINT32(0u, can_if_tx_refused_count(CAN_PORT_VEHICLE));
+}
+
+/* M2 (architecture-guard): a latched tester sends no FC, even for a First Frame on its
+ * response ID; the link withholds it. */
+static void test_sil_a_latched_client_sends_no_flow_control(void)
+{
+    foreign_frame_latches(VEHICLE_CL250_REQUEST_ID, true);
+    can_frame_t ff;
+    memset(&ff, 0, sizeof ff);
+    ff.id = VEHICLE_CL250_RESPONSE_ID;
+    ff.extended = true;
+    ff.dlc = VEHICLE_CL250_FRAME_DLC;
+    const uint8_t first[8] = {0x10u, 0x0Au, 0x62u, 0xF4u, 0x05u, 0x01u, 0x02u, 0x03u};
+    memcpy(ff.data, first, sizeof first);
+    const uint32_t mark = sniff_count;
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_send(&bus, node_sniff, &ff));
+    run(50u, false);
+    for (uint32_t i = mark; i < sniff_count; i++) {
+        TEST_ASSERT_FALSE(is_tester(&sniffed[i]));
+    }
+    TEST_ASSERT_EQUAL_UINT32(1u, isotp_link_fc_withheld_count(&client.link));
 }
 
 /* ------------------------------------------------------------------------- */
@@ -903,7 +1083,11 @@ int main(void)
     RUN_TEST(test_sil_endless_response_pending_ends_at_the_gen_max);
     RUN_TEST(test_sil_nrc_on_one_did_leaves_the_others_valid);
     RUN_TEST(test_sil_speed_sample_goes_stale_at_301_ms_when_the_ecu_stops_giving_it);
-    RUN_TEST(test_sil_segmented_answer_is_service_unavailable_without_flow_control);
+    RUN_TEST(test_sil_segmented_answer_gets_one_flow_control_and_is_unavailable);
+    RUN_TEST(test_sil_a_latched_client_sends_no_flow_control);
+    RUN_TEST(test_sil_a_first_frame_after_tester_present_gets_no_flow_control);
+    RUN_TEST(test_sil_a_foreign_frame_in_the_same_pass_as_a_first_frame_blocks_the_fc);
+    RUN_TEST(test_sil_first_frames_at_and_above_the_client_buffer);
     RUN_TEST(test_sil_guard_refusal_latches_the_client);
     RUN_TEST(test_sil_a_busy_link_does_not_latch_the_client);
     RUN_TEST(test_sil_short_tx_blockage_recovers_without_a_latch);

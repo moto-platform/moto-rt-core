@@ -445,6 +445,25 @@ bool isotp_rx_busy(const isotp_link_t* link)
     return (link != NULL) && (link->rx_state == ISOTP_RX_WAIT_CF);
 }
 
+void isotp_rx_cancel(isotp_link_t* link)
+{
+    if (link == NULL) {
+        return;
+    }
+    link->fc_pending = false;
+    if (link->rx_state == ISOTP_RX_WAIT_CF) {
+        link->rx_state = ISOTP_RX_IDLE;
+        if (link->rx_error_count < UINT16_MAX) {
+            link->rx_error_count++;
+        }
+    }
+}
+
+uint16_t isotp_rx_pending_len(const isotp_link_t* link)
+{
+    return ((link != NULL) && (link->rx_state == ISOTP_RX_WAIT_CF)) ? link->rx_len : 0u;
+}
+
 bool isotp_tx_idle(const isotp_link_t* link)
 {
     return (link != NULL) && (link->tx_state == ISOTP_TX_IDLE);

@@ -618,10 +618,8 @@ static void test_response_for_another_did_or_malformed_is_ignored(void)
                                   (uint8_t)(VEHICLE_CL250_DID_VEHICLE_SPEED >> 8u),
                                   (uint8_t)(VEHICLE_CL250_DID_VEHICLE_SPEED & 0xFFu)};
     TEST_ASSERT_FALSE(indicate(1u, too_short, 3u));
-    const uint8_t too_long[8] = {0};
-    TEST_ASSERT_FALSE(indicate(1u, too_long, 8u)); /* more than a Single Frame */
     TEST_ASSERT_FALSE(indicate(1u, NULL, 0u));
-    TEST_ASSERT_EQUAL_UINT32(4u, stats()->unexpected);
+    TEST_ASSERT_EQUAL_UINT32(3u, stats()->unexpected);
     TEST_ASSERT_EQUAL(UDS_CLIENT_REQ_READ, uds_client_core_pending(&c));
     TEST_ASSERT_EQUAL(K_NONE, poll_at(VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS - 1u));
     TEST_ASSERT_EQUAL(K_READ, poll_at(VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS));
@@ -2063,6 +2061,77 @@ static void test_timeout_cr_is_service_unavailable_with_cooldown_and_n_bs_hold(v
     TEST_ASSERT_NOT_EQUAL(idx, req_idx());
 }
 
+/* Q-020 / D-059: a First Frame the link did not answer with an FC ends the read as
+ * "unavailable" (not a timeout) and holds for RESPONSE_TIMEOUT_MAX_MS; a later, shorter
+ * hold (an N_Cr failure) never shortens it. */
+static void test_withheld_fc_is_unavailable_without_a_timeout_and_holds_the_max_timeout(void)
+{
+    bring_up(0u);
+    TEST_ASSERT_EQUAL(K_READ, poll_at(0u));
+    const uint32_t idx = req_idx();
+    uds_client_core_on_fc_withheld(&c, 10u);
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->fc_withheld);
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->unavailable);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->timeouts);
+    TEST_ASSERT_TRUE(uds_client_core_did_skipped(&c, idx, 10u));
+    TEST_ASSERT_EQUAL(UDS_CLIENT_REQ_NONE, uds_client_core_pending(&c));
+    TEST_ASSERT_FALSE(uds_client_core_on_indication(&c, 20u, ISOTP_N_TIMEOUT_CR, NULL, 0u, &smp));
+    TEST_ASSERT_LESS_THAN_UINT32(VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS, 20u + HOLD_MS);
+    TEST_ASSERT_EQUAL(K_NONE, poll_at(10u + VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS - 1u));
+    TEST_ASSERT_EQUAL(K_TP, poll_at(10u + VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS));
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->timeouts);
+}
+
+/* D-059: a complete segmented answer (longer than a Single Frame) to the pending read
+ * is "service unavailable": skip cooldown, no timeout, no hold (the ECU has finished). */
+static void test_a_segmented_answer_to_a_read_is_unavailable_without_a_timeout_or_hold(void)
+{
+    bring_up(0u);
+    TEST_ASSERT_EQUAL(K_READ, poll_at(0u));
+    const uint32_t idx = req_idx();
+    uint8_t too_long[ISOTP_SF_MAX_LEN + 1u];
+    memset(too_long, 0, sizeof too_long);
+    too_long[0] = (uint8_t)(UDS_SID_READ_DATA_BY_IDENTIFIER + POS_OFFSET);
+    too_long[1] = (uint8_t)(vehicle_cl250_dids[idx].did >> 8u);
+    too_long[2] = (uint8_t)(vehicle_cl250_dids[idx].did & 0xFFu);
+    TEST_ASSERT_FALSE(indicate(1u, too_long, (uint16_t)sizeof too_long));
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->unavailable);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->unexpected);
+    TEST_ASSERT_TRUE(uds_client_core_did_skipped(&c, idx, 1u));
+    TEST_ASSERT_EQUAL(UDS_CLIENT_REQ_NONE, uds_client_core_pending(&c));
+    TEST_ASSERT_EQUAL(K_READ, poll_at(1u)); /* no hold: the next DID goes at once */
+    TEST_ASSERT_NOT_EQUAL(idx, req_idx());
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->timeouts);
+}
+
+/* safety-reviewer MINOR-4 (c): a hold across the 32-bit ms wrap is kept against a
+ * shorter one and ends on time. */
+static void test_a_hold_across_the_ms_wrap_is_kept_and_ends_on_time(void)
+{
+    const uint32_t t0 = UINT32_MAX - 700u;
+    bring_up(t0);
+    TEST_ASSERT_EQUAL(K_READ, poll_at(t0));
+    const uint32_t tw = UINT32_MAX - 500u;
+    uds_client_core_on_fc_withheld(&c, tw);
+    /* a failed reception asks for the shorter N_Bs hold: the running one is kept */
+    TEST_ASSERT_FALSE(
+        uds_client_core_on_indication(&c, UINT32_MAX - 100u, ISOTP_N_TIMEOUT_CR, NULL, 0u, &smp));
+    TEST_ASSERT_EQUAL(K_NONE, poll_at(tw + VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS - 1u));
+    TEST_ASSERT_NOT_EQUAL(K_NONE, poll_at(tw + VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS));
+}
+
+/* An unsolicited First Frame (no request pending) still holds; nothing ends. */
+static void test_withheld_fc_without_a_request_only_holds(void)
+{
+    bring_up(0u);
+    uds_client_core_on_fc_withheld(&c, 5u);
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->fc_withheld);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->unavailable);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->did_skips);
+    TEST_ASSERT_EQUAL(K_NONE, poll_at(5u + VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS - 1u));
+    TEST_ASSERT_NOT_EQUAL(K_NONE, poll_at(5u + VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS));
+}
+
 static void test_failed_reception_without_a_pending_read_still_holds(void)
 {
     bring_up(0u);
@@ -2370,6 +2439,10 @@ int main(void)
     RUN_TEST(test_a_success_resets_the_consecutive_timeouts);
     RUN_TEST(test_ecu_absent_after_the_gen_timeout_drops_the_session);
     RUN_TEST(test_timeout_cr_is_service_unavailable_with_cooldown_and_n_bs_hold);
+    RUN_TEST(test_withheld_fc_is_unavailable_without_a_timeout_and_holds_the_max_timeout);
+    RUN_TEST(test_withheld_fc_without_a_request_only_holds);
+    RUN_TEST(test_a_segmented_answer_to_a_read_is_unavailable_without_a_timeout_or_hold);
+    RUN_TEST(test_a_hold_across_the_ms_wrap_is_kept_and_ends_on_time);
     RUN_TEST(test_failed_reception_without_a_pending_read_still_holds);
     RUN_TEST(test_failed_reception_on_the_session_request_retries_later);
     RUN_TEST(test_base_timeout_pauses_during_a_segmented_reception_but_not_the_cap);

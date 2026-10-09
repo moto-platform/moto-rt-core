@@ -46,9 +46,16 @@
  *     not (D-052), so an ECU alternating them is skipped too.
  *   - Any other NRC for the pending SID ends the request (legacy behaviour): not a
  *     timeout, the DID keeps its schedule.
- *   - A failed reception (Q-020: a segmented response ends in ISOTP_N_TIMEOUT_CR) means
+ *   - A failed reception (e.g. ISOTP_N_TIMEOUT_CR or a wrong sequence number) means
  *     "service unavailable": the DID goes into skip cooldown at once, and nothing is sent
  *     for the link's N_Bs, so the ECU has given up its segmented send first.
+ *   - A complete segmented answer (longer than a Single Frame, D-059) to the pending
+ *     read: "service unavailable" (skip cooldown), not a timeout, no hold.
+ *   - A First Frame the link did not answer with a Flow Control
+ *     (uds_client_core_on_fc_withheld(), Q-020 / D-059): the pending request ends
+ *     without a timeout (a read is "service unavailable" as above), and nothing is sent
+ *     for RESPONSE_TIMEOUT_MAX_MS, while the ECU waits for the Flow Control. A running
+ *     hold is never shortened.
  *   - ECU present while any response came within ECU_ABSENT_TIMEOUT_MS. Absence also
  *     ends every DID's D-050/D-051 fault state: no read from before it is answered.
  *   - No request is produced while the link cannot take one at once (tx_ready false,
@@ -118,6 +125,7 @@ typedef struct {
     uint32_t unavailable;       /* failed receptions (e.g. ISOTP_N_TIMEOUT_CR) */
     uint32_t did_skips;         /* DIDs put into skip cooldown */
     uint32_t unexpected;        /* responses that matched no pending request */
+    uint32_t fc_withheld;       /* First Frames the link did not answer with an FC */
     uint32_t slow_answers;      /* answers later than poll_period_ms after their stamp (D-051) */
     uint32_t session_starts;    /* positive session responses */
     uint32_t session_losses;    /* session up -> down */
@@ -157,6 +165,7 @@ typedef struct {
 
     bool hold;
     uint32_t hold_start_ms;
+    uint32_t hold_ms;
 
     bool ecu_seen;
     uint32_t last_response_ms;
@@ -193,6 +202,11 @@ void uds_client_core_not_sent(uds_client_core_t* c);
 /* Stops the core for good (until init): no request, session down, slot free. */
 void uds_client_core_latch(uds_client_core_t* c);
 
+/* The link withheld the Flow Control for a First Frame (isotp_link_take_fc_withheld()):
+ * no answer comes. Ends the pending request without a timeout (a read: skip cooldown,
+ * counted unavailable) and sends nothing for RESPONSE_TIMEOUT_MAX_MS. */
+void uds_client_core_on_fc_withheld(uds_client_core_t* c, uint32_t now_ms);
+
 /*
  * N_USData.indication of the link. data/len are the message for ISOTP_N_OK (ignored
  * otherwise). Returns true and fills *sample when the message is the positive answer
@@ -211,6 +225,9 @@ bool uds_client_core_did_skipped(const uds_client_core_t* c, uint32_t idx, uint3
 
 /* Pending request kind (UDS_CLIENT_REQ_NONE when the slot is free). */
 uds_client_req_kind_t uds_client_core_pending(const uds_client_core_t* c);
+
+/* The positive response SID of the pending request (its SID + 0x40); 0 when none. */
+uint8_t uds_client_core_pending_response_sid(const uds_client_core_t* c);
 
 const uds_client_stats_t* uds_client_core_stats(const uds_client_core_t* c);
 
