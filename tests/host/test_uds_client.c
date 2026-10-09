@@ -489,11 +489,15 @@ static void test_sil_segmented_answer_is_service_unavailable_without_flow_contro
     const uds_client_stats_t* st = uds_client_stats(&client);
     TEST_ASSERT_GREATER_OR_EQUAL_UINT32(1u, st->unavailable);
     TEST_ASSERT_GREATER_OR_EQUAL_UINT32(1u, st->did_skips);
-    TEST_ASSERT_FALSE(uds_client_failed(&client)); /* the dropped FC does not latch */
+    TEST_ASSERT_FALSE(uds_client_failed(&client)); /* the withheld FC does not latch */
+    TEST_ASSERT_EQUAL_UINT32(st->fc_withheld, st->unavailable); /* no N_Cr failure */
+    TEST_ASSERT_EQUAL_UINT32(st->fc_withheld, isotp_link_fc_withheld_count(&client.link));
+    TEST_ASSERT_EQUAL_UINT32(0u, isotp_link_tx_refused_count(&client.link));
 
-    /* Each First Frame: nothing from the tester for N_Cr + N_Bs, then polling resumes.
-     * The DID is retried after the skip cooldown and fails the same way. */
-    const uint32_t wait = ISOTP_DEFAULT_N_CR_MS + isotp_link_n_bs_ms(&client.link);
+    /* Each First Frame: nothing from the tester for RESPONSE_TIMEOUT_MAX_MS (the ECU
+     * waits its N_Bs for the FC), then polling resumes. The DID is retried after the
+     * skip cooldown and fails the same way. */
+    const uint32_t wait = VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS;
     uint32_t ffs = 0u;
     for (uint32_t i = 0u; i < sniff_count; i++) {
         if (is_tester(&sniffed[i]) || ((sniffed[i].f.data[0] & 0xF0u) != 0x10u)) {

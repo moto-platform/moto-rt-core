@@ -82,13 +82,13 @@ It is pure logic with no HAL, RTOS or heap, and is tested in `tests/host/test_is
    - Frames are checked with `vehicle_cl250_frame_allowed()` before `can_if_write()`.
    - All of these are counted in `isotp_link_tx_refused_count()`.
 
-**Known gap (open question):** the generated frame gate passes Single Frames only, so the vehicle link can never send a Flow Control. A segmented response from the ECU therefore ends in `ISOTP_N_TIMEOUT_CR`.
+**Known gap (open question):** the generated frame gate passes Single Frames only, so the vehicle link can never send a Flow Control. It withholds the FC.CTS the core queues on a First Frame: the reception is cancelled at once (`isotp_rx_cancel()`, no indication, no N_Cr wait), counted in `isotp_link_fc_withheld_count()` (not as a refusal) and reported once by `isotp_link_take_fc_withheld()`.
 - All current CL250 DIDs fit in a Single Frame (at most 5 bytes).
 - 0x19 with more than one DTC, and OBD 0x09 (VIN), pass the request gate but always need several frames, so they will not work in practice.
 - Until this is decided, the Ç3 client (see "UDS client" below) does the following:
-  - treats `ISOTP_N_TIMEOUT_CR` as "service unavailable"
+  - treats a withheld FC, and a failed reception, as "service unavailable"
   - applies `VEHICLE_CL250_DID_SKIP_COOLDOWN_MS`, so one failing request cannot hold the single in-flight slot
-  - waits at least N_Bs after an aborted segmented response
+  - sends nothing for `VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS` after a withheld FC (the ECU waits its N_Bs), and for N_Bs after a failed reception
 - Letting FC.CTS through widens the D-020 gate. It needs the user's approval and a versioned moto-vehicle-defs change, reviewed by the safety-reviewer. The reviewer's conditions:
   - byte-exact FC.CTS with fixed BS/STmin and padding
   - sent only while a reception is running for an allowed request
@@ -180,7 +180,7 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
     - **Chained late answers.** If the ECU still answers a read after the next read of the same DID went out (or sends a positive answer twice), a late answer can end read *c* early; *c*'s own answer may then land on read *c* + 1. It is stamped with *c* + 1's send time, so it looks younger by the gap between the two reads (up to 160 ms in the simulation with defs v0.3.3, 169 with v0.3.2), and its timing can clear the slow state, so fresh attempts recur (RPM still STALE at most 0.2 % with 150-250 ms answers and defs v0.3.3; 0.3 % with v0.3.2, 1-3 % with v0.3.1). The client cannot tell these answers apart; keeping the DID faulty until a skip would end in a permanent fault after one glitch. Whether the CL250 answers a read it was given up on is open until the D-029 bench and the HIL scenarios (ISSUES E-6 (6)).
     - Across a skip cooldown (`DID_SKIP_COOLDOWN_MS`, 5 s) the stamp restarts: an answer more than 5 s late would be stamped with the fresh attempt. ECU absence (`ECU_ABSENT_TIMEOUT_MS` 3 s > `RESPONSE_TIMEOUT_MAX_MS` 2 s) ends every DID's fault state on purpose: no read from before it is answered, and samples after key-on are not born STALE (safety review MINOR-1, `test_ecu_absence_ends_the_fault_state_of_every_did`).
     - With request-time stamps the sample age is the request gap plus the round trip, so a gap at the codegen bound can show a DID STALE for up to one round trip.
-    - A **segmented reception** pauses the base timeout (up to N_Cr), and the abort hold follows; the DID is then skipped, so this happens once per cooldown.
+    - A **segmented response** ends the read at once (withheld FC) and the hold follows; the DID is then skipped, so this happens once per cooldown.
     - An NRC carries the SID, not the DID. A 0x78 that the ECU keeps sending for a timed-out read extends the next 0x22 read, up to `RESPONSE_TIMEOUT_MAX_MS` from that read's request; that DID is then faulty too (`test_a_late_0x78_extends_the_next_read_only_up_to_the_cap`).
     - **Assumption:** a faulty read is abandoned 100 ms after the ECU said "response pending", and a new 0x22 may go out while the ECU is still busy. Whether the CL250 then answers NRC 0x21, ignores it or drops the session is unknown. It stays an assumption until it is seen on the real bus (D-029 bench); a HIL ECU model cannot show it.
 - **Response timeout.**
@@ -195,8 +195,8 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
 - **Other NRCs** for the pending SID end the request (legacy, user decision 2026-09-29). They are not a timeout, and the DID keeps its schedule. NRCs for another SID, for example tester present, never end or extend the pending read.
 - **Session lost.** NRC 0x7E or 0x7F on any request, or the ECU going absent, marks the session down. It is then re-established the same way. Only 0x10 03 is ever sent, never 0x10 01 or 0x10 02.
 - **Q-020, segmented responses.**
-  - The link cannot send the FC, so a segmented response ends in `ISOTP_N_TIMEOUT_CR` after N_Cr.
-  - Any failed reception counts as "service unavailable". The DID goes into skip cooldown at once, and nothing is sent for the link's N_Bs (`isotp_link_n_bs_ms()`), so the ECU has given up its segmented send first.
+  - The link cannot send the FC: it withholds it and cancels the reception (`isotp_link_take_fc_withheld()`). The client ends the pending request as "service unavailable" (`stats.fc_withheld`, `unavailable`; not a timeout), the DID goes into skip cooldown at once, and nothing is sent for `VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS`, so the ECU has given up its segmented send first. A First Frame with no request pending only holds.
+  - Any failed reception (N_Cr, wrong SN) counts as "service unavailable" as well, with a hold of the link's N_Bs (`isotp_link_n_bs_ms()`). A running hold is never shortened.
   - While a reception runs, nothing is sent, and the base timeout pauses. The total cap still applies.
   - The link's receive buffer (`UDS_CLIENT_RX_BUF` = 64) is larger than a Single Frame, so a First Frame starts a reception instead of being dropped silently.
 - **Late, malformed or foreign answers** (another DID, out of range, longer than a Single Frame) are counted as `unexpected`. The request then ends by timeout.
@@ -205,11 +205,11 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
   - `UDS_CLIENT_FAULT_GATE`: the link refused a request (the D-020 gate or the Single Frame length). Only a bug can cause it.
   - `UDS_CLIENT_FAULT_GUARD`: the `can_if` vehicle guard refused any frame.
   - `UDS_CLIENT_FAULT_FOREIGN_TESTER`: a frame on `VEHICLE_CL250_REQUEST_ID`, `VEHICLE_CL250_FALLBACK_REQUEST_ID` or one of the OBD functional request IDs in `vehicle_cl250_functional_watch[]` (0x7DF, 0x18DB33F1; Q-021 → D-040, watch-only, never sent). The controller never receives its own frames, so this is a second tester, for example a generic OBD dongle (D-021, same as connectivity-node, D-030). `uds_client_open()` refuses to run without these watches (`ISOTP_ERR_ARG` when `can_if` has no room).
-  - The FC.CTS that the link drops for a segmented response is expected, and does not latch.
+  - The FC.CTS that the link withholds for a segmented response is expected, is not a refusal, and does not latch.
 - **Sticky STALE.** `vehicle_signals_expire()` runs every step. Once a sample is STALE it stays STALE until the next write, so the 32-bit ms counter wrapping (about 49.7 days) cannot make an old value VALID. ECU presence also needs a new answer after absence.
 - **Known limits.**
-  - A First Frame with FF_DL above `UDS_CLIENT_RX_BUF` (64) is dropped silently by the core. The request ends by timeout and counts towards the skip limit. No CL250 DID does this.
-  - Each segmented response stops polling for about N_Cr + N_Bs (about 2 s), so every DID goes STALE. This is the cost of the Q-020 deferral.
+  - A First Frame with FF_DL above `UDS_CLIENT_RX_BUF` (64) gets FC.OVFLW from the core, which the link withholds the same way.
+  - Each segmented response stops polling for `RESPONSE_TIMEOUT_MAX_MS` (2 s), so every DID goes STALE. This is the cost of the Q-020 deferral.
   - A DID answered with a permanent NRC (for example 0x31) is polled at its full rate. This is legacy behaviour, and the schedule bounds it.
   - The acceptance filters come from the `can_if` receiver table (`can_if_apply_filters()`, Ç1), so they pass `VEHICLE_CL250_RESPONSE_ID`, `VEHICLE_CL250_REQUEST_ID`, `VEHICLE_CL250_FALLBACK_REQUEST_ID` and every `vehicle_cl250_functional_watch[]` ID that the client registered. Otherwise the foreign-tester watch would be deaf. Checked on target by `uds_client_foreign_tester`.
   - **Bus-off and N_As (Ç1, `services/can_sm`, D-054).** A vehicle bus-off aborts the pending request and blocks writes (`can_if_write()` returns `CAN_PORT_ERR_IO`, counted in `can_if_tx_blocked_count()`, never as a guard refusal, so the client does not latch). The client keeps its schedule and waits for `isotp_link_tx_ready()`. Recovery waits 1, 2, 4, 8 s (gen/ `VEHICLE_CL250_BUS_OFF_BACKOFF_*`). The 5th bus-off since boot latches the vehicle port (D-030): off the vehicle bus until reboot, seen as `VEHICLE_ECU_COMM_LOST` and STALE values. The vehicle port takes a new frame only when none is pending (one TX buffer), so a request never queues behind a stuck one; a stuck one is aborted after N_As. A request that got out late anyway is an abandoned read (D-051). A latched vehicle port still shows on 0xFD00 as fault NONE with the ECU absent; the root cause is on 0xFD02 (`VEHICLE_STATE` LATCHED and the `VEHICLE_LATCHED` flag) and in DTC U0001-88 `VEHICLE_BUS_OFF_LATCHED` (D-055).
@@ -439,7 +439,7 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
 
 - `isotp_vehicle_segmented_response_refused` (vehicle bus, today's behaviour):
   - The simulated ECU answers a 0x22 request with a First Frame.
-  - Pass when rt-core sends no Flow Control, the request ends in `ISOTP_N_TIMEOUT_CR` after N_Cr, and the next Single Frame request succeeds.
+  - Pass when rt-core sends no Flow Control, sends nothing for `RESPONSE_TIMEOUT_MAX_MS`, and the next Single Frame request succeeds.
   - Do **not** loosen the D-020 gate to make a segmented vehicle response pass; that needs the FC decision above.
 - `isotp_segmented_transfer` (platform bus, e.g. against the future UDS server link):
   - A message longer than 7 bytes, with BS = 2 and STmin = 5 ms.

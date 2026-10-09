@@ -7,6 +7,8 @@
 
 _Static_assert(ISOTP_CAN_DL == CAN_PORT_MAX_DLC, "ISO-TP and CAN frame sizes differ");
 
+#define PCI_TYPE_FC 0x3u /* ISO 15765-2 N_PCI type of a Flow Control */
+
 static void link_count(uint32_t* counter)
 {
     if (*counter < UINT32_MAX) {
@@ -47,6 +49,8 @@ static isotp_status_t open_link(isotp_can_link_t* link, const isotp_link_addr_t*
     link->tx_refused_count = 0u;
     link->abort_seen = can_if_tx_abort_count(addr->port);
     link->tx_timeouts = 0u;
+    link->fc_withheld_count = 0u;
+    link->fc_withheld = false;
     link->vehicle = vehicle;
     if (can_if_register_rx(addr->port, addr->rx_id, addr->extended, on_rx, link) != CAN_IF_OK) {
         return ISOTP_ERR_ARG;
@@ -121,11 +125,24 @@ isotp_status_t isotp_link_send(isotp_can_link_t* link, const uint8_t* data, uint
     return isotp_send(&link->iso, data, len);
 }
 
+/* A First Frame the vehicle link does not answer: no CF will come, so the reception
+ * ends now, without an indication; the ECU gives up after its N_Bs. */
+static void withhold_fc(isotp_can_link_t* link)
+{
+    isotp_rx_cancel(&link->iso);
+    link->fc_withheld = true;
+    link_count(&link->fc_withheld_count);
+}
+
 /* Writes one frame the core produced; the core counts it as sent either way. */
 static void transmit(isotp_can_link_t* link, const isotp_frame_t* f)
 {
+    if (link->vehicle && (f->dlc > 0u) && ((f->data[0] >> 4) == PCI_TYPE_FC)) {
+        withhold_fc(link); /* Q-020: the frame gate passes no Flow Control */
+        return;
+    }
     if (link->vehicle && !vehicle_cl250_frame_allowed(f->data, (size_t)f->dlc)) {
-        link_count(&link->tx_refused_count); /* e.g. an FC: the peer times out */
+        link_count(&link->tx_refused_count);
         return;
     }
     can_frame_t out;
@@ -198,6 +215,20 @@ uint32_t isotp_link_tx_timeout_count(const isotp_can_link_t* link)
 uint32_t isotp_link_tx_refused_count(const isotp_can_link_t* link)
 {
     return (link != NULL) ? link->tx_refused_count : 0u;
+}
+
+bool isotp_link_take_fc_withheld(isotp_can_link_t* link)
+{
+    if ((link == NULL) || !link->open || !link->fc_withheld) {
+        return false;
+    }
+    link->fc_withheld = false;
+    return true;
+}
+
+uint32_t isotp_link_fc_withheld_count(const isotp_can_link_t* link)
+{
+    return (link != NULL) ? link->fc_withheld_count : 0u;
 }
 
 uint16_t isotp_link_rx_error_count(const isotp_can_link_t* link)

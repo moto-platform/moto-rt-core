@@ -272,12 +272,18 @@ static void test_cl250_segmented_response_gets_no_flow_control(void)
     run_ms(2u);
     TEST_ASSERT_EQUAL_UINT32(1u, sniff_count); /* only the injected FF, no FC */
     TEST_ASSERT_FALSE(sniffed[0].from_dut);
-    TEST_ASSERT_EQUAL_UINT32(1u, isotp_link_tx_refused_count(&dut));
+    /* withheld, not refused: the reception ends at once, without an indication */
+    TEST_ASSERT_EQUAL_UINT32(0u, isotp_link_tx_refused_count(&dut));
+    TEST_ASSERT_EQUAL_UINT32(1u, isotp_link_fc_withheld_count(&dut));
+    TEST_ASSERT_FALSE(isotp_link_rx_busy(&dut));
+    TEST_ASSERT_TRUE(isotp_link_take_fc_withheld(&dut));
+    TEST_ASSERT_FALSE(isotp_link_take_fc_withheld(&dut)); /* once */
+    TEST_ASSERT_EQUAL_UINT16(1u, isotp_link_rx_error_count(&dut));
     run_ms(ISOTP_DEFAULT_N_CR_MS);
     isotp_n_result_t res;
     uint16_t len;
-    TEST_ASSERT_TRUE(isotp_link_take_rx(&dut, &res, &len));
-    TEST_ASSERT_EQUAL(ISOTP_N_TIMEOUT_CR, res);
+    TEST_ASSERT_FALSE(isotp_link_take_rx(&dut, &res, &len)); /* no N_Cr timeout follows */
+    TEST_ASSERT_EQUAL_UINT32(1u, sniff_count);
 }
 
 static void test_cl250_link_ignores_other_ids_and_formats(void)

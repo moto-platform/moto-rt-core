@@ -2063,6 +2063,39 @@ static void test_timeout_cr_is_service_unavailable_with_cooldown_and_n_bs_hold(v
     TEST_ASSERT_NOT_EQUAL(idx, req_idx());
 }
 
+/* Q-020 / D-059: a First Frame the link did not answer with an FC ends the read as
+ * "unavailable" (not a timeout) and holds for RESPONSE_TIMEOUT_MAX_MS; a later, shorter
+ * hold (an N_Cr failure) never shortens it. */
+static void test_withheld_fc_is_unavailable_without_a_timeout_and_holds_the_max_timeout(void)
+{
+    bring_up(0u);
+    TEST_ASSERT_EQUAL(K_READ, poll_at(0u));
+    const uint32_t idx = req_idx();
+    uds_client_core_on_fc_withheld(&c, 10u);
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->fc_withheld);
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->unavailable);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->timeouts);
+    TEST_ASSERT_TRUE(uds_client_core_did_skipped(&c, idx, 10u));
+    TEST_ASSERT_EQUAL(UDS_CLIENT_REQ_NONE, uds_client_core_pending(&c));
+    TEST_ASSERT_FALSE(uds_client_core_on_indication(&c, 20u, ISOTP_N_TIMEOUT_CR, NULL, 0u, &smp));
+    TEST_ASSERT_LESS_THAN_UINT32(VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS, 20u + HOLD_MS);
+    TEST_ASSERT_EQUAL(K_NONE, poll_at(10u + VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS - 1u));
+    TEST_ASSERT_EQUAL(K_TP, poll_at(10u + VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS));
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->timeouts);
+}
+
+/* An unsolicited First Frame (no request pending) still holds; nothing ends. */
+static void test_withheld_fc_without_a_request_only_holds(void)
+{
+    bring_up(0u);
+    uds_client_core_on_fc_withheld(&c, 5u);
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->fc_withheld);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->unavailable);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->did_skips);
+    TEST_ASSERT_EQUAL(K_NONE, poll_at(5u + VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS - 1u));
+    TEST_ASSERT_NOT_EQUAL(K_NONE, poll_at(5u + VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS));
+}
+
 static void test_failed_reception_without_a_pending_read_still_holds(void)
 {
     bring_up(0u);
@@ -2370,6 +2403,8 @@ int main(void)
     RUN_TEST(test_a_success_resets_the_consecutive_timeouts);
     RUN_TEST(test_ecu_absent_after_the_gen_timeout_drops_the_session);
     RUN_TEST(test_timeout_cr_is_service_unavailable_with_cooldown_and_n_bs_hold);
+    RUN_TEST(test_withheld_fc_is_unavailable_without_a_timeout_and_holds_the_max_timeout);
+    RUN_TEST(test_withheld_fc_without_a_request_only_holds);
     RUN_TEST(test_failed_reception_without_a_pending_read_still_holds);
     RUN_TEST(test_failed_reception_on_the_session_request_retries_later);
     RUN_TEST(test_base_timeout_pauses_during_a_segmented_reception_but_not_the_cap);

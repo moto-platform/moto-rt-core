@@ -174,6 +174,11 @@ uint16_t isotp_rx_error_count(const isotp_link_t* link);
  * with an indication: ISOTP_N_OK, or an error such as ISOTP_N_TIMEOUT_CR. */
 bool isotp_rx_busy(const isotp_link_t* link);
 
+/* Ends a reception under way (FF received, waiting for CFs) without an indication,
+ * e.g. when the link withheld our Flow Control, so no CF will come. Counted as a
+ * reception error. A pending FC is dropped. No-op while no reception runs. */
+void isotp_rx_cancel(isotp_link_t* link);
+
 /* True when no message is being sent: isotp_send() would accept a new one. */
 bool isotp_tx_idle(const isotp_link_t* link);
 

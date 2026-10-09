@@ -19,7 +19,10 @@
  * they are written. These are early rejects with proper errors. The hard control is
  * the fail-closed guard in services/can_if, which every vehicle frame passes as well.
  * The generated frame gate passes Single Frames only, so this link cannot send a Flow
- * Control and cannot receive segmented responses (see README).
+ * Control and cannot receive segmented responses (see README). It withholds every Flow
+ * Control the core queues on a First Frame: the reception is cancelled at once (no
+ * indication, no N_Cr wait) and isotp_link_take_fc_withheld() reports it, so the
+ * client can wait until the ECU has given up its segmented send.
  *
  * The link registers itself as a can_if receiver, so it must have static storage
  * duration.
@@ -63,6 +66,8 @@ typedef struct {
     uint32_t tx_refused_count;
     uint32_t abort_seen;  /* can_if_tx_abort_count() last acted on */
     uint32_t tx_timeouts; /* messages ended with ISOTP_N_TIMEOUT_A */
+    uint32_t fc_withheld_count; /* Flow Controls the vehicle link did not send */
+    bool fc_withheld; /* one was withheld since isotp_link_take_fc_withheld() */
     bool vehicle;     /* CL250 tester link: D-020 checks apply */
     bool open;
 } isotp_can_link_t;
@@ -109,8 +114,16 @@ uint32_t isotp_link_tx_error_count(const isotp_can_link_t* link);
 /* Messages ended with ISOTP_N_TIMEOUT_A (N_As abort or bus-off). */
 uint32_t isotp_link_tx_timeout_count(const isotp_can_link_t* link);
 
-/* Vehicle link: requests and frames refused by the D-020 checks (never written). */
+/* Vehicle link: requests and frames refused by the D-020 checks (never written). A
+ * withheld Flow Control is not counted here (see isotp_link_fc_withheld_count()). */
 uint32_t isotp_link_tx_refused_count(const isotp_can_link_t* link);
+
+/* Vehicle link: true once after the link withheld a Flow Control (a First Frame it did
+ * not answer; its reception was cancelled). */
+bool isotp_link_take_fc_withheld(isotp_can_link_t* link);
+
+/* Vehicle link: Flow Controls withheld since open (saturating). */
+uint32_t isotp_link_fc_withheld_count(const isotp_can_link_t* link);
 
 uint16_t isotp_link_rx_error_count(const isotp_can_link_t* link);
 

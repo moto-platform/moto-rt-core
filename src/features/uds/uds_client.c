@@ -144,6 +144,9 @@ void uds_client_step(uds_client_t* client)
         latch(client, UDS_CLIENT_FAULT_FOREIGN_TESTER); /* before anything is sent */
     }
     take_indication(client, now);
+    if (isotp_link_take_fc_withheld(&client->link)) {
+        uds_client_core_on_fc_withheld(&client->core, now);
+    }
     isotp_n_result_t conf = ISOTP_N_OK;
     (void)isotp_link_take_tx_confirm(&client->link, &conf); /* a Single Frame cannot fail */
 
@@ -163,8 +166,8 @@ void uds_client_step(uds_client_t* client)
     isotp_link_step(&client->link);
 
     /* The can_if guard refused a vehicle frame. The link's own refused counter is not
-     * watched: it also counts the FC.CTS the link must drop for a segmented response
-     * (Q-020), which is expected; a refused request is caught by isotp_link_send(). */
+     * watched: a refused request is caught by isotp_link_send(), and a withheld Flow
+     * Control is not a refusal (isotp_link_take_fc_withheld() above). */
     const uint32_t guard_refused = can_if_tx_refused_count(CAN_PORT_VEHICLE);
     if (guard_refused != client->guard_refused_seen) {
         client->guard_refused_seen = guard_refused;
