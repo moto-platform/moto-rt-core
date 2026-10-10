@@ -185,11 +185,11 @@ static void test_a_bad_configuration_reads_config(void)
     TEST_ASSERT_EQUAL(IMU_REASON_NONE, period(1, 1, 1, 32u, false).reason);
     cfg.odr_hz = IMU_ODR_MIN_HZ;
     TEST_ASSERT_EQUAL(IMU_REASON_NONE, period(1, 1, 1, N_PERIOD, false).reason);
-    /* the scale must match a 500..2500 deg/s full scale (MINOR-2 on PR 3a) */
+    /* the scale must match a 450..2600 deg/s full scale (MINOR-2 on PR 3a, MINOR-A) */
     const float lsb_per_fs = 32768.0f;
-    cfg.gyro_rps_per_lsb = (499.0f * DEG) / lsb_per_fs;
+    cfg.gyro_rps_per_lsb = (449.0f * DEG) / lsb_per_fs;
     TEST_ASSERT_EQUAL(IMU_REASON_CONFIG, period(1, 1, 1, N_PERIOD, false).reason);
-    cfg.gyro_rps_per_lsb = (2501.0f * DEG) / lsb_per_fs;
+    cfg.gyro_rps_per_lsb = (2601.0f * DEG) / lsb_per_fs;
     TEST_ASSERT_EQUAL(IMU_REASON_CONFIG, period(1, 1, 1, N_PERIOD, false).reason);
     cfg.gyro_rps_per_lsb = IMU_SCALE_MIN_RPS_PER_LSB;
     TEST_ASSERT_EQUAL(IMU_REASON_NONE, period(1, 1, 1, N_PERIOD, false).reason);
@@ -199,6 +199,19 @@ static void test_a_bad_configuration_reads_config(void)
     const imu_sample_t s = period(1000, 0, 0, N_PERIOD, false);
     TEST_ASSERT_EQUAL(IMU_REASON_CONFIG, s.reason);
     TEST_ASSERT_EQUAL_FLOAT(0.0f, s.gyro_x_rps);
+}
+
+static void test_the_candidate_parts_datasheet_scales_are_accepted_MINOR_A(void)
+{
+    learn(0);
+    /* LSM6DSO 500/1000/2000 deg/s: 17.5/35/70 mdps per LSB; BMI270 500/1000/2000 deg/s:
+     * 65.6/32.8/16.4 LSB per deg/s (499.5 deg/s full scale at the lowest) */
+    const float scales[] = {17.5e-3f * DEG, 35.0e-3f * DEG, 70.0e-3f * DEG,
+                            DEG / 65.6f,    DEG / 32.8f,    DEG / 16.4f};
+    for (uint32_t i = 0u; i < (sizeof scales / sizeof scales[0]); i++) {
+        cfg.gyro_rps_per_lsb = scales[i];
+        TEST_ASSERT_EQUAL(IMU_REASON_NONE, period(1, 1, 1, N_PERIOD, false).reason);
+    }
 }
 
 static void test_port_faults_read_invalid_in_check_order(void)
@@ -254,10 +267,29 @@ static void test_too_few_samples_for_the_elapsed_time_are_stale(void)
 static void test_more_samples_than_the_elapsed_time_allows_are_excess_MAJOR_1(void)
 {
     learn(0);
-    /* 20 ms at 800 Hz: 16 expected, at most 24 + 2 */
-    TEST_ASSERT_EQUAL(IMU_REASON_NONE, period(1, 1, 1, 26u, false).reason);
-    TEST_ASSERT_EQUAL(IMU_REASON_EXCESS, period(1, 1, 1, 27u, false).reason);
+    /* 20 ms at 800 Hz: 16 expected, at most 24 + 2 ms of latency (2) + 2 */
+    TEST_ASSERT_EQUAL(IMU_REASON_NONE, period(1, 1, 1, 28u, false).reason);
+    TEST_ASSERT_EQUAL(IMU_REASON_EXCESS, period(1, 1, 1, 29u, false).reason);
     TEST_ASSERT_EQUAL(IMU_REASON_NONE, period(1, 1, 1, N_PERIOD, false).reason);
+}
+
+static void test_a_short_catch_up_period_within_the_latency_is_not_excess_MINOR_B(void)
+{
+    learn(0);
+    cfg.odr_hz = IMU_ODR_MAX_HZ;
+    TEST_ASSERT_EQUAL(IMU_REASON_NONE, period(1, 1, 1, 32u, false).reason);
+    /* catch-up periods of 1..5 ms holding their own samples plus 2 ms carried over by
+     * the port's latency, plus 1 ms of stamp resolution */
+    for (uint32_t e = 1u; e <= 5u; e++) {
+        const uint16_t n = (uint16_t)(((e + 3u) * IMU_ODR_MAX_HZ) / 1000u);
+        imu_acc_t a;
+        imu_acc_reset(&a);
+        for (uint16_t i = 0u; i < n; i++) {
+            imu_acc_add(&a, (const int16_t[3]){noisy(1, i), 1, 1});
+        }
+        now += e;
+        TEST_ASSERT_EQUAL(IMU_REASON_NONE, imu_core_finish(&core, &a, &cfg, now, false).reason);
+    }
 }
 
 static void test_watermark_batching_never_reads_valid_MAJOR_1(void)
@@ -274,10 +306,17 @@ static void test_watermark_batching_never_reads_valid_MAJOR_1(void)
 static void test_a_frozen_gyro_reads_invalid_MINOR_1(void)
 {
     learn(0);
-    for (uint32_t i = 1u; i < IMU_FROZEN_PERIODS; i++) {
+    /* riding: the 3rd identical period (MINOR-D on the fixes) */
+    for (uint32_t i = 1u; i < IMU_FROZEN_PERIODS_RIDING; i++) {
         TEST_ASSERT_EQUAL(IMU_REASON_NONE, period_exact(3, 3, 0, N_PERIOD).reason);
     }
-    for (uint32_t i = 0u; i < 100u; i++) { /* from the 25th period on, and it stays */
+    /* a one-sample period (1 ms) is no evidence: the run neither grows nor ends */
+    imu_acc_t one;
+    imu_acc_reset(&one);
+    imu_acc_add(&one, (const int16_t[3]){3, 3, 0});
+    now += 1u;
+    TEST_ASSERT_EQUAL(IMU_REASON_NONE, imu_core_finish(&core, &one, &cfg, now, false).reason);
+    for (uint32_t i = 0u; i < 100u; i++) { /* from the 3rd period on, and it stays */
         TEST_ASSERT_EQUAL(IMU_REASON_FROZEN, period_exact(3, 3, 0, N_PERIOD).reason);
     }
     /* one axis changing is enough to count as alive again: y, then z */
@@ -288,7 +327,7 @@ static void test_a_frozen_gyro_reads_invalid_MINOR_1(void)
     }
     now += PERIOD_MS;
     TEST_ASSERT_EQUAL(IMU_REASON_NONE, imu_core_finish(&core, &a, &cfg, now, false).reason);
-    for (uint32_t i = 1u; i < IMU_FROZEN_PERIODS; i++) {
+    for (uint32_t i = 1u; i < IMU_FROZEN_PERIODS_RIDING; i++) {
         (void)period_exact(3, 3, 0, N_PERIOD);
     }
     TEST_ASSERT_EQUAL(IMU_REASON_FROZEN, period_exact(3, 3, 0, N_PERIOD).reason);
@@ -298,6 +337,17 @@ static void test_a_frozen_gyro_reads_invalid_MINOR_1(void)
     }
     now += PERIOD_MS;
     TEST_ASSERT_EQUAL(IMU_REASON_NONE, imu_core_finish(&core, &a, &cfg, now, false).reason);
+    /* at standstill a quiet part may repeat: 25 periods; each closes nothing until then */
+    imu_acc_reset(&a);
+    for (uint32_t i = 0u; i < N_PERIOD; i++) {
+        imu_acc_add(&a, (const int16_t[3]){0, 0, (i == 0u) ? 1 : 0});
+    }
+    now += PERIOD_MS;
+    TEST_ASSERT_EQUAL(IMU_REASON_NONE, imu_core_finish(&core, &a, &cfg, now, true).reason);
+    for (uint32_t i = 1u; i < IMU_FROZEN_PERIODS_STILL; i++) {
+        TEST_ASSERT_EQUAL(IMU_REASON_NONE, period_n(0, 0, 0, N_PERIOD, true, false).reason);
+    }
+    TEST_ASSERT_EQUAL(IMU_REASON_FROZEN, period_n(0, 0, 0, N_PERIOD, true, false).reason);
     /* a frozen gyro at standstill is never learnt as offset: the window closes */
     setUp();
     TEST_ASSERT_EQUAL(IMU_REASON_START, period_n(0, 0, 20, N_PERIOD, true, false).reason);
@@ -503,7 +553,9 @@ int main(void)
     RUN_TEST(test_port_faults_read_invalid_in_check_order);
     RUN_TEST(test_too_few_samples_for_the_elapsed_time_are_stale);
     RUN_TEST(test_more_samples_than_the_elapsed_time_allows_are_excess_MAJOR_1);
+    RUN_TEST(test_a_short_catch_up_period_within_the_latency_is_not_excess_MINOR_B);
     RUN_TEST(test_watermark_batching_never_reads_valid_MAJOR_1);
+    RUN_TEST(test_the_candidate_parts_datasheet_scales_are_accepted_MINOR_A);
     RUN_TEST(test_a_frozen_gyro_reads_invalid_MINOR_1);
     RUN_TEST(test_a_sample_at_full_scale_is_saturated);
     RUN_TEST(test_a_call_in_the_same_ms_is_no_new_and_keeps_the_period);

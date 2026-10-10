@@ -41,7 +41,8 @@ What `hal/stm32/imu_*.c` must provide. `services/imu` (host-tested on `hal/host/
 - **ISR budget:** the bus transfer runs by DMA (SPI) and the ISR only starts it and moves completed samples into the ring: a few µs, no blocking transfer and no wait. Its priority sits below the FDCAN interrupts and above every task (cornering README, task priority table, PR 3b); measured on HIL.
 - **Faults and recovery:** a bus error, a sensor that stops answering or a wrong WHO_AM_I reads `HAL_IMU_ERR`; `hal_imu_get_config()` reports ERR before init. The port recovers by itself (MINOR-4): a bounded re-init sequence started from its own context (e.g. one DMA transaction per pop call or per timer tick, at most one attempt per 100 ms), never blocking the EKF task, and ERR until the sensor answers and its registers read back correctly. One SPI glitch therefore costs a few periods of INVALID, not the rest of the ride.
 - **Data cache:** a DMA ring needs non-cacheable RAM or cache maintenance (unlike the snapshot slots).
-- HIL: `lean_imu_gap` (D-065 README) and an ODR/overrun check with the real part.
+- The init read-back covers the FIFO watermark register too (MINOR-C on the fixes): `services/imu`'s EXCESS check catches only batches longer than half a period, so the 2 ms latency is the real control.
+- HIL: `lean_imu_gap` (D-065 README), an ODR/overrun check, `imu_watermark_latency` (data-ready GPIO vs pop time, ≤ 2 ms), `imu_overrun_burst` (EKF task blocked 100 ms), `imu_spi_fault` (CS/MISO pulled: INVALID, then recovery), and the engine-off standstill FROZEN rate on the real part.
 
 ## H7 FDCAN port requirements (Ç1, ISSUES D-2)
 

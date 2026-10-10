@@ -164,6 +164,12 @@ static uint32_t count_share(uint32_t elapsed_ms, uint16_t odr_hz, uint32_t perce
     return (ms * (uint32_t)odr_hz * percent) / 100000u;
 }
 
+/* Samples the port may deliver late within its contract, rounded up. */
+static uint32_t latency_samples(uint16_t odr_hz)
+{
+    return ((IMU_SAMPLE_LATENCY_MAX_MS * (uint32_t)odr_hz) + 999u) / 1000u;
+}
+
 static bool frozen(const imu_acc_t* a)
 {
     return (a->min[0] == a->max[0]) && (a->min[1] == a->max[1]) && (a->min[2] == a->max[2]);
@@ -197,15 +203,19 @@ imu_sample_t imu_core_finish(imu_core_t* c, const imu_acc_t* a, const imu_config
     } else if ((a->count == 0u) ||
                ((uint32_t)a->count < count_share(now_ms - start_ms, cfg->odr_hz, IMU_COUNT_MIN_PERCENT))) {
         reason = IMU_REASON_STALE;
-    } else if ((uint32_t)a->count >
-               (count_share(now_ms - start_ms, cfg->odr_hz, IMU_COUNT_MAX_PERCENT) + IMU_COUNT_SLACK)) {
+    } else if ((uint32_t)a->count > (count_share(now_ms - start_ms, cfg->odr_hz, IMU_COUNT_MAX_PERCENT) +
+                                       latency_samples(cfg->odr_hz) + IMU_COUNT_SLACK)) {
         reason = IMU_REASON_EXCESS;
     } else if (a->saturated) {
         reason = IMU_REASON_SATURATED;
     } else {
-        c->frozen_periods = frozen(a) ? (c->frozen_periods + 1u) : 0u;
-        if (c->frozen_periods >= IMU_FROZEN_PERIODS) {
-            c->frozen_periods = IMU_FROZEN_PERIODS; /* stays frozen until a sample changes */
+        if (a->count >= 2u) { /* one sample is no evidence either way */
+            c->frozen_periods = frozen(a) ? (c->frozen_periods + 1u) : 0u;
+        }
+        const uint32_t limit = standstill ? IMU_FROZEN_PERIODS_STILL : IMU_FROZEN_PERIODS_RIDING;
+        if (c->frozen_periods >= limit) {
+            /* capped: stays frozen until a sample changes */
+            c->frozen_periods = IMU_FROZEN_PERIODS_STILL;
             reason = IMU_REASON_FROZEN;
         }
     }

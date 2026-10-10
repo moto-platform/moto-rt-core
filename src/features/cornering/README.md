@@ -76,7 +76,7 @@ A stamp up to `LEAN_SPEED_FUTURE_MAX_MS` (40 ms) ahead of the IMU stamp has age 
 - Report `reject_count` and the time without a learnt offset (UNLEARNED/RANGE) on 0xFD02 or as a DTC, so a bad gyro is visible.
 - The output stamp may be newer than the comms `now` (the EKF preempts comms): a small future stamp is age 0, a large one INVALID (architecture-guard MAJOR-2).
 - `comms_open_lean` checks that the registered counter is the lean link's own (MAJOR-3); snapshot fault latches cross to comms through an EKF-written atomic word and read as INVALID (MAJOR-4); EKF-side and comms-side functions are split and documented per task (MINOR-4); boot order and an EKF WCET budget in the README (MINOR-7).
-- T1: measure the period-mean spread at idle on the CL250; above 1 deg/s the offset is never learnt.
+- T1: measure the period-mean spread at idle on the CL250; above 1 deg/s the offset is never learnt. Also the raw per-axis LSB spread with the engine off (false FROZEN at standstill), and add per-axis stuck detection on x and z (a single stuck channel is not FROZEN today; safety-reviewer MINOR-D on the 3a fixes).
 
 **Availability cost (fail-safe, to measure on T1/T4).** Each of these makes the lean INVALID until the variance has converged again:
 - an IMU gap longer than 40 ms mid-corner;
