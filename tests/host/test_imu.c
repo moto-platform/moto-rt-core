@@ -27,10 +27,13 @@ void setUp(void)
 
 void tearDown(void) {}
 
+/* n samples around [x, y, z] with -1/+1 LSB of noise (never frozen; even n keeps the
+ * mean). */
 static void push(uint32_t n, int16_t x, int16_t y, int16_t z)
 {
-    const hal_imu_sample_t s = {{x, y, z}};
     for (uint32_t i = 0u; i < n; i++) {
+        const int16_t d = ((i % 2u) == 0u) ? -1 : 1;
+        const hal_imu_sample_t s = {{(int16_t)(x + d), (int16_t)(y + d), (int16_t)(z + d)}};
         TEST_ASSERT_TRUE(imu_host_push(&s));
     }
 }
@@ -75,9 +78,9 @@ static void test_an_empty_fifo_is_stale(void)
 static void test_the_drain_is_bounded_and_a_backlog_is_flushed(void)
 {
     learn(0);
-    /* exactly IMU_DRAIN_MAX samples: all taken, not a backlog */
+    /* exactly IMU_DRAIN_MAX samples (80 ms at 800 Hz): all taken, not a backlog */
     push(IMU_DRAIN_MAX, 0, 0, 0);
-    now += 40u;
+    now += 80u;
     imu_sample_t s = imu_read(&imu, now, false);
     TEST_ASSERT_EQUAL(IMU_REASON_NONE, s.reason);
     TEST_ASSERT_EQUAL_UINT16(IMU_DRAIN_MAX, s.count);
@@ -102,7 +105,9 @@ static void test_an_overrun_is_invalid_and_the_rest_is_still_drained(void)
     TEST_ASSERT_EQUAL_UINT32(0u, imu_host_level());
     TEST_ASSERT_EQUAL_UINT32(0u, imu_host_flush_count());
     TEST_ASSERT_EQUAL(IMU_REASON_NONE, read_period(N_PERIOD, 0, false).reason);
-    /* a full FIFO loses samples: reported as an overrun */
+    /* NULL is refused without an overrun; a full FIFO loses samples: an overrun */
+    TEST_ASSERT_FALSE(imu_host_push(NULL));
+    TEST_ASSERT_EQUAL(IMU_REASON_NONE, read_period(N_PERIOD, 0, false).reason);
     push(IMU_HOST_FIFO_DEPTH, 0, 0, 0);
     const hal_imu_sample_t s = {{0, 0, 0}};
     TEST_ASSERT_FALSE(imu_host_push(&s));
@@ -163,11 +168,11 @@ static int feeder_request;
 static void* feeder(void* arg)
 {
     (void)arg;
-    const hal_imu_sample_t s = {{7, -3, 2}};
+    const hal_imu_sample_t s[2] = {{{6, -4, 1}}, {{8, -2, 3}}}; /* noise: never frozen */
     while (__atomic_load_n(&feeder_stop, __ATOMIC_ACQUIRE) == 0) {
         if (__atomic_load_n(&feeder_request, __ATOMIC_ACQUIRE) != 0) {
             for (uint32_t i = 0u; i < N_PERIOD; i++) {
-                (void)imu_host_push(&s);
+                (void)imu_host_push(&s[i % 2u]);
             }
             __atomic_store_n(&feeder_request, 0, __ATOMIC_RELEASE);
         } else {

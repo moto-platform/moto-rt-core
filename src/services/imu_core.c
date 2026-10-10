@@ -97,6 +97,7 @@ void imu_core_init(imu_core_t* c)
         c->offset_z_rps = 0.0f;
         c->offset_learned = false;
         c->offset_rejected = false;
+        c->frozen_periods = 0u;
         c->win_start_ms = 0u;
         c->learn_count = 0u;
         c->reject_count = 0u;
@@ -115,6 +116,10 @@ void imu_acc_reset(imu_acc_t* a)
         a->sum[0] = 0;
         a->sum[1] = 0;
         a->sum[2] = 0;
+        for (uint32_t i = 0u; i < 3u; i++) {
+            a->min[i] = 0;
+            a->max[i] = 0;
+        }
         a->count = 0u;
         a->saturated = false;
         a->hal_error = false;
@@ -133,21 +138,35 @@ void imu_acc_add(imu_acc_t* a, const int16_t gyro[3])
             a->saturated = true;
         }
         a->sum[i] += (int32_t)gyro[i];
+        if ((a->count == 0u) || (gyro[i] < a->min[i])) {
+            a->min[i] = gyro[i];
+        }
+        if ((a->count == 0u) || (gyro[i] > a->max[i])) {
+            a->max[i] = gyro[i];
+        }
     }
     a->count++;
 }
 
+/* NaN fails both comparisons, and the bounded scale keeps every mean finite:
+ * |mean| <= 32768 * IMU_SCALE_MAX_RPS_PER_LSB, about 44 rad/s (MISRA Dir 4.1). */
 static bool config_ok(const imu_config_t* cfg)
 {
-    return isfinite(cfg->gyro_rps_per_lsb) && (cfg->gyro_rps_per_lsb > 0.0f) &&
+    return (cfg->gyro_rps_per_lsb >= IMU_SCALE_MIN_RPS_PER_LSB) &&
+           (cfg->gyro_rps_per_lsb <= IMU_SCALE_MAX_RPS_PER_LSB) &&
            (cfg->odr_hz >= IMU_ODR_MIN_HZ) && (cfg->odr_hz <= IMU_ODR_MAX_HZ);
 }
 
-static bool count_too_low(uint32_t elapsed_ms, uint16_t odr_hz, uint16_t count)
+/* elapsed * ODR * percent / 100000: the expected count scaled by percent / 100. */
+static uint32_t count_share(uint32_t elapsed_ms, uint16_t odr_hz, uint32_t percent)
 {
     const uint32_t ms = (elapsed_ms > IMU_ELAPSED_CAP_MS) ? IMU_ELAPSED_CAP_MS : elapsed_ms;
-    const uint32_t min_count = (ms * (uint32_t)odr_hz * IMU_COUNT_MIN_PERCENT) / 100000u;
-    return (count == 0u) || ((uint32_t)count < min_count);
+    return (ms * (uint32_t)odr_hz * percent) / 100000u;
+}
+
+static bool frozen(const imu_acc_t* a)
+{
+    return (a->min[0] == a->max[0]) && (a->min[1] == a->max[1]) && (a->min[2] == a->max[2]);
 }
 
 imu_sample_t imu_core_finish(imu_core_t* c, const imu_acc_t* a, const imu_config_t* cfg,
@@ -175,12 +194,20 @@ imu_sample_t imu_core_finish(imu_core_t* c, const imu_acc_t* a, const imu_config
         reason = IMU_REASON_BACKLOG;
     } else if (!had_last) {
         reason = IMU_REASON_START;
-    } else if (count_too_low(now_ms - start_ms, cfg->odr_hz, a->count)) {
+    } else if ((a->count == 0u) ||
+               ((uint32_t)a->count < count_share(now_ms - start_ms, cfg->odr_hz, IMU_COUNT_MIN_PERCENT))) {
         reason = IMU_REASON_STALE;
+    } else if ((uint32_t)a->count >
+               (count_share(now_ms - start_ms, cfg->odr_hz, IMU_COUNT_MAX_PERCENT) + IMU_COUNT_SLACK)) {
+        reason = IMU_REASON_EXCESS;
     } else if (a->saturated) {
         reason = IMU_REASON_SATURATED;
     } else {
-        /* all checks passed: reason stays NONE */
+        c->frozen_periods = frozen(a) ? (c->frozen_periods + 1u) : 0u;
+        if (c->frozen_periods >= IMU_FROZEN_PERIODS) {
+            c->frozen_periods = IMU_FROZEN_PERIODS; /* stays frozen until a sample changes */
+            reason = IMU_REASON_FROZEN;
+        }
     }
     if (reason != IMU_REASON_NONE) {
         window_close(c);
@@ -189,17 +216,8 @@ imu_sample_t imu_core_finish(imu_core_t* c, const imu_acc_t* a, const imu_config
 
     const float n = (float)a->count;
     float mean[3];
-    bool finite = true;
     for (uint32_t i = 0u; i < 3u; i++) {
         mean[i] = ((float)a->sum[i] / n) * cfg->gyro_rps_per_lsb;
-        if (!isfinite(mean[i])) {
-            finite = false;
-        }
-    }
-    if (!finite) {
-        /* a finite but absurd scale (MISRA Dir 4.1) */
-        window_close(c);
-        return imu_invalid(now_ms, a->count, IMU_REASON_CONFIG);
     }
 
     if (standstill) {

@@ -30,17 +30,38 @@ void setUp(void)
 
 void tearDown(void) {}
 
-/* One period of n identical raw samples, ending PERIOD_MS after the previous one. */
-static imu_sample_t period(int16_t x, int16_t y, int16_t z, uint16_t n, bool standstill)
+/* Sensor noise of -1/+1 LSB on alternate samples (none at full scale): the mean of an
+ * even count is unchanged, and the period never reads as frozen. */
+static int16_t noisy(int16_t v, uint16_t i)
+{
+    if ((v == INT16_MAX) || (v == INT16_MIN)) {
+        return v;
+    }
+    return (int16_t)(v + (((i % 2u) == 0u) ? -1 : 1));
+}
+
+/* One period of n raw samples around [x, y, z], ending PERIOD_MS after the previous one;
+ * noise on (noisy) or bit-identical samples (exact). */
+static imu_sample_t period_n(int16_t x, int16_t y, int16_t z, uint16_t n, bool standstill, bool noise)
 {
     imu_acc_t a;
     imu_acc_reset(&a);
-    const int16_t g[3] = {x, y, z};
     for (uint16_t i = 0u; i < n; i++) {
+        const int16_t g[3] = {noise ? noisy(x, i) : x, noise ? noisy(y, i) : y, noise ? noisy(z, i) : z};
         imu_acc_add(&a, g);
     }
     now += PERIOD_MS;
     return imu_core_finish(&core, &a, &cfg, now, standstill);
+}
+
+static imu_sample_t period(int16_t x, int16_t y, int16_t z, uint16_t n, bool standstill)
+{
+    return period_n(x, y, z, n, standstill, true);
+}
+
+static imu_sample_t period_exact(int16_t x, int16_t y, int16_t z, uint16_t n)
+{
+    return period_n(x, y, z, n, false, false);
 }
 
 /* Starts the core (the first period reads START) and stands still with raw z offset
@@ -164,8 +185,17 @@ static void test_a_bad_configuration_reads_config(void)
     TEST_ASSERT_EQUAL(IMU_REASON_NONE, period(1, 1, 1, 32u, false).reason);
     cfg.odr_hz = IMU_ODR_MIN_HZ;
     TEST_ASSERT_EQUAL(IMU_REASON_NONE, period(1, 1, 1, N_PERIOD, false).reason);
-    /* finite but absurd: the mean overflows to Inf (MISRA Dir 4.1) */
-    cfg.gyro_rps_per_lsb = 3.0e38f;
+    /* the scale must match a 500..2500 deg/s full scale (MINOR-2 on PR 3a) */
+    const float lsb_per_fs = 32768.0f;
+    cfg.gyro_rps_per_lsb = (499.0f * DEG) / lsb_per_fs;
+    TEST_ASSERT_EQUAL(IMU_REASON_CONFIG, period(1, 1, 1, N_PERIOD, false).reason);
+    cfg.gyro_rps_per_lsb = (2501.0f * DEG) / lsb_per_fs;
+    TEST_ASSERT_EQUAL(IMU_REASON_CONFIG, period(1, 1, 1, N_PERIOD, false).reason);
+    cfg.gyro_rps_per_lsb = IMU_SCALE_MIN_RPS_PER_LSB;
+    TEST_ASSERT_EQUAL(IMU_REASON_NONE, period(1, 1, 1, N_PERIOD, false).reason);
+    cfg.gyro_rps_per_lsb = IMU_SCALE_MAX_RPS_PER_LSB;
+    TEST_ASSERT_EQUAL(IMU_REASON_NONE, period(1, 1, 1, N_PERIOD, false).reason);
+    cfg.gyro_rps_per_lsb = 3.0e38f; /* finite but absurd: the means stay finite by the bound */
     const imu_sample_t s = period(1000, 0, 0, N_PERIOD, false);
     TEST_ASSERT_EQUAL(IMU_REASON_CONFIG, s.reason);
     TEST_ASSERT_EQUAL_FLOAT(0.0f, s.gyro_x_rps);
@@ -221,16 +251,72 @@ static void test_too_few_samples_for_the_elapsed_time_are_stale(void)
     TEST_ASSERT_EQUAL(IMU_REASON_STALE, period(1, 1, 1, N_PERIOD, false).reason);
 }
 
+static void test_more_samples_than_the_elapsed_time_allows_are_excess_MAJOR_1(void)
+{
+    learn(0);
+    /* 20 ms at 800 Hz: 16 expected, at most 24 + 2 */
+    TEST_ASSERT_EQUAL(IMU_REASON_NONE, period(1, 1, 1, 26u, false).reason);
+    TEST_ASSERT_EQUAL(IMU_REASON_EXCESS, period(1, 1, 1, 27u, false).reason);
+    TEST_ASSERT_EQUAL(IMU_REASON_NONE, period(1, 1, 1, N_PERIOD, false).reason);
+}
+
+static void test_watermark_batching_never_reads_valid_MAJOR_1(void)
+{
+    learn(0);
+    /* a port that delivers 32 samples every 40 ms: a period without and one with twice
+     * the samples, never a VALID mean shifted against its stamp */
+    for (uint32_t i = 0u; i < 50u; i++) {
+        TEST_ASSERT_EQUAL(IMU_REASON_STALE, period(1, 1, 1, 0u, false).reason);
+        TEST_ASSERT_EQUAL(IMU_REASON_EXCESS, period(1, 1, 1, 32u, false).reason);
+    }
+}
+
+static void test_a_frozen_gyro_reads_invalid_MINOR_1(void)
+{
+    learn(0);
+    for (uint32_t i = 1u; i < IMU_FROZEN_PERIODS; i++) {
+        TEST_ASSERT_EQUAL(IMU_REASON_NONE, period_exact(3, 3, 0, N_PERIOD).reason);
+    }
+    for (uint32_t i = 0u; i < 100u; i++) { /* from the 25th period on, and it stays */
+        TEST_ASSERT_EQUAL(IMU_REASON_FROZEN, period_exact(3, 3, 0, N_PERIOD).reason);
+    }
+    /* one axis changing is enough to count as alive again: y, then z */
+    imu_acc_t a;
+    imu_acc_reset(&a);
+    for (uint32_t i = 0u; i < N_PERIOD; i++) {
+        imu_acc_add(&a, (const int16_t[3]){3, (i == 0u) ? 4 : 3, 0});
+    }
+    now += PERIOD_MS;
+    TEST_ASSERT_EQUAL(IMU_REASON_NONE, imu_core_finish(&core, &a, &cfg, now, false).reason);
+    for (uint32_t i = 1u; i < IMU_FROZEN_PERIODS; i++) {
+        (void)period_exact(3, 3, 0, N_PERIOD);
+    }
+    TEST_ASSERT_EQUAL(IMU_REASON_FROZEN, period_exact(3, 3, 0, N_PERIOD).reason);
+    imu_acc_reset(&a);
+    for (uint32_t i = 0u; i < N_PERIOD; i++) {
+        imu_acc_add(&a, (const int16_t[3]){3, 3, (i == 0u) ? 1 : 0});
+    }
+    now += PERIOD_MS;
+    TEST_ASSERT_EQUAL(IMU_REASON_NONE, imu_core_finish(&core, &a, &cfg, now, false).reason);
+    /* a frozen gyro at standstill is never learnt as offset: the window closes */
+    setUp();
+    TEST_ASSERT_EQUAL(IMU_REASON_START, period_n(0, 0, 20, N_PERIOD, true, false).reason);
+    for (uint32_t i = 0u; i < 200u; i++) {
+        (void)period_n(0, 0, 20, N_PERIOD, true, false);
+    }
+    TEST_ASSERT_FALSE(core.offset_learned);
+}
+
 static void test_a_sample_at_full_scale_is_saturated(void)
 {
     learn(0);
     TEST_ASSERT_EQUAL(IMU_REASON_SATURATED, period(0, INT16_MAX, 0, N_PERIOD, false).reason);
     TEST_ASSERT_EQUAL(IMU_REASON_SATURATED, period(0, 0, INT16_MIN, N_PERIOD, false).reason);
     TEST_ASSERT_EQUAL(IMU_REASON_SATURATED, period(INT16_MAX, 0, 0, N_PERIOD, false).reason);
-    const imu_sample_t s = period(INT16_MAX - 1, (int16_t)(INT16_MIN + 1), 0, 4u, false);
+    const imu_sample_t s = period_exact(INT16_MAX, 0, 0, 4u);
     TEST_ASSERT_EQUAL(IMU_REASON_STALE, s.reason); /* stale before saturation */
     TEST_ASSERT_EQUAL(IMU_REASON_NONE,
-                      period(INT16_MAX - 1, (int16_t)(INT16_MIN + 1), 0, N_PERIOD, false).reason);
+                      period_exact(INT16_MAX - 1, (int16_t)(INT16_MIN + 1), 0, N_PERIOD).reason);
     /* one saturated sample among many still taints the period */
     imu_acc_t a;
     imu_acc_reset(&a);
@@ -416,6 +502,9 @@ int main(void)
     RUN_TEST(test_a_bad_configuration_reads_config);
     RUN_TEST(test_port_faults_read_invalid_in_check_order);
     RUN_TEST(test_too_few_samples_for_the_elapsed_time_are_stale);
+    RUN_TEST(test_more_samples_than_the_elapsed_time_allows_are_excess_MAJOR_1);
+    RUN_TEST(test_watermark_batching_never_reads_valid_MAJOR_1);
+    RUN_TEST(test_a_frozen_gyro_reads_invalid_MINOR_1);
     RUN_TEST(test_a_sample_at_full_scale_is_saturated);
     RUN_TEST(test_a_call_in_the_same_ms_is_no_new_and_keeps_the_period);
     RUN_TEST(test_no_sample_is_valid_before_the_z_offset_is_learnt);

@@ -32,10 +32,10 @@ void imu_host_reset(void);
 void imu_host_set_config(float gyro_rps_per_lsb, uint16_t odr_hz);
 
 /* Appends one sample. A full FIFO drops it and reports HAL_IMU_OVERRUN at the next pop,
- * like a real FIFO in stream mode; returns false then. */
+ * like a real FIFO in stream mode; returns false then. NULL: false, nothing changes. */
 bool imu_host_push(const hal_imu_sample_t* s);
 
-/* The next pop reports HAL_IMU_OVERRUN once (samples lost). */
+/* Counts a lost-sample event: the next pop reports HAL_IMU_OVERRUN once. */
 void imu_host_inject_overrun(void);
 
 /* While set, hal_imu_get_config() and hal_imu_pop() report HAL_IMU_ERR. */

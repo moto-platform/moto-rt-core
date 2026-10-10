@@ -11,7 +11,9 @@
  * - Sampled by the IMU itself at a fixed output data rate of at least 800 Hz, with its
  *   on-chip digital low-pass filter on (user, 2026-10-10). services/imu averages all
  *   samples of each EKF period, so the port must never decimate or point-sample.
- * - One aligned read per sample. The port's IMU ISR (FIFO watermark or data ready) and
+ * - Every sample reaches the pop side within 2 ms of being sampled (safety-reviewer
+ *   MAJOR-1 on PR 3a): late or batched samples would land in the wrong EKF period.
+ * - The port's IMU ISR (data ready, or a FIFO watermark of at most ODR / 500 samples) and
  *   its bus transfers stay inside the port; callers never wait for the bus.
  *
  * Only services/imu includes this header (CI layering check), and only the EKF task
@@ -35,7 +37,8 @@ typedef enum {
     HAL_IMU_EMPTY,    /* the FIFO is empty: no sample */
     HAL_IMU_OVERRUN,  /* samples were lost since the last pop (FIFO overflow): no sample;
                          reported once, the next pop continues with the oldest kept one */
-    HAL_IMU_ERR       /* bus or sensor fault, or not initialised: no sample */
+    HAL_IMU_ERR       /* bus or sensor fault, or not initialised: no sample; the port
+                         recovers by itself (bounded, never blocking the caller) */
 } hal_imu_status_t;
 
 /* The running configuration, fixed after the port's init. */
@@ -50,7 +53,8 @@ hal_imu_status_t hal_imu_get_config(hal_imu_config_t* cfg);
 /* Takes the oldest sample from the FIFO. Bounded: never waits. */
 hal_imu_status_t hal_imu_pop(hal_imu_sample_t* out);
 
-/* Discards everything in the FIFO, including a pending overrun report. Bounded. */
+/* Discards everything in the ring and in the sensor's own FIFO, including a pending
+ * overrun report, so no sample taken before the call reaches a later pop. Bounded. */
 void hal_imu_flush(void);
 
 #ifdef __cplusplus

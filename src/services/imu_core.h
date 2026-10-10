@@ -50,6 +50,26 @@ extern "C" {
  * STALE: a mean of a few samples would be close to a point sample again. */
 #define IMU_COUNT_MIN_PERCENT (50u)
 
+/* At most this share plus IMU_COUNT_SLACK samples, else EXCESS (safety-reviewer MAJOR-1
+ * on PR 3a): samples that reached the FIFO late, e.g. batched by a large watermark,
+ * would shift the mean against its stamp and make the roll rate lag at turn-in. The
+ * slack covers the 1 ms resolution of both stamps. */
+#define IMU_COUNT_MAX_PERCENT (150u)
+#define IMU_COUNT_SLACK (2u)
+
+/* Stuck-at check (safety-reviewer MINOR-1 on PR 3a; provisional until T1): a gyro whose
+ * raw samples stay bit-identical on all three axes for this many periods in a row (0.5 s)
+ * is frozen. Real sensor noise changes at least one LSB within a period. */
+#define IMU_FROZEN_PERIODS (25u)
+
+/* Plausible scale (safety-reviewer MINOR-2 on PR 3a): the full scale implied by the
+ * reported rad/s per LSB must lie within 500..2500 deg/s (common settings 500/1000/2000
+ * deg/s; e.g. LSM6DSO 70 mdps/LSB = 2294 deg/s). A driver that reports a scale for a
+ * full scale other than the sensor's would read the rates several times off; the port
+ * also reads its full-scale and ODR registers back at init (hal/README.md). */
+#define IMU_SCALE_MIN_RPS_PER_LSB (2.6631611e-4f) /* 500 deg/s / 32768 LSB */
+#define IMU_SCALE_MAX_RPS_PER_LSB (1.3315805e-3f) /* 2500 deg/s / 32768 LSB */
+
 /* z offset learning (user, 2026-10-10; provisional until T1): 2 s window, x/y/z means
  * each within 1 deg/s, accepted offset at most 2 deg/s. More means a faulty gyro or a
  * vehicle that is turning; the rt-core IMU must therefore have a zero-rate offset well
@@ -70,12 +90,14 @@ typedef enum {
     IMU_REASON_ARG,          /* NULL argument: nothing changed */
     IMU_REASON_NO_NEW,       /* same ms as the previous period's end: nothing changed */
     IMU_REASON_HAL,          /* the port reported a fault */
-    IMU_REASON_CONFIG,       /* scale not finite and positive, or ODR outside the range */
+    IMU_REASON_CONFIG,       /* scale or ODR outside its range */
     IMU_REASON_OVERRUN,      /* samples of this period were lost */
     IMU_REASON_BACKLOG,      /* more than IMU_DRAIN_MAX samples waited: flushed */
     IMU_REASON_START,        /* first period: no previous stamp */
     IMU_REASON_STALE,        /* no new sample, or too few for the elapsed time */
+    IMU_REASON_EXCESS,       /* more samples than the elapsed time allows: late/batched */
     IMU_REASON_SATURATED,    /* a sample at the sensor's full scale */
+    IMU_REASON_FROZEN,       /* raw samples bit-identical for IMU_FROZEN_PERIODS periods */
     IMU_REASON_OFFSET_UNLEARNED, /* no z offset learnt yet */
     IMU_REASON_OFFSET_RANGE  /* the last window's z offset was beyond IMU_OFFSET_MAX_RPS */
 } imu_reason_t;
@@ -101,6 +123,8 @@ typedef struct {
 typedef struct {
     int32_t sum[3];  /* |sum| <= IMU_DRAIN_MAX * 32768: no overflow */
     uint16_t count;
+    int16_t min[3];  /* smallest raw sample per axis (valid while count > 0) */
+    int16_t max[3];  /* largest raw sample per axis */
     bool saturated;  /* a sample at INT16_MIN or INT16_MAX on any axis */
     bool hal_error;  /* set by the glue */
     bool overrun;    /* set by the glue */
@@ -115,6 +139,7 @@ typedef struct {
     float offset_z_rps;     /* learnt z offset */
     bool offset_learned;
     bool offset_rejected;   /* the last window was rejected (reason OFFSET_RANGE) */
+    uint32_t frozen_periods; /* periods in a row with bit-identical raw samples */
     bool win_open;          /* a learning window is running */
     uint32_t win_start_ms;  /* start of its first period */
     uint32_t win_count;     /* z means in it */
@@ -144,7 +169,8 @@ void imu_acc_add(imu_acc_t* a, const int16_t gyro[3]);
  * Ends the period at now_ms. Checks in order, the first failure wins: arguments, the same
  * ms as the previous end (NO_NEW: nothing changed, the period goes on), HAL fault,
  * config, overrun, backlog, first period, stale (count 0 or below IMU_COUNT_MIN_PERCENT
- * of (now - previous stamp) * ODR), saturation; then the means, the offset learning
+ * of (now - previous stamp) * ODR), excess (above IMU_COUNT_MAX_PERCENT of it plus
+ * IMU_COUNT_SLACK), saturation, frozen; then the means, the offset learning
  * (with standstill) and the offset state. standstill: the caller saw a VALID speed of 0
  * that is within its age limit. Every result but ARG and NO_NEW ends the period, so the next one
  * starts at now_ms. A failure before the means, or a period without standstill, closes the

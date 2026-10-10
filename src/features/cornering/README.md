@@ -69,6 +69,15 @@ A stamp up to `LEAN_SPEED_FUTURE_MAX_MS` (40 ms) ahead of the IMU stamp has age 
 - Add a test that the standstill z-offset removal works; an unremoved z offset makes one turn direction read low.
 - Call the core only when there is a new IMU sample. A duplicate stamp is skipped, but it still returns INVALID, which would cost one 0x020 frame.
 
+**For PR 3b, from the reviews of PR 3a** (architecture-guard on the plan, safety-reviewer on 3a):
+- `IMU_REASON_NO_NEW` means "skip this step": no core step and no new output (test a second call in the same ms).
+- Standstill for `imu_read()`: a VALID speed of 0 (with a tolerance, never float equality), within a shorter age than the 300 ms max, and also 0 in the previous speed snapshot; never from a STALE speed.
+- An INVALID IMU sample gives an INVALID output without a core step; lean_core's 40 ms gap check then reinitialises it (tests: 1, 2 and 3 missed periods).
+- Report `reject_count` and the time without a learnt offset (UNLEARNED/RANGE) on 0xFD02 or as a DTC, so a bad gyro is visible.
+- The output stamp may be newer than the comms `now` (the EKF preempts comms): a small future stamp is age 0, a large one INVALID (architecture-guard MAJOR-2).
+- `comms_open_lean` checks that the registered counter is the lean link's own (MAJOR-3); snapshot fault latches cross to comms through an EKF-written atomic word and read as INVALID (MAJOR-4); EKF-side and comms-side functions are split and documented per task (MINOR-4); boot order and an EKF WCET budget in the README (MINOR-7).
+- T1: measure the period-mean spread at idle on the CL250; above 1 deg/s the offset is never learnt.
+
 **Availability cost (fail-safe, to measure on T1/T4).** Each of these makes the lean INVALID until the variance has converged again:
 - an IMU gap longer than 40 ms mid-corner;
 - a gate run longer than 100 ms;
