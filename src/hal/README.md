@@ -8,15 +8,17 @@ HAL-free interfaces that the layers above use, plus one implementation per platf
 | `can_port.h` | Non-blocking write/read/tx-free per port, plus the controller supervision of Ç1: `can_port_get_state()` (TEC, REC, error passive, bus-off, wrapping bus-off and TX-done counters, pending TX), `can_port_recover()`, `can_port_tx_abort()`, `can_port_set_filters()`, plus `can_port_set_tx_dedicated()` (D-056: the IDs with a dedicated, replace-on-new TX buffer). None of them sends a frame. `services/` and the app setup only, never features: the vehicle-bus guard lives in `services/can_if`, the state machine in `services/can_sm`. |
 | `hal_time.h` | Monotonic millisecond counter (wraps after ~49.7 days). Task-safe: one 32-bit read, no state written by callers (D-065, E-17), so the comms and EKF tasks share it. The H7 port static-asserts its source: with the FreeRTOS tick, `configTICK_RATE_HZ == 1000` and a 32-bit `TickType_t` (safety-reviewer NIT-3). |
 | `hal_atomic.h` | 32-bit atomic load (acquire), store (release) and exchange (acquire + release) for data shared between tasks of different priority (D-065 item 2): `services/snapshot` and `services/alive` only. No lock, no wait on another task. |
+| `imu.h` | The IMU gyro FIFO (D-065 item 2, PR 3a): raw body-axis samples in order (`hal_imu_pop()`: OK / EMPTY / OVERRUN / ERR), the running scale and ODR (`hal_imu_get_config()`), `hal_imu_flush()`. Consumer: `services/imu.c` only (CI), in the EKF task. Requirements for the port below. |
 
 ## Implementations
 
 - **`host/` (D-034):** the host platform layer for the SIL program and the mock-bus tests. Native builds only.
+  - `imu_host`: the IMU FIFO fake: a static single-producer / single-consumer ring on `__atomic` indices, so a feed thread and the EKF thread may share it (TSan), plus fault injection (overrun, port error, a bad config) and a flush counter.
   - `vbus`: in-process virtual CAN bus, up to 6 nodes. A frame goes to every node except its sender. It has static RX queues and counts overruns. Fault injection: a full TX mailbox, a TX stall (frames wait in 3 TX buffers and go out late when un-stalled, unless aborted), dedicated replace-on-new TX slots (a write to a slot whose frame is still unsent cancels it and returns `CAN_PORT_TX_FULL`; when a stall ends, the slots and the queue head go out by ID arbitration), bus-off (counted per entry; the node neither sends nor receives until `vbus_recover()`), TEC/REC, and exact-match acceptance filters.
   - `can_port_host`: binds each logical port to a `vbus` node or, on Linux, to a SocketCAN interface (`vcan0`, `can0`, ...). The SocketCAN socket is raw and non-blocking, carries classic frames only, and skips RTR, error and FD frames. Filters map to `CAN_RAW_FILTER`; a raw socket shows no controller state, so SocketCAN reports a healthy, idle controller: on a real interface (`--allow-real-bus`) the D-030 latch, N_As, the one-TX-buffer rule and the platform dedicated replace-on-new buffers are not enforced, and the kernel's `restart-ms` recovers bus-offs without limit (the program warns; a development path only, never the vehicle tester). On the vbus, the vehicle port's TX is free only when nothing is pending, like the H7's one TX buffer.
   - `hal_time_host`: CLOCK_MONOTONIC, or a manual clock for tests and fast simulation; its shared state uses atomics, so threads may call it (the stress test and TSan).
   - `hal_atomic_host`: the compiler's `__atomic` builtins (lock-free for 32 bits, checked at compile time), which ThreadSanitizer understands (`host-tsan` preset).
-- **`stm32/`:** not yet. FDCAN, the tick timer and the atomics come once the board (H743/H723, Q-019) and its CubeMX project exist. Nothing above this layer includes STM32 HAL headers. Until then the cross-compiled libraries leave `hal_*` unresolved; no stub is linked.
+- **`stm32/`:** not yet. FDCAN, the tick timer, the atomics and the IMU come once the board (H743/H723, Q-019) and its CubeMX project exist. Nothing above this layer includes STM32 HAL headers. Until then the cross-compiled libraries leave `hal_*` unresolved; no stub is linked.
 
 ## H7 atomics requirements (D-065 item 2, architecture-guard on PR 1)
 
@@ -26,6 +28,18 @@ What `hal/stm32/hal_atomic_*.c` must provide (single-core Cortex-M7):
 - **exchange: a PRIMASK critical section, required** (safety-reviewer MINOR-2): save PRIMASK (`__get_PRIMASK()`), `__disable_irq()`, `DMB`, plain load and store, `DMB`, then restore the saved value with `__set_PRIMASK()`, never `__enable_irq()`, so a call with interrupts already masked stays masked. A few cycles, so it delays interrupts by that much and no more. Not `LDREX` / `STREX`: their retry is bounded only by the interrupt rate (FDCAN, IMU ISRs), which this layer does not control. The services built on it (snapshot, alive) add no loop, so the higher-priority EKF task never waits for the comms task (E-17 BLOCKER-2).
 - **Callers are tasks, never ISRs:** a snapshot has one producer task and one consumer task, an alive counter one writer task.
 - Data cache: the exchanged slots are plain RAM touched by the CPU only (no DMA), so no cache maintenance is needed; a DMA producer would need its own rule.
+
+## H7 IMU port requirements (D-065 item 2, PR 3a; board and part open, Q-019)
+
+What `hal/stm32/imu_*.c` must provide. `services/imu` (host-tested on `hal/host/imu_host`) does the rest.
+
+- **Part:** a 6-axis MEMS IMU with a hardware FIFO and a gyro zero-rate offset well below 2 deg/s over temperature (LSM6DSO about 1, BMI270 about 0.5 deg/s), because `services/imu` rejects a learnt z offset above 2 deg/s and then reads INVALID (user, 2026-10-10). Not an MPU-6050 (about 20 deg/s). Gyro full scale at least 500 deg/s.
+- **Sampling:** the IMU's own output data rate, 800 to 1600 Hz (`IMU_ODR_MIN_HZ` .. `IMU_ODR_MAX_HZ`), with its on-chip digital low-pass filter on (cut-off chosen with the part, below ODR/2). The port never decimates and never reads single registers on a timer: `services/imu` averages every sample of the 20 ms EKF period (aliasing of the engine vibration, safety-reviewer MAJOR-4 on PR 2).
+- **Axes:** samples are delivered in the body axes (x forward, y right, z down); the mounting rotation is applied in the port, as a fixed sign/axis permutation (no float math in the ISR).
+- **ISR to task:** the IMU interrupt (FIFO watermark) or a DMA completion moves samples from the sensor FIFO into a static single-producer / single-consumer ring: the ISR only advances the tail, `hal_imu_pop()` (EKF task) only advances the head, each index one aligned 32-bit word with a `DMB` between the slot write and the tail store (and before reading a slot after the tail load). No lock and no `hal_atomic.h` (its callers are tasks only, architecture-guard MAJOR-5 on the PR 3 plan). A full ring drops the new sample and sets an overrun flag that the next pop reports once (`HAL_IMU_OVERRUN`); `hal_imu_flush()` sets head to tail and clears the flag. The ring holds at least `IMU_DRAIN_MAX` + one period of samples.
+- **Faults:** a bus error, a sensor that stops answering or a wrong WHO_AM_I reads `HAL_IMU_ERR` until re-initialised; `hal_imu_get_config()` reports ERR before init.
+- **Data cache:** a DMA ring needs non-cacheable RAM or cache maintenance (unlike the snapshot slots).
+- HIL: `lean_imu_gap` (D-065 README) and an ODR/overrun check with the real part.
 
 ## H7 FDCAN port requirements (Ç1, ISSUES D-2)
 

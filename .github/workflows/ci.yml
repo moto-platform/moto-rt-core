@@ -120,6 +120,12 @@ jobs:
             echo "::error::hal/hal_atomic.h is for services/ (snapshot, alive) only"
             exit 1
           fi
+          # The IMU FIFO (D-065) has one consumer: the services/imu glue (EKF task). Its pure
+          # core and every other module stay off it.
+          if grep -rnE '#include[[:space:]]+"hal/imu\.h"' src | grep -vE '^src/(services/imu\.(c|h)|hal/)'; then
+            echo "::error::hal/imu.h is for services/imu.c only"
+            exit 1
+          fi
 
       - name: Static analysis (cppcheck, blocking)
         run: |

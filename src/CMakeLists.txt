@@ -10,6 +10,7 @@ add_library(moto_rtcore_logic STATIC
     services/can_sm_core.c
     services/com_core.c
     services/alive_core.c
+    services/imu_core.c
     features/cornering/lean_core.c
 )
 target_include_directories(moto_rtcore_logic PUBLIC
@@ -37,7 +38,7 @@ add_library(moto_defs_gen STATIC
 target_include_directories(moto_defs_gen PUBLIC ${MOTO_DEFS_GEN})
 
 # Firmware code above the HAL: services/ and the feature glue. It only uses the HAL
-# interfaces (hal/can_port.h, hal/hal_time.h, hal/hal_atomic.h), so the same objects serve the host
+# interfaces (hal/can_port.h, hal/hal_time.h, hal/hal_atomic.h, hal/imu.h), so the same objects serve the host
 # program and the H7; each platform links its own hal/ implementation.
 add_library(moto_rtcore_fw STATIC
     services/timebase.c
@@ -48,6 +49,7 @@ add_library(moto_rtcore_fw STATIC
     services/com.c
     services/snapshot.c
     services/alive.c
+    services/imu.c
     features/uds/isotp_link.c
     features/uds/uds_client.c
     features/uds/uds_server.c
@@ -67,6 +69,7 @@ if(NOT CMAKE_CROSSCOMPILING)
         hal/host/can_port_host.c
         hal/host/hal_time_host.c
         hal/host/hal_atomic_host.c
+        hal/host/imu_host.c
     )
     target_link_libraries(moto_rtcore_hal_host PUBLIC moto_rtcore_logic)
     target_compile_definitions(moto_rtcore_hal_host PRIVATE _POSIX_C_SOURCE=200809L)

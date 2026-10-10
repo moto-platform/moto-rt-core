@@ -8,8 +8,9 @@ rt-core's cornering **Layer 2 only**: estimates that feed safety-node's cornerin
 |---|---|---|
 | (0) | defs `lean_angle_clamp_max_deg` (v0.9.0) | done (defs#52) |
 | (1) | `services/snapshot`, `services/alive`, heartbeat `ekf_stalled` | done (rt-core#27) |
-| **(2)** | **`lean_core`: pure 2-state roll EKF + host tests (this module)** | this PR |
-| (3) | `services/imu`, glue `lean.c/.h` (EKF task, alive bump, snapshots), 0x020 send in `app/comms` with the output clamp, defs bump to v0.9.0, SIL IMU feed | open |
+| (2) | `lean_core`: pure 2-state roll EKF + host tests (this module) | done (rt-core#28) |
+| (3a) | `hal/imu.h`, `services/imu` + `imu_core` (interval-mean rates, z offset at standstill), host IMU fake (user split PR 3, 2026-10-10) | done |
+| (3b) | glue `lean.c/.h` (EKF task, alive bump, snapshots), 0x020 send driven by `app/comms` with the output clamp, defs bump to v0.9.0, SIL IMU feed | open |
 
 Nothing calls the core yet. PR (3) adds `lean.h`, the module's public header for other code. It includes `lean_core.h` for the payload types (`lean_speed_t`, `lean_out_t`), so other code sees `lean_core.h` only through `lean.h`.
 
@@ -30,7 +31,7 @@ Nothing calls the core yet. PR (3) adds `lean.h`, the module's public header for
 - **Documented limits:**
   - Pitch ≈ 0. A pitch θ also adds −ψ̇·sin θ to the roll-rate gyro (p = roll rate − ψ̇·sin θ), and the measurement assumes θ = 0.
   - A steady coordinated turn. Transients are carried by the gyro and the gate.
-  - The z gyro's own bias is not estimated. An offset b_z gives a roll error of about v·b_z/(g·cos roll), for example 0.9° for 0.5°/s at 15 m/s. `services/imu` (PR 3) removes the offset at standstill.
+  - The z gyro's own bias is not estimated. An offset b_z gives a roll error of about v·b_z/(g·cos roll), for example 0.9° for 0.5°/s at 15 m/s. `services/imu` (PR 3a) removes the offset at standstill.
   - Below `LEAN_SPEED_MIN_MPS` the lean is INVALID.
 
 **Check order.** Each step runs these checks in order. The first one that fails wins, and every failure gives INVALID with roll 0 and QUALITY 0 (D-065 item 1, safety-reviewer MAJOR-1 on defs v0.9.0):
