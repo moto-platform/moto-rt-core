@@ -73,6 +73,16 @@ extern "C" {
 #define LEAN_P0_ROLL (0.27415568f)
 #define LEAN_P0_BIAS (1.2184697e-3f)
 
+/* Transient model error (provisional): in a turn-in the yaw rate lags the roll by about
+ * the steering response, so the steady-turn measurement is off by about
+ * H0 * lag * roll rate; it is added to R. Above LEAN_BIAS_LEARN_RATE_MAX_RPS of roll rate
+ * the bias is not updated, so a turn-in never leaks into it (safety-reviewer MAJOR-2). */
+#define LEAN_YAW_LAG_S (0.2f)
+#define LEAN_BIAS_LEARN_RATE_MAX_RPS (0.17453292f) /* 10 deg/s */
+/* The freeze outlasts the last high-rate step by three lags, while the lagging yaw rate
+ * settles (safety-reviewer MINOR-1 on the fixes). */
+#define LEAN_BIAS_HOLD_MS (600u)
+
 /* Innovation gate: normalised innovation squared above 9 (3 sigma, 1 DOF) rejects the
  * update. A reject run longer than LEAN_GATE_REJECT_MAX_MS (provisional: five EKF
  * cycles, longer than a steering transient's model error at 3 sigma) means the filter
@@ -97,7 +107,11 @@ extern "C" {
  * reads at most 50 %, until an accepted update or the run's end (INVALID, reinit). */
 #define LEAN_QUALITY_REJECT_MAX (50u)
 
-/* One IMU sample: body rates in rad/s and the timebase ms the sample was taken. */
+/* One IMU sample: body rates in rad/s and its timebase stamp. Contract for the producer
+ * (services/imu, PR 3; safety-reviewer MAJOR-4): each rate is the mean over
+ * (previous stamp, stamp], both filtered alike, never a point sample, since the
+ * single cylinder's vibration would alias at the EKF rate; the z offset is removed at
+ * standstill (it is not estimated here). */
 typedef struct {
     float gyro_x_rps; /* body x (roll-rate) gyro, + rolling right */
     float gyro_z_rps; /* body z gyro, + turning right; NOT the earth yaw rate (header) */
@@ -132,12 +146,13 @@ typedef enum {
     LEAN_REASON_NONE = 0,  /* ESTIMATED */
     LEAN_REASON_ARG,       /* NULL argument */
     LEAN_REASON_INPUT,     /* non-finite or out-of-range gyro sample: step skipped */
-    LEAN_REASON_DT,        /* first step, or the gap since the last step outside its range: reinit */
+    LEAN_REASON_DT,        /* first step, a gap above the limit or a backward stamp: reinit */
+    LEAN_REASON_DUPLICATE, /* same stamp as the last sample: skipped, state kept */
     LEAN_REASON_FILTER,    /* non-finite or implausible filter state: reinit */
     LEAN_REASON_GATE,      /* innovation gate rejected too long: diverged, reinit */
     LEAN_REASON_VARIANCE,  /* roll variance too large (also: not yet converged) */
     LEAN_REASON_SPEED,     /* no usable speed: no measurement */
-    LEAN_REASON_ROLL_RANGE /* |roll| at or beyond 90 deg: outside the model */
+    LEAN_REASON_ROLL_RANGE /* |roll| at or beyond 90 deg: outside the model, restart */
 } lean_reason_t;
 
 /* One step's result, returned by value: clamping it never touches the filter. */
@@ -158,9 +173,11 @@ typedef struct {
     float p11;              /* var(bias), (rad/s)^2 */
     uint32_t last_ms;       /* stamp of the last accepted IMU sample */
     uint32_t reject_since_ms; /* first gate reject of the current run */
+    uint32_t fast_ms;       /* last update step with |roll rate| above the bias-learn limit */
     bool ready;             /* set by init/reinit; false in the zero state */
     bool have_last;         /* last_ms holds a stamp */
     bool rejecting;         /* a gate reject run is open (held by steps without a usable speed) */
+    bool bias_hold;         /* bias frozen: fast roll now or within LEAN_BIAS_HOLD_MS of fast_ms */
 } lean_core_t;
 
 /* Resets the filter: roll 0, bias 0, the initial covariance, no last stamp. */
@@ -175,7 +192,10 @@ void lean_core_init(lean_core_t* c);
  * speed) and, with a usable speed, the measurement update behind the innovation gate
  * (a reject run longer than LEAN_GATE_REJECT_MAX_MS: diverged, reinit; an accepted
  * update ends the run; a step without a usable speed holds it, so its age keeps
- * counting); filter health again; the roll variance; the speed; the roll range.
+ * counting) and filter health again, or without a speed the roll prior reset once p00
+ * exceeds LEAN_P0_ROLL; the roll range (restart); the roll variance; the speed. A
+ * duplicate stamp (dt 0) is skipped like a bad sample, state kept (the glue calls the
+ * core only for a new sample, so this is a guard, not a path).
  * Bounded: no loop, a fixed number of float operations.
  */
 lean_out_t lean_core_step(lean_core_t* c, const lean_imu_t* imu, const lean_speed_t* speed);

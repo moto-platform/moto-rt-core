@@ -344,9 +344,12 @@ static void test_dt_limits(void)
     lean_imu_t s = imu_at(0.0f, 0.0f, last + LEAN_DT_MAX_MS);
     assert_estimated(lean_core_step(&c, &s, &sp));
 
-    s = imu_at(0.0f, 0.0f, c.last_ms); /* dt 0 */
-    assert_invalid(lean_core_step(&c, &s, &sp), LEAN_REASON_DT);
-    assert_reinit();
+    const lean_core_t before = c;
+    s = imu_at(0.0f, 0.0f, c.last_ms); /* dt 0: a duplicate, skipped with the state kept */
+    assert_invalid(lean_core_step(&c, &s, &sp), LEAN_REASON_DUPLICATE);
+    TEST_ASSERT_EQUAL_MEMORY(&before, &c, sizeof c);
+    s = imu_at(0.0f, 0.0f, c.last_ms + DT_MS);
+    assert_estimated(lean_core_step(&c, &s, &sp));
 
     converge();
     s = imu_at(0.0f, 0.0f, c.last_ms + LEAN_DT_MAX_MS + 1u);
@@ -500,15 +503,16 @@ static void test_variance_grows_without_speed_until_it_reads_variance(void)
     TEST_ASSERT_TRUE(sqrtf(c.p00) > LEAN_SIGMA_MAX_RAD);
 }
 
-static void test_roll_at_or_beyond_90_deg_is_invalid(void)
+static void test_roll_at_or_beyond_90_deg_is_invalid_and_restarts(void)
 {
     converge();
     c.roll = LEAN_ROLL_MAX_RAD;
     assert_invalid(step_turn(LEAN_ROLL_MAX_RAD, 0.0f, 0.0f, V_RIDE), LEAN_REASON_ROLL_RANGE);
+    assert_reinit();
     converge();
-    c.roll = -DEG(120.0f);
-    (void)step_turn(-DEG(120.0f), 0.0f, 0.0f, V_RIDE);
-    TEST_ASSERT_TRUE(fabsf(c.roll) >= LEAN_ROLL_MAX_RAD);
+    c.roll = -DEG(120.0f); /* also without a speed */
+    assert_invalid(step_with_speed(speed_at(0.0f, now, LEAN_SPEED_VALID)), LEAN_REASON_ROLL_RANGE);
+    assert_reinit();
     converge();
     c.roll = DEG(80.0f); /* below 90: still the model's range */
     assert_estimated(step_turn(DEG(80.0f), 0.0f, 0.0f, V_RIDE));
@@ -524,6 +528,172 @@ static void test_large_leans_are_estimated_and_the_output_copy_is_independent(vo
     out.roll_deg = 0.5f * out.roll_deg; /* the glue rewrites its copy (PR 3: the gen/ clamp) */
     out.state = LEAN_OUT_INVALID;
     TEST_ASSERT_EQUAL_MEMORY(&before, &c, sizeof c);
+}
+
+
+/* ---- safety-reviewer scenarios (MAJOR-1..3, MINOR noise) ---- */
+
+/* A 120 s stop with a 1 deg/s roll-gyro offset the filter has not learnt: the roll
+ * drifts past 90 deg and restarts, then the prior holds it at standstill, so riding
+ * on converges to the real lean, never to the mirror solution (MAJOR-1). */
+static void test_a_long_stop_with_gyro_drift_never_locks_the_lean_out(void)
+{
+    converge();
+    const float offset = DEG(1.0f);
+    bool restarted = false;
+    for (uint32_t i = 0u; i < 6000u; i++) {
+        const lean_speed_t sp = speed_at(0.0f, now, LEAN_SPEED_VALID);
+        const lean_imu_t s = imu_at(offset, 0.0f, now);
+        const lean_out_t out = lean_core_step(&c, &s, &sp);
+        TEST_ASSERT_EQUAL_INT(LEAN_OUT_INVALID, out.state);
+        restarted = restarted || (out.reason == LEAN_REASON_ROLL_RANGE);
+        TEST_ASSERT_TRUE(fabsf(c.roll) < LEAN_ROLL_MAX_RAD);
+        TEST_ASSERT_TRUE(c.p00 <= LEAN_P0_ROLL);
+        now += DT_MS;
+    }
+    TEST_ASSERT_TRUE(restarted);
+    uint32_t first = 0u;
+    lean_out_t out = {0};
+    for (uint32_t i = 1u; i <= 250u; i++) { /* 5 s straight */
+        out = step_turn(0.0f, 0.0f, offset, V_RIDE);
+        if ((out.state == LEAN_OUT_ESTIMATED) && (first == 0u)) {
+            first = i;
+        }
+    }
+    TEST_ASSERT_TRUE((first > 0u) && (first <= 50u)); /* within 1 s */
+    assert_estimated(out);
+    TEST_ASSERT_FLOAT_WITHIN(1.0f, 0.0f, out.roll_deg);
+}
+
+/* Turn-in 0 -> 40 deg in 0.5 s with the yaw rate lagging the roll (first order, 200 ms):
+ * within 2 deg from 1 s after the turn-in began, and the bias keeps out of it (MAJOR-2). */
+static void test_a_turn_in_with_yaw_lag_does_not_read_low(void)
+{
+    converge();
+    const float dt = (float)DT_MS * 0.001f;
+    const float rate = DEG(80.0f);
+    const float tau = 0.2f;
+    float roll = 0.0f;
+    float roll_lag = 0.0f;
+    uint32_t last_fast = now;
+    for (uint32_t i = 0u; i < 200u; i++) { /* 4 s */
+        const float r = (roll < DEG(40.0f)) ? rate : 0.0f;
+        roll += r * dt;
+        roll_lag += (roll - roll_lag) * (dt / tau);
+        const lean_imu_t s = imu_at(r, yaw_for(roll_lag, V_RIDE), now);
+        const lean_speed_t sp = speed_at(V_RIDE, now, LEAN_SPEED_VALID);
+        const float bias_before = c.bias;
+        const lean_out_t out = lean_core_step(&c, &s, &sp);
+        now += DT_MS;
+        assert_estimated(out);
+        if ((r > 0.0f) || ((now - DT_MS - last_fast) <= LEAN_BIAS_HOLD_MS)) {
+            /* frozen, bit-exact, during the turn-in and its lag tail */
+            TEST_ASSERT_EQUAL_MEMORY(&bias_before, &c.bias, sizeof c.bias);
+        }
+        if (r > 0.0f) {
+            last_fast = now - DT_MS;
+        }
+        if (i >= 50u) {
+            TEST_ASSERT_FLOAT_WITHIN(2.0f, roll * LEAN_DEG_PER_RAD, out.roll_deg);
+        }
+        if (i >= 100u) { /* from 2 s: within 1 deg, and never more than 1 deg low */
+            TEST_ASSERT_FLOAT_WITHIN(1.0f, roll * LEAN_DEG_PER_RAD, out.roll_deg);
+        }
+    }
+    TEST_ASSERT_FLOAT_WITHIN(DEG(0.2f), 0.0f, c.bias);
+}
+
+/* A 300 ms old speed sample while the true speed changed by the full margin: the
+ * measurement uses speed + margin, so the lean errs high, never low (user, MAJOR-3). */
+static void test_a_stale_speed_makes_the_lean_err_high(void)
+{
+    const uint32_t age = PLATFORM_LIMIT_VEHICLE_SPEED_MAX_AGE_MS;
+    const float margin = (float)age * 0.001f * PLATFORM_LIMIT_VEHICLE_SPEED_ACCEL_MARGIN_MPS2;
+    const float v_true[] = {15.0f + margin, 15.0f - margin}; /* accelerating, braking */
+    for (uint32_t k = 0u; k < 2u; k++) {
+        lean_core_init(&c);
+        lean_out_t out = {0};
+        for (uint32_t i = 0u; i < 500u; i++) {
+            const lean_imu_t s = imu_at(0.0f, yaw_for(DEG(45.0f), v_true[k]), now);
+            const lean_speed_t sp = speed_at(15.0f, now - age, LEAN_SPEED_VALID);
+            out = lean_core_step(&c, &s, &sp);
+            now += DT_MS;
+        }
+        assert_estimated(out);
+        TEST_ASSERT_TRUE(out.roll_deg >= 44.8f);
+    }
+}
+
+/* Over a long idle the prior reset also bounds the bias variance (MINOR-2 on the fixes). */
+static void test_a_long_idle_keeps_the_covariance_bounded(void)
+{
+    converge();
+    c.p00 = LEAN_P0_ROLL;
+    c.p11 = 2.0f * LEAN_P0_BIAS;
+    const float bias = c.bias;
+    assert_invalid(step_with_speed(speed_at(0.0f, now, LEAN_SPEED_VALID)), LEAN_REASON_VARIANCE);
+    TEST_ASSERT_EQUAL_FLOAT(LEAN_P0_ROLL, c.p00);
+    TEST_ASSERT_EQUAL_FLOAT(LEAN_P0_BIAS, c.p11);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, c.p01);
+    TEST_ASSERT_EQUAL_FLOAT(bias, c.bias);
+    /* a learnt (small) bias variance is kept by the reset */
+    c.p00 = LEAN_P0_ROLL;
+    c.p11 = 0.5f * LEAN_P0_BIAS;
+    assert_invalid(step_with_speed(speed_at(0.0f, now, LEAN_SPEED_VALID)), LEAN_REASON_VARIANCE);
+    TEST_ASSERT_EQUAL_FLOAT(LEAN_P0_ROLL, c.p00);
+    TEST_ASSERT_FLOAT_WITHIN(1e-8f, 0.5f * LEAN_P0_BIAS, c.p11); /* + q_bias * dt */
+}
+
+/* Deterministic Gaussian noise (LCG + Box-Muller), so the test is reproducible. */
+static uint32_t rng = 12345u;
+static float uniform01(void)
+{
+    rng = (rng * 1664525u) + 1013904223u;
+    return ((float)(rng >> 8) + 0.5f) * (1.0f / 16777216.0f);
+}
+static float gauss(void)
+{
+    return sqrtf(-2.0f * logf(uniform01())) * cosf(6.2831853f * uniform01());
+}
+
+/* 10 min of a weaving ride with gyro noise at the model's own Q and R: the gate never
+ * declares divergence, ESTIMATED throughout after convergence, the error stays small and
+ * its normalised square is consistent with the reported variance (MINOR). */
+static void test_ten_minutes_of_noisy_riding(void)
+{
+    const float dt = (float)DT_MS * 0.001f;
+    const float sx = sqrtf(LEAN_Q_ROLL / dt);
+    const float sz = sqrtf(LEAN_R_YAW);
+    const float w = 6.2831853f / 8.0f; /* 8 s weave */
+    const float bias = DEG(0.5f);
+    uint32_t estimated = 0u;
+    uint32_t counted = 0u;
+    float se = 0.0f;
+    float nees = 0.0f;
+    for (uint32_t i = 0u; i < 30000u; i++) {
+        const float t = (float)i * dt;
+        const float roll = DEG(25.0f) * sinf(w * t);
+        const float rate = DEG(25.0f) * w * cosf(w * t);
+        const lean_imu_t s =
+            imu_at(rate + bias + (sx * gauss()), yaw_for(roll, V_RIDE) + (sz * gauss()), now);
+        const lean_speed_t sp = speed_at(V_RIDE, now, LEAN_SPEED_VALID);
+        const lean_out_t out = lean_core_step(&c, &s, &sp);
+        now += DT_MS;
+        TEST_ASSERT_NOT_EQUAL_INT(LEAN_REASON_GATE, out.reason);
+        TEST_ASSERT_NOT_EQUAL_INT(LEAN_REASON_FILTER, out.reason);
+        if (i >= 500u) {
+            const float e = c.roll - roll;
+            counted++;
+            estimated += (out.state == LEAN_OUT_ESTIMATED) ? 1u : 0u;
+            se += e * e;
+            nees += (e * e) / c.p00;
+        }
+    }
+    const float rms_deg = sqrtf(se / (float)counted) * LEAN_DEG_PER_RAD;
+    const float nees_mean = nees / (float)counted;
+    TEST_ASSERT_EQUAL_UINT32(counted, estimated);
+    TEST_ASSERT_TRUE(rms_deg <= 1.5f);
+    TEST_ASSERT_TRUE((nees_mean >= 0.2f) && (nees_mean <= 3.0f));
 }
 
 /* ---- quality ---- */
@@ -590,8 +760,13 @@ int main(void)
     RUN_TEST(test_non_finite_or_implausible_state_reinitialises);
     RUN_TEST(test_an_update_that_pushes_the_bias_out_of_range_reinitialises);
     RUN_TEST(test_variance_grows_without_speed_until_it_reads_variance);
-    RUN_TEST(test_roll_at_or_beyond_90_deg_is_invalid);
+    RUN_TEST(test_roll_at_or_beyond_90_deg_is_invalid_and_restarts);
     RUN_TEST(test_large_leans_are_estimated_and_the_output_copy_is_independent);
+    RUN_TEST(test_a_long_stop_with_gyro_drift_never_locks_the_lean_out);
+    RUN_TEST(test_a_turn_in_with_yaw_lag_does_not_read_low);
+    RUN_TEST(test_a_stale_speed_makes_the_lean_err_high);
+    RUN_TEST(test_a_long_idle_keeps_the_covariance_bounded);
+    RUN_TEST(test_ten_minutes_of_noisy_riding);
     RUN_TEST(test_quality_map);
     RUN_TEST(test_null_arguments);
     return UNITY_END();

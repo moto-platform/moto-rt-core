@@ -16,16 +16,19 @@ Nothing calls the core yet. PR (3) adds `lean.h`, the module's public header for
 ## lean_core (D-065 item 1)
 
 **Inputs** (per EKF step, passed by the caller):
-- `lean_imu_t`: body gyro x and z in rad/s and the sample's timebase stamp. Axes: x forward, y right, z down. Roll is positive leaning right, matching the sign of 0x020 `LEAN_ANGLE`.
+- `lean_imu_t`: body gyro x and z in rad/s and the sample's timebase stamp. Axes: x forward, y right, z down. Roll is positive leaning right, matching the sign of 0x020 `LEAN_ANGLE`. **Producer contract** (`services/imu`, PR 3; safety-reviewer MAJOR-4): each rate is the mean over (previous stamp, stamp], both axes filtered alike, never a point sample, since the single cylinder's firing vibration (about 25-75 Hz) would alias at the 50 Hz EKF rate. The z gyro offset is removed at standstill.
 - `lean_speed_t`: the speed as it crosses tasks (D-065 item 2). It carries the physical m/s, the absolute stamp of the sample (D-051) and a state: an allow-list where only `LEAN_SPEED_VALID` is usable.
 
 **Output:** `lean_out_t` by value. It has the roll in degrees, QUALITY 0..100 %, `LEAN_OUT_ESTIMATED` or `LEAN_OUT_INVALID`, and the reason for INVALID. The glue maps the state to the gen/ 0x020 choices with a switch, never a cast. The core's values (INVALID 0, ESTIMATED 1) differ from the wire values (ESTIMATED 0, INVALID 3). RESERVED (2) is never sent.
 
 **Model** (2-state EKF over x = [roll, roll-rate gyro bias], float32):
 - **Predict:** roll += (gyro_x − bias)·dt, with P = F P Fᵀ + diag(q_roll·dt, q_bias·dt).
-- **Measure:** the coordinated turn tan(roll) = v·ψ̇/g, where ψ̇ is the earth yaw rate. With pitch at 0, the body z gyro reads r = ψ̇·cos(roll), so z = gyro_z, h(x) = (g/v)·sin(roll) and H = [(g/v)·cos(roll), 0]. Using atan(v·gyro_z/g) instead would estimate atan(sin(roll)), which is 35° for a true lean of 45°. The speed's own uncertainty enters as R_eff = R + (∂h/∂v)²·σ_v², with σ_v = age × `PLATFORM_LIMIT_VEHICLE_SPEED_ACCEL_MARGIN_MPS2`. The covariance update uses the Joseph form.
+- **Measure:** the coordinated turn tan(roll) = v·ψ̇/g, where ψ̇ is the earth yaw rate. With pitch at 0, the body z gyro reads r = ψ̇·cos(roll), so z = gyro_z, h(x) = (g/v)·sin(roll) and H = [(g/v)·cos(roll), 0]. Using atan(v·gyro_z/g) instead would estimate atan(sin(roll)), which is 35° for a true lean of 45°.
+- **Speed in h:** v is the **upper bound** of the true speed, sample + age × `PLATFORM_LIMIT_VEHICLE_SPEED_ACCEL_MARGIN_MPS2`. A stale sample therefore makes the lean err high, the side on which D-041 warns earlier. This was the user's choice on 2026-10-10 (safety-reviewer MAJOR-3). The cost is an over-reading while braking, up to atan of (1 + margin/v) times the tangent; in the test, a 300 ms old 15 m/s sample reads at least 45° for a true 45°, whether the bike is accelerating or braking.
+- **R_eff:** R + (∂h/∂v)²·margin² + (H0·`LEAN_YAW_LAG_S`·roll rate)². The last term is the transient model error. In a turn-in the yaw rate lags the roll by roughly the steering response (0.2 s, provisional), so the steady-turn relation is off by about lag × roll rate (safety-reviewer MAJOR-2).
+- **Bias freeze:** while |roll rate| > `LEAN_BIAS_LEARN_RATE_MAX_RPS` (10°/s), and for `LEAN_BIAS_HOLD_MS` (600 ms, three lags) after the last such step, the bias gain is 0. A turn-in and the tail of the lagging yaw rate therefore never leak into the bias (MINOR-1 on the fixes). The Joseph-form covariance update stays exact for that sub-optimal gain.
 - **Documented limits:**
-  - Pitch ≈ 0.
+  - Pitch ≈ 0. A pitch θ also adds −ψ̇·sin θ to the roll-rate gyro (p = roll rate − ψ̇·sin θ), and the measurement assumes θ = 0.
   - A steady coordinated turn. Transients are carried by the gyro and the gate.
   - The z gyro's own bias is not estimated. An offset b_z gives a roll error of about v·b_z/(g·cos roll), for example 0.9° for 0.5°/s at 15 m/s. `services/imu` (PR 3) removes the offset at standstill.
   - Below `LEAN_SPEED_MIN_MPS` the lean is INVALID.
@@ -34,13 +37,13 @@ Nothing calls the core yet. PR (3) adds `lean.h`, the module's public header for
 
 1. A NULL argument gives `ARG`.
 2. A gyro sample that is non-finite or has |rate| ≥ 2000°/s gives `INPUT`. The step is skipped and the state is left untouched. The last stamp is kept, so the next step sees the gap.
-3. The gap since the last sample is checked next. The first step, a gap of 0 or more than `LEAN_DT_MAX_MS` (40 ms), or a backward stamp gives `DT` and reinitialises the filter.
+3. The gap since the last sample is checked next. The first step, a gap of more than `LEAN_DT_MAX_MS` (40 ms) or a backward stamp gives `DT` and reinitialises the filter. A duplicate stamp (gap 0) gives `DUPLICATE` and is only skipped, with the state kept (safety-reviewer MINOR).
 4. Predict.
 5. Filter health: the state must be finite, both variances positive, P positive semi-definite and |bias| ≤ 5°/s. A failure gives `FILTER` and reinitialises.
-6. With a usable speed, the measurement update runs behind the innovation gate. A gate run that lasts too long gives `GATE` and reinitialises (see below). Filter health is then checked again.
-7. A roll σ above 5° gives `VARIANCE`. This includes a filter that has not converged yet: P0 is (30°)².
-8. A missing usable speed gives `SPEED`. Predict still runs, so the variance keeps growing.
-9. |roll| ≥ 90° gives `ROLL_RANGE`, because h = sin is not monotone beyond that.
+6. With a usable speed, the measurement update runs behind the innovation gate. A gate run that lasts too long gives `GATE` and reinitialises (see below). Filter health is then checked again. Without a usable speed the roll is unobservable: once p00 exceeds the start-up prior P0, roll and p00 go back to it (roll 0, p01 0, p11 capped at its P0) while the bias estimate is kept. This bounds roll and P at standstill (safety-reviewer MAJOR-1, MINOR-2 on the fixes).
+7. |roll| ≥ 90° gives `ROLL_RANGE` and restarts the filter, with or without a speed. h = sin is not monotone beyond 90°, so a roll that drifted past it, for example during a long stop on an unlearnt gyro offset, would otherwise converge to the mirror solution (180° − roll) and stay INVALID for the rest of the ride (MAJOR-1).
+8. A roll σ above 5° gives `VARIANCE`. This includes a filter that has not converged yet: P0 is (30°)².
+9. A missing usable speed gives `SPEED`. Predict still runs.
 
 **Speed rules** (vehicle_speed limits, gen/ `platform_limits.h`, defs v0.8.0). The core computes the age itself at every step, so a stalled producer reads INVALID within the max age (architecture-guard BLOCKER-1 on the plan). The speed is usable only when all of these hold:
 - the state is `VALID` and the value is finite;
@@ -60,6 +63,11 @@ A stamp up to `LEAN_SPEED_FUTURE_MAX_MS` (40 ms) ahead of the IMU stamp has age 
 
 **Constants.** All constants are named in `lean_core.h` with their rationale. The noise values (Q, R), P0, the gate window, the minimum speed, the dt and future limits, the bias limit and the QUALITY map are **provisional until the T1/T4 measurements**. They are tuning values, not signals (invariant 2). Physics constants: g = 9.80665 m/s², and 90° as the model bound.
 
+**For the PR 3 glue** (safety-reviewer MINOR):
+- Mark a speed `LEAN_SPEED_VALID` only when gen/ accepts its range: the core has no upper plausibility bound, so it needs no hand-written limit.
+- Add a test that the standstill z-offset removal works; an unremoved z offset makes one turn direction read low.
+- Call the core only when there is a new IMU sample. A duplicate stamp is skipped, but it still returns INVALID, which would cost one 0x020 frame.
+
 **Availability cost (fail-safe, to measure on T1/T4).** Each of these makes the lean INVALID until the variance has converged again:
 - an IMU gap longer than 40 ms mid-corner;
 - a gate run longer than 100 ms;
@@ -69,8 +77,8 @@ Convergence after a reinit takes a few steps at 20 ms (test: within 1 s). The bi
 
 ## Memory and timing
 
-- **RAM:** `lean_core_t` is 32 B, owned by the caller (static in the PR 3 glue). There is no heap and no loop. Each step does a fixed number of float operations: one `sinf`, one `cosf` and one `sqrtf`, plus two divisions, each by a value checked to be positive (MISRA Dir 4.1, Dir 4.11).
-- **Flash** (M7 release, `arm-none-eabi-size`, 2026-10-10): `lean_core.c.obj` has text 1176 B and bss 0. Total `moto_rtcore_logic` + `moto_rtcore_fw` text: 12370 → 13546 B. The libm functions (`sinf`, `cosf`; `sqrtf` becomes VSQRT with `-fno-math-errno`) are linked with the firmware in PR 3.
+- **RAM:** `lean_core_t` is 36 B, owned by the caller (static in the PR 3 glue). There is no heap and no loop. Each step does a fixed number of float operations: one `sinf`, one `cosf` and one `sqrtf`, plus up to four divisions, each by a value checked to be positive (MISRA Dir 4.1, Dir 4.11).
+- **Flash** (M7 release, `arm-none-eabi-size`, 2026-10-10): `lean_core.c.obj` has text 1372 B and bss 0. Total `moto_rtcore_logic` + `moto_rtcore_fw` text: 12370 → 13742 B. The libm functions (`sinf`, `cosf`; `sqrtf` becomes VSQRT with `-fno-math-errno`) are linked with the firmware in PR 3.
 - **Build:** `-fno-math-errno` is set on `moto_rtcore_logic`. `lean_core.c` refuses to build with `-ffast-math` (`__FAST_MATH__`) or without `-fno-math-errno` (`__NO_MATH_ERRNO__`), because `isfinite()` and the NaN-false comparisons need IEEE semantics.
 
 ## Coverage (D-046)
@@ -90,14 +98,22 @@ Convergence after a reinit takes a few steps at 20 ms (test: within 1 s). The bi
   - future stamps of +1 and +40 ms (age 0), +41 ms and +2³¹ (unusable);
   - timebase wrap for both dt and speed age.
 - **Gyro:** NaN and ±Inf on either axis give INPUT with the state byte-identical. Exactly 2000°/s is rejected, the next float below is accepted. Bad samples spanning more than 40 ms lead to DT and a reinit.
-- **dt:** 40 ms predicts; 0 ms, 41 ms and a backward stamp each give DT and a reinit.
+- **dt:** 40 ms predicts; 41 ms and a backward stamp each give DT and a reinit; 0 ms gives DUPLICATE with the state byte-identical, and the next step is ESTIMATED.
 - **Gate:**
   - a diverged filter (40° while riding straight) stays ESTIMATED with QUALITY ≤ 50 up to 100 ms after the first reject, gives GATE at the next reject, reinitialises and reconverges;
   - a single outlier caps QUALITY at 50, and the next accepted update ends the run;
   - a reject leaves a QUALITY already below the cap unchanged;
   - steps without a speed hold the run.
 - **Filter health:** NaN or Inf in roll, bias, p00, p01 or p11; negative p00 or p11; P not positive semi-definite; |bias| above the limit; an update that pushes the bias out of range. Each gives FILTER and a reinit.
-- **Variance and range:** without a speed the reason moves from SPEED to VARIANCE once σ > 5°. 90° and −120° give ROLL_RANGE, 80° is estimated. 60° is estimated unclamped, and changing the output copy leaves the filter unchanged.
+- **Variance and range:** without a speed the reason moves from SPEED to VARIANCE once σ > 5°. 90° and −120° (the latter without a speed) give ROLL_RANGE and a restart, 80° is estimated. 60° is estimated unclamped, and changing the output copy leaves the filter unchanged.
+- **safety-reviewer scenarios:**
+  - a 120 s stop with an unlearnt 1°/s roll-gyro offset: roll and p00 stay bounded and the roll restarts, then straight riding reads ESTIMATED within 1 s at the real lean, never the mirror;
+  - a turn-in from 0 to 40° in 0.5 s with the yaw rate lagging 200 ms (first order): within 2° from 1 s and within 1° from 2 s after the turn-in began, never INVALID, the bias bit-exact during the turn-in and its 600 ms hold, and within 0.2°/s afterwards;
+  - a long idle: the prior reset caps p11 at its P0 and keeps the bias;
+  - a 300 ms old speed while the true speed differs by the full margin, accelerating and braking: the lean reads at least 45° for a true 45°;
+  - ten minutes of a weaving ride (±25°, 8 s) with seeded Gaussian gyro noise at the model's own Q and R and a 0.5°/s bias: never GATE or FILTER, ESTIMATED throughout after convergence, RMS error ≤ 1.5°, mean NEES within [0.2, 3].
+  
+  Each fix was also checked by mutation: reverting it makes the matching test fail.
 - **QUALITY map:** the boundaries (1°, just above 1°, 3°, 5°, just above 5°), negative values, NaN and Inf, and monotonicity.
 - **NULL arguments.**
 
@@ -106,3 +122,4 @@ Convergence after a reinit takes a few steps at 20 ms (test: within 1 s). The bi
 - `lean_steady_turn`: replay a coordinated turn (IMU and speed restbus) at 30° and 15 m/s. Expected: 0x020 ESTIMATED within 1 s, |error| ≤ 1°, QUALITY ≥ 90.
 - `lean_speed_stall`: freeze the restbus speed during a turn. Expected: 0x020 INVALID with LEAN 0 and QUALITY 0 within 300 ms + one 0x020 cycle. NODE_MODE is unchanged, because the EKF still runs.
 - `lean_imu_gap`: drop IMU samples for 60 ms. Expected: INVALID at once, then ESTIMATED again after reconvergence (≤ 1 s).
+- `lean_turn_in_lag`: replay a real CL250 IMU and speed log of turn-ins. Expected: |error| against the reference ≤ 2° from 1 s after each turn-in began, and no low reading at QUALITY ≥ 90.

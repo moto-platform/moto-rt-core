@@ -35,9 +35,11 @@ static void reinit(lean_core_t* c)
     c->p11 = LEAN_P0_BIAS;
     c->last_ms = 0u;
     c->reject_since_ms = 0u;
+    c->fast_ms = 0u;
     c->ready = true;
     c->have_last = false;
     c->rejecting = false;
+    c->bias_hold = false;
 }
 
 /* Reinit, keeping now_ms as the last stamp so the next sample can predict. */
@@ -105,8 +107,11 @@ static bool speed_age_ms(uint32_t now_ms, uint32_t stamp_ms, uint32_t* age_ms)
 }
 
 /* A usable speed: VALID, finite, fresh, and at least the minimum even after the
- * age-grown margin. sigma_v is that margin (m/s), used as the speed's uncertainty. */
-static bool speed_usable(const lean_speed_t* s, uint32_t now_ms, float* sigma_v)
+ * age-grown margin. margin_mps is that margin (m/s): the measurement uses speed + margin
+ * (user, 2026-10-10, safety-reviewer MAJOR-3: the upper bound of the true speed, so a
+ * stale sample makes the lean err high, the side that warns earlier, D-041) and the
+ * margin again as the speed's uncertainty. */
+static bool speed_usable(const lean_speed_t* s, uint32_t now_ms, float* margin_mps)
 {
     uint32_t age_ms = 0u;
     bool ok = false;
@@ -117,7 +122,7 @@ static bool speed_usable(const lean_speed_t* s, uint32_t now_ms, float* sigma_v)
         const float age_s = (float)age_ms * LEAN_MS_TO_S;
         const float margin = age_s * LEAN_SPEED_ACCEL_MARGIN_MPS2;
         ok = (s->speed_mps - margin) >= LEAN_SPEED_MIN_MPS;
-        *sigma_v = margin;
+        *margin_mps = margin;
     }
     return ok;
 }
@@ -135,23 +140,40 @@ static void predict(lean_core_t* c, float gyro_x_rps, float dt_s)
 }
 
 /*
- * Measurement z = gyro_z, h = (g/v) sin(roll), H = [(g/v) cos(roll), 0]; the speed's
- * uncertainty enters through dh/dv = -h/v. Behind the innovation gate; Joseph-form
- * covariance update. Needs a healthy state (p00 > 0) and v >= LEAN_SPEED_MIN_MPS, so
- * every division is by a positive value. Returns false when the reject run is longer
- * than LEAN_GATE_REJECT_MAX_MS (diverged).
+ * Measurement z = gyro_z, h = (g/v) sin(roll), H = [(g/v) cos(roll), 0], with v the
+ * speed's upper bound. R_eff adds the speed's uncertainty (dh/dv = -h/v) and the
+ * transient model error: the yaw rate lags the roll by about LEAN_YAW_LAG_S, an error of
+ * about H0 * lag * roll rate (safety-reviewer MAJOR-2). While the roll rate exceeds
+ * LEAN_BIAS_LEARN_RATE_MAX_RPS, and for LEAN_BIAS_HOLD_MS after, the bias gain is 0, so
+ * a turn-in and its lag tail never leak into the bias; the Joseph form keeps P exact for
+ * that sub-optimal gain. Behind the innovation
+ * gate. Needs a healthy state (p00 > 0) and v >= LEAN_SPEED_MIN_MPS, so every division
+ * is by a positive value. Returns false when the reject run is longer than
+ * LEAN_GATE_REJECT_MAX_MS (diverged).
  */
-static bool measure(lean_core_t* c, float gyro_z_rps, float v_mps, float sigma_v,
-                    uint32_t now_ms)
+static bool measure(lean_core_t* c, const lean_imu_t* imu, float v_mps, float sigma_v)
 {
     const float g_v = LEAN_GRAVITY_MPS2 / v_mps;
     const float h = g_v * sinf(c->roll);
     const float h0 = g_v * cosf(c->roll);
     const float dh_dv = -h / v_mps;
-    const float r_eff = LEAN_R_YAW + ((dh_dv * dh_dv) * (sigma_v * sigma_v));
+    const float rate = imu->gyro_x_rps - c->bias;
+    const float lag_err = h0 * (LEAN_YAW_LAG_S * rate);
+    const float r_eff =
+        (LEAN_R_YAW + ((dh_dv * dh_dv) * (sigma_v * sigma_v))) + (lag_err * lag_err);
     const float s = ((h0 * h0) * c->p00) + r_eff;
-    const float nu = gyro_z_rps - h;
+    const float nu = imu->gyro_z_rps - h;
+    const uint32_t now_ms = imu->stamp_ms;
     bool ok = true;
+
+    if (fabsf(rate) > LEAN_BIAS_LEARN_RATE_MAX_RPS) {
+        c->bias_hold = true;
+        c->fast_ms = now_ms;
+    } else if (c->bias_hold && ((now_ms - c->fast_ms) > LEAN_BIAS_HOLD_MS)) {
+        c->bias_hold = false; /* cleared, so a stamp wrap never re-arms it */
+    } else {
+        /* hold unchanged */
+    }
 
     if ((nu * nu) > (LEAN_GATE_NIS * s)) {
         if (!c->rejecting) {
@@ -167,7 +189,10 @@ static bool measure(lean_core_t* c, float gyro_z_rps, float v_mps, float sigma_v
         const float p01 = c->p01;
         const float p11 = c->p11;
         const float k0 = (p00 * h0) / s;
-        const float k1 = (p01 * h0) / s;
+        float k1 = 0.0f;
+        if (!c->bias_hold) {
+            k1 = (p01 * h0) / s;
+        }
         const float a = 1.0f - (k0 * h0);
         const float b = -(k1 * h0);
         c->rejecting = false;
@@ -209,7 +234,7 @@ void lean_core_init(lean_core_t* c)
 lean_out_t lean_core_step(lean_core_t* c, const lean_imu_t* imu, const lean_speed_t* speed)
 {
     lean_out_t out;
-    float sigma_v = 0.0f;
+    float margin = 0.0f;
     bool have_speed = false;
 
     if ((c == NULL) || (imu == NULL) || (speed == NULL)) {
@@ -227,7 +252,10 @@ lean_out_t lean_core_step(lean_core_t* c, const lean_imu_t* imu, const lean_spee
     }
     {
         const uint32_t dt_ms = imu->stamp_ms - c->last_ms;
-        if ((dt_ms == 0u) || (dt_ms > LEAN_DT_MAX_MS)) {
+        if (dt_ms == 0u) {
+            return invalid(LEAN_REASON_DUPLICATE); /* skipped, state kept */
+        }
+        if (dt_ms > LEAN_DT_MAX_MS) {
             restart(c, imu->stamp_ms);
             return invalid(LEAN_REASON_DT);
         }
@@ -238,9 +266,9 @@ lean_out_t lean_core_step(lean_core_t* c, const lean_imu_t* imu, const lean_spee
         restart(c, imu->stamp_ms);
         return invalid(LEAN_REASON_FILTER);
     }
-    have_speed = speed_usable(speed, imu->stamp_ms, &sigma_v);
+    have_speed = speed_usable(speed, imu->stamp_ms, &margin);
     if (have_speed) {
-        if (!measure(c, imu->gyro_z_rps, speed->speed_mps, sigma_v, imu->stamp_ms)) {
+        if (!measure(c, imu, speed->speed_mps + margin, margin)) {
             restart(c, imu->stamp_ms);
             return invalid(LEAN_REASON_GATE);
         }
@@ -248,6 +276,23 @@ lean_out_t lean_core_step(lean_core_t* c, const lean_imu_t* imu, const lean_spee
             restart(c, imu->stamp_ms);
             return invalid(LEAN_REASON_FILTER);
         }
+    } else if (c->p00 > LEAN_P0_ROLL) {
+        /* unobservable roll (no speed) back to the start-up prior: bounds roll and p00
+         * at standstill; the bias estimate is kept (safety-reviewer MAJOR-1) */
+        c->roll = 0.0f;
+        c->p00 = LEAN_P0_ROLL;
+        c->p01 = 0.0f;
+        if (c->p11 > LEAN_P0_BIAS) {
+            c->p11 = LEAN_P0_BIAS; /* bounded over long idles (MINOR-2 on the fixes) */
+        }
+    } else {
+        /* prediction only */
+    }
+    if (fabsf(c->roll) >= LEAN_ROLL_MAX_RAD) {
+        /* outside the model (sin is not monotone beyond 90 deg): a drifted roll would
+         * converge to the mirror solution, so restart (safety-reviewer MAJOR-1) */
+        restart(c, imu->stamp_ms);
+        return invalid(LEAN_REASON_ROLL_RANGE);
     }
     {
         /* healthy: p00 > 0, so sqrtf gets a positive finite value (Dir 4.11) */
@@ -257,9 +302,6 @@ lean_out_t lean_core_step(lean_core_t* c, const lean_imu_t* imu, const lean_spee
         }
         if (!have_speed) {
             return invalid(LEAN_REASON_SPEED);
-        }
-        if (fabsf(c->roll) >= LEAN_ROLL_MAX_RAD) {
-            return invalid(LEAN_REASON_ROLL_RANGE);
         }
         out.roll_deg = c->roll * LEAN_DEG_PER_RAD;
         out.quality = lean_core_quality(sigma);
