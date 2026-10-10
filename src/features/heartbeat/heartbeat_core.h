@@ -23,9 +23,9 @@ extern "C" {
 
 /* NODE_MODE (D-064 item 1): INIT for a frame built in the first step after open (before
  * any comms pass completed, so before the monitors of that pass ran), DEGRADED while
- * heartbeat_fault_active(), NORMAL otherwise. NORMAL attests the comms pass and the DTC
- * monitors only, not the EKF (none yet; its alive supervision joins DEGRADED before 0x020
- * is published, D-064 item 4).
+ * heartbeat_fault_active(), NORMAL otherwise. NORMAL attests the comms pass, the DTC
+ * monitors and, once an EKF is registered with app/comms, the EKF's alive counter
+ * (D-064 item 4, D-065 item 2).
  * SAFE_STATE, BOOTLOADER and DIAGNOSTIC are not used until they are defined. */
 uint8_t heartbeat_node_mode(bool first_frame, bool fault_active);
 
@@ -33,9 +33,11 @@ uint8_t heartbeat_node_mode(bool first_frame, bool fault_active);
  * the monitored conditions holds although its monitor did not run (architecture-guard
  * MAJOR-1: U3000 and U0001-88 are evaluated in the UDS server step): the vehicle
  * tester's status is latched or missing/stale (NOT_RUNNING), or the vehicle CAN port is
- * latched after its bus-off limit. */
+ * latched after its bus-off limit. Or the EKF stalled (D-064 item 4, D-065 item 2):
+ * registered but its alive counter did not change within the window, or never changed
+ * (app/comms decides; false while no EKF is registered). */
 bool heartbeat_fault_active(bool monitor_failed, bool tester_latched, bool tester_not_running,
-                            bool vehicle_port_latched);
+                            bool vehicle_port_latched, bool ekf_stalled);
 
 /* Time since boot that never decreases (D-064 item 3): the timebase wraps after about
  * 49.7 days, while UPTIME must decrease only on a restart. */

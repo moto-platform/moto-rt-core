@@ -27,6 +27,15 @@
       }
     },
     {
+      "name": "host-tsan",
+      "displayName": "Host tests under ThreadSanitizer (the lock-free exchange, D-065)",
+      "inherits": "host-tests",
+      "binaryDir": "${sourceDir}/build/host-tsan",
+      "cacheVariables": {
+        "CMAKE_C_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer -O1 -g"
+      }
+    },
+    {
       "name": "target-m7-debug",
       "displayName": "Cortex-M7 cross build (Debug)",
       "generator": "Ninja",
@@ -56,6 +65,10 @@
       "configurePreset": "host-coverage"
     },
     {
+      "name": "host-tsan",
+      "configurePreset": "host-tsan"
+    },
+    {
       "name": "target-m7-debug",
       "configurePreset": "target-m7-debug"
     },
@@ -70,6 +83,18 @@
       "configurePreset": "host-tests",
       "output": {
         "outputOnFailure": true
+      }
+    },
+    {
+      "name": "host-tsan",
+      "configurePreset": "host-tsan",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "name": "test_snapshot|test_alive|test_comms_ekf"
+        }
       }
     },
     {

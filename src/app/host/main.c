@@ -128,6 +128,7 @@ static uds_client_t client;
 static uds_server_t server;
 static vehicle_republish_t republisher;
 static heartbeat_t heartbeat;
+static comms_ekf_t ekf; /* no EKF registered until D-065 PR 3 */
 static sim_listener_t listener;
 
 static const char* state_name(vehicle_signal_state_t st)
@@ -218,6 +219,7 @@ int main(int argc, char** argv)
         fprintf(stderr, "platform-bus republisher setup failed\n");
         return 1;
     }
+    comms_ekf_init(&ekf);
     if (!heartbeat_open(&heartbeat)) {
         fprintf(stderr, "heartbeat setup failed\n");
         return 1;
@@ -250,7 +252,7 @@ int main(int argc, char** argv)
                 break;
             }
         }
-        comms_pass(&client, &server, &republisher, &heartbeat);
+        comms_pass(&client, &server, &republisher, &heartbeat, &ekf);
         sim_listener_step(&listener, now);
 
         if (!opt.quiet && timebase_expired(now, printed_at, PRINT_PERIOD_MS)) {

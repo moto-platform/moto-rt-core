@@ -20,9 +20,10 @@ uint8_t heartbeat_node_mode(bool first_frame, bool fault_active)
 }
 
 bool heartbeat_fault_active(bool monitor_failed, bool tester_latched, bool tester_not_running,
-                            bool vehicle_port_latched)
+                            bool vehicle_port_latched, bool ekf_stalled)
 {
-    return monitor_failed || tester_latched || tester_not_running || vehicle_port_latched;
+    return monitor_failed || tester_latched || tester_not_running || vehicle_port_latched ||
+           ekf_stalled;
 }
 
 void heartbeat_uptime_init(heartbeat_uptime_t* up, uint32_t now_ms)
