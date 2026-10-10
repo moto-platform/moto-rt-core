@@ -4,11 +4,10 @@
  * every host this builds on, and visible to ThreadSanitizer. */
 
 /* A preprocessor check: gcc -pedantic does not take __atomic_always_lock_free() as a
- * constant expression in _Static_assert. */
+ * constant expression in _Static_assert. GCC and clang define the macro (the builtins
+ * below do not compile elsewhere); cppcheck, which defines neither, skips it. */
 _Static_assert(sizeof(uint32_t) == sizeof(int), "uint32_t is int on the host");
-#ifndef __GCC_ATOMIC_INT_LOCK_FREE
-#error "the host compiler must provide the __atomic builtins (GCC or clang)"
-#elif __GCC_ATOMIC_INT_LOCK_FREE != 2
+#if defined(__GCC_ATOMIC_INT_LOCK_FREE) && (__GCC_ATOMIC_INT_LOCK_FREE != 2)
 #error "32-bit atomics must be always lock-free on the host"
 #endif
 
