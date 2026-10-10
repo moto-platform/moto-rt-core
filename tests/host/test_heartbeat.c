@@ -69,7 +69,7 @@ static void pass(void)
         diag_set_vehicle_tester(&st, now);
     }
     can_sm_step(CAN_PORT_PLATFORM);
-    heartbeat_step(&hb);
+    heartbeat_step(&hb, false);
     hal_time_host_advance(1u);
 }
 
@@ -264,7 +264,7 @@ static void test_an_unknown_vehicle_port_state_is_not_read_as_a_latch(void)
                                           (uint8_t)PLATFORM_UDS_VEHICLE_TESTER_STATUS_FAULT_NONE};
         diag_set_vehicle_tester(&st, timebase_now_ms());
         can_sm_step(CAN_PORT_PLATFORM);
-        heartbeat_step(&hb);
+        heartbeat_step(&hb, false);
         hal_time_host_advance(1u);
         drain(&s);
     }
@@ -318,8 +318,8 @@ static void test_a_refused_open_sends_nothing(void)
     TEST_ASSERT_FALSE(heartbeat_open(&second)); /* the port is sealed */
     TEST_ASSERT_FALSE(second.opened);
     TEST_ASSERT_FALSE(heartbeat_open(NULL));
-    heartbeat_step(&second);
-    heartbeat_step(NULL);
+    heartbeat_step(&second, false);
+    heartbeat_step(NULL, false);
     TEST_ASSERT_EQUAL_UINT32(0u, vbus_frame_count(&bus_p));
 }
 
@@ -329,7 +329,7 @@ static void test_an_id_already_listed_is_refused(void)
     heartbeat_t other;
     TEST_ASSERT_TRUE(heartbeat_open(&other));
     TEST_ASSERT_FALSE(heartbeat_open(&hb)); /* CAN_IF_ERR_DUP */
-    heartbeat_step(&hb);
+    heartbeat_step(&hb, false);
     TEST_ASSERT_EQUAL_UINT32(0u, vbus_frame_count(&bus_p));
 }
 

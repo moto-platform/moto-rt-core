@@ -6,15 +6,26 @@ HAL-free interfaces that the layers above use, plus one implementation per platf
 |---|---|
 | `can_types.h` | Classic CAN frame type, logical ports (`CAN_PORT_VEHICLE` = FDCAN1, `CAN_PORT_PLATFORM` = FDCAN2), status codes, frame/ID checks (`can_frame.c`). Visible to features through `services/can_if.h`. |
 | `can_port.h` | Non-blocking write/read/tx-free per port, plus the controller supervision of Ç1: `can_port_get_state()` (TEC, REC, error passive, bus-off, wrapping bus-off and TX-done counters, pending TX), `can_port_recover()`, `can_port_tx_abort()`, `can_port_set_filters()`, plus `can_port_set_tx_dedicated()` (D-056: the IDs with a dedicated, replace-on-new TX buffer). None of them sends a frame. `services/` and the app setup only, never features: the vehicle-bus guard lives in `services/can_if`, the state machine in `services/can_sm`. |
-| `hal_time.h` | Monotonic millisecond counter (wraps after ~49.7 days). |
+| `hal_time.h` | Monotonic millisecond counter (wraps after ~49.7 days). Task-safe: one 32-bit read, no state written by callers (D-065, E-17), so the comms and EKF tasks share it. The H7 port static-asserts its source: with the FreeRTOS tick, `configTICK_RATE_HZ == 1000` and a 32-bit `TickType_t` (safety-reviewer NIT-3). |
+| `hal_atomic.h` | 32-bit atomic load (acquire), store (release) and exchange (acquire + release) for data shared between tasks of different priority (D-065 item 2): `services/snapshot` and `services/alive` only. No lock, no wait on another task. |
 
 ## Implementations
 
 - **`host/` (D-034):** the host platform layer for the SIL program and the mock-bus tests. Native builds only.
   - `vbus`: in-process virtual CAN bus, up to 6 nodes. A frame goes to every node except its sender. It has static RX queues and counts overruns. Fault injection: a full TX mailbox, a TX stall (frames wait in 3 TX buffers and go out late when un-stalled, unless aborted), dedicated replace-on-new TX slots (a write to a slot whose frame is still unsent cancels it and returns `CAN_PORT_TX_FULL`; when a stall ends, the slots and the queue head go out by ID arbitration), bus-off (counted per entry; the node neither sends nor receives until `vbus_recover()`), TEC/REC, and exact-match acceptance filters.
   - `can_port_host`: binds each logical port to a `vbus` node or, on Linux, to a SocketCAN interface (`vcan0`, `can0`, ...). The SocketCAN socket is raw and non-blocking, carries classic frames only, and skips RTR, error and FD frames. Filters map to `CAN_RAW_FILTER`; a raw socket shows no controller state, so SocketCAN reports a healthy, idle controller: on a real interface (`--allow-real-bus`) the D-030 latch, N_As, the one-TX-buffer rule and the platform dedicated replace-on-new buffers are not enforced, and the kernel's `restart-ms` recovers bus-offs without limit (the program warns; a development path only, never the vehicle tester). On the vbus, the vehicle port's TX is free only when nothing is pending, like the H7's one TX buffer.
-  - `hal_time_host`: CLOCK_MONOTONIC, or a manual clock for tests and fast simulation.
-- **`stm32/`:** not yet. FDCAN and the tick timer come once the board (H743/H723, Q-019) and its CubeMX project exist. Nothing above this layer includes STM32 HAL headers.
+  - `hal_time_host`: CLOCK_MONOTONIC, or a manual clock for tests and fast simulation; its shared state uses atomics, so threads may call it (the stress test and TSan).
+  - `hal_atomic_host`: the compiler's `__atomic` builtins (lock-free for 32 bits, checked at compile time), which ThreadSanitizer understands (`host-tsan` preset).
+- **`stm32/`:** not yet. FDCAN, the tick timer and the atomics come once the board (H743/H723, Q-019) and its CubeMX project exist. Nothing above this layer includes STM32 HAL headers. Until then the cross-compiled libraries leave `hal_*` unresolved; no stub is linked.
+
+## H7 atomics requirements (D-065 item 2, architecture-guard on PR 1)
+
+What `hal/stm32/hal_atomic_*.c` must provide (single-core Cortex-M7):
+
+- **load / store:** one aligned 32-bit `LDR` / `STR` with a `DMB` after the load (acquire) and before the store (release). The `__atomic_load_n` / `__atomic_store_n` builtins of arm-none-eabi-gcc do exactly this.
+- **exchange: a PRIMASK critical section, required** (safety-reviewer MINOR-2): save PRIMASK (`__get_PRIMASK()`), `__disable_irq()`, `DMB`, plain load and store, `DMB`, then restore the saved value with `__set_PRIMASK()`, never `__enable_irq()`, so a call with interrupts already masked stays masked. A few cycles, so it delays interrupts by that much and no more. Not `LDREX` / `STREX`: their retry is bounded only by the interrupt rate (FDCAN, IMU ISRs), which this layer does not control. The services built on it (snapshot, alive) add no loop, so the higher-priority EKF task never waits for the comms task (E-17 BLOCKER-2).
+- **Callers are tasks, never ISRs:** a snapshot has one producer task and one consumer task, an alive counter one writer task.
+- Data cache: the exchanged slots are plain RAM touched by the CPU only (no DMA), so no cache maintenance is needed; a DMA producer would need its own rule.
 
 ## H7 FDCAN port requirements (Ç1, ISSUES D-2)
 

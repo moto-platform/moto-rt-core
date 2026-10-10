@@ -698,6 +698,7 @@ static uds_client_t client;
 static uds_server_t server;
 static vehicle_republish_t republisher;
 static heartbeat_t heartbeat;
+static comms_ekf_t ekf; /* zeroed: no EKF registered */
 static sim_ecu_t ecu;
 
 static void test_comms_applies_the_filters_and_the_sil_exchange_still_works(void)
@@ -744,7 +745,7 @@ static void test_comms_applies_the_filters_and_the_sil_exchange_still_works(void
     uint32_t heartbeat_frames = 0u;
     for (uint32_t i = 0u; i < 300u; i++) {
         sim_ecu_step(&ecu, timebase_now_ms());
-        comms_pass(&client, &server, &republisher, &heartbeat);
+        comms_pass(&client, &server, &republisher, &heartbeat, &ekf);
         can_frame_t got;
         while (vbus_recv(&bus_p, node_ppeer, &got) == CAN_PORT_OK) {
             speed_frames += (got.id == PLATFORM_VEHICLE_SPEED_FRAME_ID) ? 1u : 0u;
@@ -797,7 +798,7 @@ static void test_comms_heartbeat_reads_normal_until_a_silent_ecu_arms_u0100(void
     const uint32_t run_ms =
         VEHICLE_CL250_ECU_ABSENT_TIMEOUT_MS + (3u * PLATFORM_HEARTBEAT_RT_CORE_CYCLE_TIME_MS);
     for (uint32_t i = 0u; i < run_ms; i++) {
-        comms_pass(&client, &server, &republisher, &heartbeat);
+        comms_pass(&client, &server, &republisher, &heartbeat, &ekf);
         can_frame_t got;
         while (vbus_recv(&bus_p, node_ppeer, &got) == CAN_PORT_OK) {
             if (got.id != PLATFORM_HEARTBEAT_RT_CORE_FRAME_ID) {
@@ -845,7 +846,7 @@ static void comms_pass_without_client(void)
     can_sm_step(CAN_PORT_PLATFORM);
     (void)can_if_dispatch(CAN_PORT_PLATFORM, COMMS_RX_PER_PASS);
     vehicle_republish_step(&republisher);
-    heartbeat_step(&heartbeat);
+    heartbeat_step(&heartbeat, false);
     uds_server_step(&server);
 }
 
@@ -858,7 +859,7 @@ static struct platform_heartbeat_rt_core_t run_comms(uint32_t ms, bool client_ru
     for (uint32_t i = 0u; i < ms; i++) {
         sim_ecu_step(&ecu, timebase_now_ms());
         if (client_runs) {
-            comms_pass(&client, &server, &republisher, &heartbeat);
+            comms_pass(&client, &server, &republisher, &heartbeat, &ekf);
         } else {
             comms_pass_without_client();
         }

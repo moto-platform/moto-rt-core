@@ -34,6 +34,23 @@ moto_host_test(test_vehicle_republish_core)
 moto_host_test(test_vehicle_republish moto_rtcore_fw moto_rtcore_sim moto_rtcore_hal_host)
 moto_host_test(test_heartbeat_core moto_rtcore_sim moto_rtcore_hal_host)
 moto_host_test(test_heartbeat moto_rtcore_fw moto_rtcore_sim moto_rtcore_hal_host)
+moto_host_test(test_snapshot moto_rtcore_fw moto_rtcore_hal_host)
+# The real snapshot.c on a hooked, single-threaded hal_atomic test double: every
+# interleaving at the preemption points of either side (safety-reviewer MINOR-4).
+add_executable(test_snapshot_interleave test_snapshot_interleave.c ${PROJECT_SOURCE_DIR}/src/services/snapshot.c)
+target_include_directories(test_snapshot_interleave PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(test_snapshot_interleave PRIVATE unity)
+target_compile_options(test_snapshot_interleave PRIVATE -Wall -Wextra -Werror)
+add_test(NAME test_snapshot_interleave COMMAND test_snapshot_interleave)
+moto_host_test(test_alive moto_rtcore_fw moto_rtcore_hal_host)
+moto_host_test(test_comms_ekf moto_rtcore_fw moto_rtcore_sim moto_rtcore_hal_host)
+
+# Two-thread stress test of the lock-free exchange (D-065 item 2); also run under
+# ThreadSanitizer by the host-tsan preset.
+find_package(Threads REQUIRED)
+moto_host_test(test_snapshot_stress moto_rtcore_fw moto_rtcore_hal_host Threads::Threads)
+# A lost final record would spin the consumer: bound it (safety-reviewer NIT-1).
+set_tests_properties(test_snapshot_stress PROPERTIES TIMEOUT 60)
 
 # SocketCAN backend: Linux only; skips (exit 77) when no vcan0 interface exists.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")

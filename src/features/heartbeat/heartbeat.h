@@ -38,8 +38,10 @@ typedef struct {
  * goes through the Tx FIFO; its receivers see an E2E timeout. */
 bool heartbeat_open(heartbeat_t* hb);
 
-/* Updates the uptime and, when the cycle is due, sends 0x081; nothing unless opened. */
-void heartbeat_step(heartbeat_t* hb);
+/* Updates the uptime and, when the cycle is due, sends 0x081; nothing unless opened.
+ * ekf_stalled: the EKF's alive verdict from app/comms (D-064 item 4), DEGRADED while true;
+ * the heartbeat does not know the EKF itself. */
+void heartbeat_step(heartbeat_t* hb, bool ekf_stalled);
 
 #ifdef __cplusplus
 }

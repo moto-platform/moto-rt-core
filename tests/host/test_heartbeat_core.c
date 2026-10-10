@@ -32,11 +32,14 @@ static void test_node_mode_is_init_first_then_degraded_on_a_fault_else_normal(vo
 
 static void test_any_single_fault_condition_degrades(void)
 {
-    TEST_ASSERT_FALSE(heartbeat_fault_active(false, false, false, false));
-    TEST_ASSERT_TRUE(heartbeat_fault_active(true, false, false, false));
-    TEST_ASSERT_TRUE(heartbeat_fault_active(false, true, false, false));
-    TEST_ASSERT_TRUE(heartbeat_fault_active(false, false, true, false));
-    TEST_ASSERT_TRUE(heartbeat_fault_active(false, false, false, true));
+    TEST_ASSERT_FALSE(heartbeat_fault_active(false, false, false, false, false));
+    TEST_ASSERT_TRUE(heartbeat_fault_active(true, false, false, false, false));
+    TEST_ASSERT_TRUE(heartbeat_fault_active(false, true, false, false, false));
+    TEST_ASSERT_TRUE(heartbeat_fault_active(false, false, true, false, false));
+    TEST_ASSERT_TRUE(heartbeat_fault_active(false, false, false, true, false));
+    /* D-064 item 4: a stalled (or never run) EKF alone degrades NODE_MODE */
+    TEST_ASSERT_TRUE(heartbeat_fault_active(false, false, false, false, true));
+    TEST_ASSERT_TRUE(heartbeat_fault_active(true, true, true, true, true));
 }
 
 /* ------------------------------------------------------------------ uptime */

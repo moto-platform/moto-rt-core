@@ -4,10 +4,14 @@
 #include <stdbool.h>
 #include <time.h>
 
+/* Task-safe like the target counter (hal_time.h): every shared variable is accessed with
+ * the compiler's __atomic builtins, so threads (and ThreadSanitizer) see no data race.
+ * The monotonic origin is set once by whichever caller comes first. */
+#define ORIGIN_UNSET UINT64_MAX
+
 static bool manual;
 static uint32_t manual_ms;
-static bool origin_set;
-static uint64_t origin_ms;
+static uint64_t origin_ms = ORIGIN_UNSET;
 
 static uint64_t monotonic_ms(void)
 {
@@ -18,32 +22,37 @@ static uint64_t monotonic_ms(void)
 
 uint32_t hal_time_ms(void)
 {
-    if (manual) {
-        return manual_ms;
+    if (__atomic_load_n(&manual, __ATOMIC_ACQUIRE)) {
+        return __atomic_load_n(&manual_ms, __ATOMIC_ACQUIRE);
     }
-    uint64_t now = monotonic_ms();
-    if (!origin_set) {
-        origin_ms = now;
-        origin_set = true;
+    const uint64_t now = monotonic_ms();
+    uint64_t origin = __atomic_load_n(&origin_ms, __ATOMIC_ACQUIRE);
+    if (origin == ORIGIN_UNSET) {
+        uint64_t expected = ORIGIN_UNSET;
+        /* the first caller anchors; a loser reads the winner's origin into expected */
+        origin = __atomic_compare_exchange_n(&origin_ms, &expected, now, false, __ATOMIC_ACQ_REL,
+                                             __ATOMIC_ACQUIRE)
+                     ? now
+                     : expected;
     }
-    return (uint32_t)(now - origin_ms); /* wraps like the target tick counter */
+    return (uint32_t)(now - origin); /* wraps like the target tick counter */
 }
 
 void hal_time_host_use_manual(uint32_t start_ms)
 {
-    manual = true;
-    manual_ms = start_ms;
+    __atomic_store_n(&manual_ms, start_ms, __ATOMIC_RELEASE);
+    __atomic_store_n(&manual, true, __ATOMIC_RELEASE);
 }
 
 void hal_time_host_advance(uint32_t delta_ms)
 {
-    manual_ms += delta_ms; /* unsigned wrap is intended */
+    (void)__atomic_fetch_add(&manual_ms, delta_ms, __ATOMIC_ACQ_REL); /* unsigned wrap is intended */
 }
 
 void hal_time_host_use_monotonic(void)
 {
-    manual = false;
-    origin_set = false;
+    __atomic_store_n(&origin_ms, ORIGIN_UNSET, __ATOMIC_RELEASE);
+    __atomic_store_n(&manual, false, __ATOMIC_RELEASE);
 }
 
 void hal_time_host_sleep_ms(uint32_t ms)

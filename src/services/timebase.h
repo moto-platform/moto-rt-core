@@ -5,6 +5,10 @@
  * Millisecond timebase for services and features. Wraps hal/hal_time.h so features
  * never include the HAL. The counter wraps after ~49.7 days; always compare with
  * timebase_elapsed_ms()/timebase_expired(), never with < or >.
+ *
+ * Task-safe: timebase_now_ms() is a pass-through of hal_time_ms() (task-safe by its
+ * contract, hal/hal_time.h) and the other two are pure, so the comms task and the EKF
+ * task (D-065) may both use the timebase.
  */
 
 #include <stdbool.h>

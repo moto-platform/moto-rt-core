@@ -115,6 +115,11 @@ jobs:
             echo "::error::CAN port access outside services/can_if.c and hal/ bypasses the vehicle-bus guard"
             exit 1
           fi
+          # The cross-task atomics (D-065) are used by services/snapshot and services/alive only.
+          if grep -rnE '#include[[:space:]]+"hal/hal_atomic\.h"' src | grep -vE '^src/(services|hal)/'; then
+            echo "::error::hal/hal_atomic.h is for services/ (snapshot, alive) only"
+            exit 1
+          fi
 
       - name: Static analysis (cppcheck, blocking)
         run: |
@@ -142,3 +147,29 @@ jobs:
             --error-exitcode=1 --suppressions-list=misra/suppressions.txt \
             --suppress=missingIncludeSystem '--suppress=*:*external/*' -i src/hal/host -i src/app/host \
             -I src -I external/moto-vehicle-defs/gen/c/rt_core src
+
+  # The lock-free cross-task exchange (D-065 item 2: services/snapshot, services/alive)
+  # under ThreadSanitizer, which cannot share a build with ASan. Includes the two-thread
+  # stress test; a data race or a torn/out-of-order record fails the job.
+  thread-sanitizer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Ninja
+        timeout-minutes: 5
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build
+
+      - name: Host tests (ThreadSanitizer)
+        run: |
+          # TSan's shadow memory fails with the runner kernel's 32-bit mmap ASLR entropy
+          # ("unexpected memory mapping"); 28 bits is the long-standing default.
+          sudo sysctl -w vm.mmap_rnd_bits=28
+          cmake --preset host-tsan
+          cmake --build --preset host-tsan
+          ctest --preset host-tsan
