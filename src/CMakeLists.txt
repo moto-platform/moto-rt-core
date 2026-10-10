@@ -10,6 +10,7 @@ add_library(moto_rtcore_logic STATIC
     services/can_sm_core.c
     services/com_core.c
     services/alive_core.c
+    features/cornering/lean_core.c
 )
 target_include_directories(moto_rtcore_logic PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -18,6 +19,10 @@ target_include_directories(moto_rtcore_logic PUBLIC
 # platform pack functions and E2E (pure C).
 target_link_libraries(moto_rtcore_logic PUBLIC moto_defs_gen)
 target_compile_options(moto_rtcore_logic PRIVATE ${MOTO_WARNINGS})
+# The lean core (D-065 item 1) uses sinf/cosf/sqrtf: no errno side effect, IEEE semantics
+# kept (never -ffast-math; lean_core.c refuses to build otherwise), and libm.
+target_compile_options(moto_rtcore_logic PRIVATE -fno-math-errno)
+target_link_libraries(moto_rtcore_logic PUBLIC m)
 
 # Generated moto-vehicle-defs code for this node (D-003): the CL250 DID table, the
 # D-020 request/frame gates, the platform UDS tables, and the platform.dbc pack/encode
