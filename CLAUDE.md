@@ -46,7 +46,7 @@ CMake + STM32CubeMX (HAL) + arm-none-eabi-gcc (D-007). RTOS: FreeRTOS/CMSIS-RTOS
 - Skeleton: `/repo-bootstrap`; new feature: `/feature-module`.
 - Commands (CMake >= 3.20 + Ninja; `git submodule update --init` first, defs pinned to `v0.8.0`):
   - `cmake --preset host-tests && cmake --build --preset host-tests && ctest --preset host-tests` (Unity, ASan + UBSan, plus the 2 s SIL smoke run and the `--uds-scenario` UDS server run)
-  - `cmake --preset host-tsan && cmake --build --preset host-tsan && ctest --preset host-tsan` (ThreadSanitizer: the snapshot/alive tests, including the two-thread stress test)
+  - `cmake --preset host-tsan && cmake --build --preset host-tsan && ctest --preset host-tsan` (ThreadSanitizer: the snapshot/alive/IMU tests, including the two-thread stress tests)
   - SIL program (D-034): `build/host-tests/src/moto_rtcore_host` (in-process bus + simulated CL250 ECU); on Linux `--vcan vcan0`
   - `cmake --preset target-m7-debug && cmake --build --preset target-m7-debug` (also `target-m7-release`); `-DARM_TOOLCHAIN_DIR=...` if `arm-none-eabi-gcc` is not on PATH
 - The target presets cross-compile only the pure logic (`moto_rtcore_logic`) for Cortex-M7 (flags shared by H743/H723). The board choice decides the CubeMX project (`cubemx/<board>.ioc`), startup and linker script; do not guess it.
@@ -63,17 +63,18 @@ CMake + STM32CubeMX (HAL) + arm-none-eabi-gcc (D-007). RTOS: FreeRTOS/CMSIS-RTOS
   - `services/timebase` (task-safe, `hal/hal_time.h`)
   - `services/snapshot` (D-065): the SPSC triple buffer between tasks of different priority; index-only, no lock/wait/retry (never a seqlock). Atomics behind `hal/hal_atomic.h`.
   - `services/alive` + `alive_core` (D-064 item 4, D-065): a task's lock-free alive counter and the supervisor's pure stall monitor (baseline at registration, never-ran = stalled, sticky).
+  - `services/imu` + `imu_core` (D-065 PR 3a): the EKF task's IMU input. Drains the `hal/imu.h` FIFO once per EKF period (bounded, a backlog is flushed) and returns the gyro rates as the mean over the period, never a point sample (aliasing). Stale, saturated, lost, unconfigured and first periods are INVALID. The z offset is learnt at standstill (2 s, x/y/z means within 1 deg/s, offset at most 2 deg/s, relearnt at every stop; user); until the first learn every sample is INVALID. EKF task only; no caller until PR 3b.
   - `services/vehicle_signals`: the last raw/physical sample per gen/ DID. VALID/STALE is derived at read time from `stale_after_ms`.
   - `services/can_if`: CAN RX routing, plus the **fixed, fail-closed D-020 vehicle-bus guard** that every vehicle frame passes. Never add a bypass. A bus-off or latched port refuses writes with `CAN_PORT_ERR_IO` (not a guard refusal); `can_if_apply_filters()` turns the receiver table into the port's acceptance filters, after handing the port its dedicated replace-on-new TX IDs (`can_if_register_tx_dedicated()`, platform port only, D-056).
   - `services/can_sm` + `can_sm_core` (Ç1): CAN error state machine per port (error active/passive/bus-off, backoff recovery, N_As abort). The vehicle port latches on its 5th bus-off (D-030, D-054); the platform port never latches. `can_sm_state_known()` tells a read state from an unknown one (D-055).
   - `app/comms`: the portable comms pass (client, then the republisher and the heartbeat, then the server), shared by the host program and the future H7 task. It owns the EKF alive supervision (`comms_ekf_t`: zeroed = no EKF; NULL reads as stalled) and passes `ekf_stalled` to the heartbeat; 0x020's sender must not open without `comms_ekf_registered()` (D-065 PR 3).
-  - `hal/can_types.h`, `hal/can_port.h` (services and app only; FDCAN requirements in `hal/README.md`), `hal/hal_time.h`, `hal/hal_atomic.h` (services only; H7 requirements in `hal/README.md`), and the host port `hal/host/`
+  - `hal/can_types.h`, `hal/can_port.h` (services and app only; FDCAN requirements in `hal/README.md`), `hal/hal_time.h`, `hal/hal_atomic.h` (services only; H7 requirements in `hal/README.md`), `hal/imu.h` (`services/imu.c` only; H7 IMU requirements in `hal/README.md`), and the host port `hal/host/` (including the IMU FIFO fake `imu_host`)
 - Libraries:
   - `moto_rtcore_logic` (pure) and `moto_rtcore_fw` (services + feature glue, HAL interfaces only) are also cross-compiled for M7.
   - `moto_rtcore_hal_host` and `moto_rtcore_host` build natively only.
 - CI:
   - host tests + SIL smoke, and the SocketCAN test (skipped without `vcan0`); the ThreadSanitizer job (`host-tsan`)
-  - the layering grep: no `hal/` include under `src/features/`, `hal/hal_atomic.h` only from `services/` and `hal/`
+  - the layering grep: no `hal/` include under `src/features/`, `hal/hal_atomic.h` only from `services/` and `hal/`, `hal/imu.h` only from `services/imu.c` and `hal/`
   - both cross builds
   - cppcheck, all blocking: warning / portability / performance, and style + the MISRA C:2012 addon (without the host-only code). Deviations: `misra/README.md` + `misra/suppressions.txt`; add one only with a reason.
   - coverage (`host-coverage` preset, gcovr): floors 95 % lines / 80 % branches on `src/` without the host-only code

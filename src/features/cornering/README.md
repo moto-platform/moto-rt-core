@@ -8,8 +8,9 @@ rt-core's cornering **Layer 2 only**: estimates that feed safety-node's cornerin
 |---|---|---|
 | (0) | defs `lean_angle_clamp_max_deg` (v0.9.0) | done (defs#52) |
 | (1) | `services/snapshot`, `services/alive`, heartbeat `ekf_stalled` | done (rt-core#27) |
-| **(2)** | **`lean_core`: pure 2-state roll EKF + host tests (this module)** | this PR |
-| (3) | `services/imu`, glue `lean.c/.h` (EKF task, alive bump, snapshots), 0x020 send in `app/comms` with the output clamp, defs bump to v0.9.0, SIL IMU feed | open |
+| (2) | `lean_core`: pure 2-state roll EKF + host tests (this module) | done (rt-core#28) |
+| (3a) | `hal/imu.h`, `services/imu` + `imu_core` (interval-mean rates, z offset at standstill), host IMU fake (user split PR 3, 2026-10-10) | done |
+| (3b) | glue `lean.c/.h` (EKF task, alive bump, snapshots), 0x020 send driven by `app/comms` with the output clamp, defs bump to v0.9.0, SIL IMU feed | open |
 
 Nothing calls the core yet. PR (3) adds `lean.h`, the module's public header for other code. It includes `lean_core.h` for the payload types (`lean_speed_t`, `lean_out_t`), so other code sees `lean_core.h` only through `lean.h`.
 
@@ -30,7 +31,7 @@ Nothing calls the core yet. PR (3) adds `lean.h`, the module's public header for
 - **Documented limits:**
   - Pitch ≈ 0. A pitch θ also adds −ψ̇·sin θ to the roll-rate gyro (p = roll rate − ψ̇·sin θ), and the measurement assumes θ = 0.
   - A steady coordinated turn. Transients are carried by the gyro and the gate.
-  - The z gyro's own bias is not estimated. An offset b_z gives a roll error of about v·b_z/(g·cos roll), for example 0.9° for 0.5°/s at 15 m/s. `services/imu` (PR 3) removes the offset at standstill.
+  - The z gyro's own bias is not estimated. An offset b_z gives a roll error of about v·b_z/(g·cos roll), for example 0.9° for 0.5°/s at 15 m/s. `services/imu` (PR 3a) removes the offset at standstill.
   - Below `LEAN_SPEED_MIN_MPS` the lean is INVALID.
 
 **Check order.** Each step runs these checks in order. The first one that fails wins, and every failure gives INVALID with roll 0 and QUALITY 0 (D-065 item 1, safety-reviewer MAJOR-1 on defs v0.9.0):
@@ -67,6 +68,15 @@ A stamp up to `LEAN_SPEED_FUTURE_MAX_MS` (40 ms) ahead of the IMU stamp has age 
 - Mark a speed `LEAN_SPEED_VALID` only when gen/ accepts its range: the core has no upper plausibility bound, so it needs no hand-written limit.
 - Add a test that the standstill z-offset removal works; an unremoved z offset makes one turn direction read low.
 - Call the core only when there is a new IMU sample. A duplicate stamp is skipped, but it still returns INVALID, which would cost one 0x020 frame.
+
+**For PR 3b, from the reviews of PR 3a** (architecture-guard on the plan, safety-reviewer on 3a):
+- `IMU_REASON_NO_NEW` means "skip this step": no core step and no new output (test a second call in the same ms).
+- Standstill for `imu_read()`: a VALID speed of 0 (with a tolerance, never float equality), within a shorter age than the 300 ms max, and also 0 in the previous speed snapshot; never from a STALE speed.
+- An INVALID IMU sample gives an INVALID output without a core step; lean_core's 40 ms gap check then reinitialises it (tests: 1, 2 and 3 missed periods).
+- Report `reject_count` and the time without a learnt offset (UNLEARNED/RANGE) on 0xFD02 or as a DTC, so a bad gyro is visible.
+- The output stamp may be newer than the comms `now` (the EKF preempts comms): a small future stamp is age 0, a large one INVALID (architecture-guard MAJOR-2).
+- `comms_open_lean` checks that the registered counter is the lean link's own (MAJOR-3); snapshot fault latches cross to comms through an EKF-written atomic word and read as INVALID (MAJOR-4); EKF-side and comms-side functions are split and documented per task (MINOR-4); boot order and an EKF WCET budget in the README (MINOR-7).
+- T1: measure the period-mean spread at idle on the CL250; above 1 deg/s the offset is never learnt. Also the raw per-axis LSB spread with the engine off (false FROZEN at standstill), and add per-axis stuck detection on x and z (a single stuck channel is not FROZEN today; safety-reviewer MINOR-D on the 3a fixes).
 
 **Availability cost (fail-safe, to measure on T1/T4).** Each of these makes the lean INVALID until the variance has converged again:
 - an IMU gap longer than 40 ms mid-corner;

@@ -45,6 +45,7 @@ add_test(NAME test_snapshot_interleave COMMAND test_snapshot_interleave)
 moto_host_test(test_alive moto_rtcore_fw moto_rtcore_hal_host)
 moto_host_test(test_comms_ekf moto_rtcore_fw moto_rtcore_sim moto_rtcore_hal_host)
 moto_host_test(test_lean_core)
+moto_host_test(test_imu_core)
 
 # Two-thread stress test of the lock-free exchange (D-065 item 2); also run under
 # ThreadSanitizer by the host-tsan preset.
@@ -52,6 +53,9 @@ find_package(Threads REQUIRED)
 moto_host_test(test_snapshot_stress moto_rtcore_fw moto_rtcore_hal_host Threads::Threads)
 # A lost final record would spin the consumer: bound it (safety-reviewer NIT-1).
 set_tests_properties(test_snapshot_stress PROPERTIES TIMEOUT 60)
+# The IMU service on the host IMU fake, including a feed thread (D-065 PR 3a).
+moto_host_test(test_imu moto_rtcore_fw moto_rtcore_hal_host Threads::Threads)
+set_tests_properties(test_imu PROPERTIES TIMEOUT 60)
 
 # SocketCAN backend: Linux only; skips (exit 77) when no vcan0 interface exists.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
