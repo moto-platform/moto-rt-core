@@ -44,6 +44,7 @@ target_compile_options(test_snapshot_interleave PRIVATE -Wall -Wextra -Werror)
 add_test(NAME test_snapshot_interleave COMMAND test_snapshot_interleave)
 moto_host_test(test_alive moto_rtcore_fw moto_rtcore_hal_host)
 moto_host_test(test_comms_ekf moto_rtcore_fw moto_rtcore_sim moto_rtcore_hal_host)
+moto_host_test(test_lean_core)
 
 # Two-thread stress test of the lock-free exchange (D-065 item 2); also run under
 # ThreadSanitizer by the host-tsan preset.
