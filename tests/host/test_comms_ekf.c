@@ -92,7 +92,7 @@ static hb_seen_t run(uint32_t ms, bool ekf_runs, comms_ekf_t* e)
             alive_bump(&ekf_alive); /* the EKF task completed a cycle */
         }
         sim_ecu_step(&ecu, now);
-        comms_pass(&client, &server, &republisher, &heartbeat, e);
+        comms_pass(&client, &server, &republisher, &heartbeat, e, NULL);
         can_frame_t got;
         while (vbus_recv(&bus_p, node_ppeer, &got) == CAN_PORT_OK) {
             if (got.id != PLATFORM_HEARTBEAT_RT_CORE_FRAME_ID) {

@@ -46,6 +46,9 @@ moto_host_test(test_alive moto_rtcore_fw moto_rtcore_hal_host)
 moto_host_test(test_comms_ekf moto_rtcore_fw moto_rtcore_sim moto_rtcore_hal_host)
 moto_host_test(test_lean_core)
 moto_host_test(test_imu_core)
+moto_host_test(test_lean_tx_core)
+moto_host_test(test_lean moto_rtcore_fw moto_rtcore_hal_host)
+moto_host_test(test_comms_lean moto_rtcore_fw moto_rtcore_sim moto_rtcore_hal_host)
 
 # Two-thread stress test of the lock-free exchange (D-065 item 2); also run under
 # ThreadSanitizer by the host-tsan preset.

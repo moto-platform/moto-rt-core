@@ -29,6 +29,8 @@
 #include "app/host/sim_ecu.h"
 #include "app/host/sim_listener.h"
 #include "app/host/sim_tester.h"
+#include "features/cornering/lean.h"
+#include "features/cornering/lean_tx.h"
 #include "features/heartbeat/heartbeat.h"
 #include "features/uds/uds_client.h"
 #include "features/uds/uds_server.h"
@@ -37,6 +39,7 @@
 #include "platform_uds.h"
 #include "hal/host/can_port_host.h"
 #include "hal/host/hal_time_host.h"
+#include "hal/host/imu_host.h"
 #include "services/can_if.h"
 #include "services/can_sm.h"
 #include "services/diag.h"
@@ -128,7 +131,11 @@ static uds_client_t client;
 static uds_server_t server;
 static vehicle_republish_t republisher;
 static heartbeat_t heartbeat;
-static comms_ekf_t ekf; /* no EKF registered until D-065 PR 3 */
+static comms_ekf_t ekf;
+static lean_link_t lean_link;
+static lean_ekf_t lean_ekf;
+static lean_tx_t lean_tx;
+static uint32_t imu_pushed; /* SIL IMU feed: samples pushed since start */
 static sim_listener_t listener;
 
 static const char* state_name(vehicle_signal_state_t st)
@@ -155,6 +162,20 @@ static void print_signals(uint32_t now, uint32_t start)
                    (unsigned)vehicle_cl250_dids[i].did, (unsigned)s.raw, (double)s.physical,
                    (unsigned)s.age_ms, state_name(s.state));
         }
+    }
+}
+
+/* SIL IMU feed (D-065 PR 3b): the IMU fake gets the samples an 800 Hz IMU would have
+ * produced by now, for a bike at rest or riding straight: zero body rates plus a 0.5 deg/s
+ * z offset and +-1 LSB of noise (never frozen). */
+static void feed_imu(uint32_t now, uint32_t start)
+{
+    const uint32_t due = (uint32_t)(((uint64_t)(now - start) * IMU_HOST_DEFAULT_ODR_HZ) / 1000u);
+    while (imu_pushed < due) {
+        const int16_t noise = ((imu_pushed % 2u) == 0u) ? -1 : 1;
+        const hal_imu_sample_t s = {{noise, noise, (int16_t)(8 + noise)}};
+        (void)imu_host_push(&s);
+        imu_pushed++;
     }
 }
 
@@ -224,6 +245,16 @@ int main(int argc, char** argv)
         fprintf(stderr, "heartbeat setup failed\n");
         return 1;
     }
+    /* EKF boot order (D-065, cornering README): link, EKF state, register its alive
+     * counter, open 0x020, then the filters; the scheduler (here: the loop) last. */
+    imu_host_reset();
+    lean_link_init(&lean_link);
+    lean_ekf_init(&lean_ekf, &lean_link);
+    if (!comms_ekf_register(&ekf, lean_link_alive(&lean_link)) ||
+        !comms_open_lean(&ekf, &lean_tx, &lean_link)) {
+        fprintf(stderr, "EKF lean (0x020) setup failed\n");
+        return 1;
+    }
     if (!comms_apply_filters()) {
         fprintf(stderr, "CAN acceptance filter setup failed\n");
         return 1;
@@ -234,6 +265,8 @@ int main(int argc, char** argv)
 
     const uint32_t start = timebase_now_ms();
     uint32_t printed_at = start;
+    uint32_t ekf_at = start;
+    bool ekf_started = false;
 
     while (!stop_requested) {
         const uint32_t now = timebase_now_ms();
@@ -252,7 +285,14 @@ int main(int argc, char** argv)
                 break;
             }
         }
-        comms_pass(&client, &server, &republisher, &heartbeat, &ekf);
+        /* The EKF task has the higher priority: its 20 ms step runs first. */
+        feed_imu(now, start);
+        if (!ekf_started || timebase_expired(now, ekf_at, PLATFORM_EKF_LEAN_CYCLE_TIME_MS)) {
+            lean_ekf_step(&lean_ekf, now);
+            ekf_at = now;
+            ekf_started = true;
+        }
+        comms_pass(&client, &server, &republisher, &heartbeat, &ekf, &lean_tx);
         sim_listener_step(&listener, now);
 
         if (!opt.quiet && timebase_expired(now, printed_at, PRINT_PERIOD_MS)) {
@@ -290,6 +330,11 @@ int main(int argc, char** argv)
            (unsigned)ss->requests, (unsigned)ss->positive, (unsigned)ss->negative,
            (unsigned)ss->suppressed, (unsigned)ss->s3_timeouts);
     const int listener_ok = sim_listener_passed(&listener);
+    printf("moto_rtcore_host: EKF lean 0x%03X %u sent, %u retried, %u dropped; last state %d "
+           "(reason %d), IMU reason %d\n",
+           (unsigned)PLATFORM_EKF_LEAN_FRAME_ID, (unsigned)lean_tx.stats.sent,
+           (unsigned)lean_tx.stats.retried, (unsigned)lean_tx.stats.dropped, (int)lean_ekf.last.state,
+           (int)lean_ekf.last.reason, (int)lean_ekf.last_imu.reason);
     printf("moto_rtcore_host: republisher 0x%03X %u sent, %u retried, %u dropped; "
            "0x%03X %u sent, %u retried, %u dropped\n",
            (unsigned)PLATFORM_VEHICLE_SPEED_FRAME_ID, (unsigned)republisher.speed.sent,

@@ -12,6 +12,7 @@ add_library(moto_rtcore_logic STATIC
     services/alive_core.c
     services/imu_core.c
     features/cornering/lean_core.c
+    features/cornering/lean_tx_core.c
 )
 target_include_directories(moto_rtcore_logic PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -55,6 +56,8 @@ add_library(moto_rtcore_fw STATIC
     features/uds/uds_server.c
     features/vehicle_republish/vehicle_republish.c
     features/heartbeat/heartbeat.c
+    features/cornering/lean.c
+    features/cornering/lean_tx.c
     app/comms.c
 )
 target_link_libraries(moto_rtcore_fw PUBLIC moto_rtcore_logic moto_defs_gen)

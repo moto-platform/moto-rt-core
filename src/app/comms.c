@@ -41,6 +41,18 @@ bool comms_ekf_registered(const comms_ekf_t* ekf)
     return (ekf != NULL) && (ekf->counter != NULL);
 }
 
+// cppcheck-suppress misra-c2012-8.7 ; DEV-002: called by the boot setup (host program, H7) and the tests
+bool comms_open_lean(const comms_ekf_t* ekf, lean_tx_t* tx, lean_link_t* link)
+{
+    if (!comms_ekf_registered(ekf)) {
+        if (tx != NULL) {
+            (void)lean_tx_open(tx, NULL, NULL); /* resets tx closed */
+        }
+        return false;
+    }
+    return lean_tx_open(tx, link, ekf->counter);
+}
+
 /* D-064 item 4: sampled every pass, so the change stamp is at most one pass late. */
 static bool ekf_stalled(comms_ekf_t* ekf)
 {
@@ -64,15 +76,17 @@ bool comms_apply_filters(void)
 
 // cppcheck-suppress misra-c2012-8.7 ; DEV-002: called by the host program and the H7 task
 void comms_pass(uds_client_t* client, uds_server_t* server, vehicle_republish_t* republisher,
-                heartbeat_t* heartbeat, comms_ekf_t* ekf)
+                heartbeat_t* heartbeat, comms_ekf_t* ekf, lean_tx_t* lean)
 {
     can_sm_step(CAN_PORT_VEHICLE);
     (void)can_if_dispatch(CAN_PORT_VEHICLE, COMMS_RX_PER_PASS);
     uds_client_step(client);
+    lean_tx_publish_speed(lean, timebase_now_ms()); /* the sample the client wrote in this pass */
 
     can_sm_step(CAN_PORT_PLATFORM);
     (void)can_if_dispatch(CAN_PORT_PLATFORM, COMMS_RX_PER_PASS);
     vehicle_republish_step(republisher);
     heartbeat_step(heartbeat, ekf_stalled(ekf));
+    lean_tx_step(lean, timebase_now_ms());
     uds_server_step(server);
 }

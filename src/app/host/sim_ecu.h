@@ -47,6 +47,9 @@ typedef struct {
     uint16_t pending_did;       /* 0: every read, else only this DID's reads */
     bool segmented_enabled;     /* answer segmented_did with a First Frame */
     uint16_t segmented_did;
+    bool fixed_enabled;         /* answer fixed_did with fixed_raw instead of the sweep */
+    uint16_t fixed_did;
+    uint32_t fixed_raw;
     bool nrc_enabled;           /* answer nrc_did with NRC nrc_code */
     uint16_t nrc_did;
     uint8_t nrc_code;
