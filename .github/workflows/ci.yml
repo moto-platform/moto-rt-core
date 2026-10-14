@@ -156,7 +156,8 @@ jobs:
 
   # The lock-free cross-task exchange (D-065 item 2: services/snapshot, services/alive)
   # under ThreadSanitizer, which cannot share a build with ASan. Includes the two-thread
-  # stress test; a data race or a torn/out-of-order record fails the job.
+  # stress tests (the snapshot, and the lean link's EKF and comms sides); a data race or a
+  # torn/out-of-order record fails the job.
   thread-sanitizer:
     runs-on: ubuntu-24.04
     timeout-minutes: 15

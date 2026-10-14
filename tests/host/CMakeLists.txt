@@ -59,6 +59,10 @@ set_tests_properties(test_snapshot_stress PROPERTIES TIMEOUT 60)
 # The IMU service on the host IMU fake, including a feed thread (D-065 PR 3a).
 moto_host_test(test_imu moto_rtcore_fw moto_rtcore_hal_host Threads::Threads)
 set_tests_properties(test_imu PROPERTIES TIMEOUT 60)
+# The lean glue's two tasks on one lean_link_t (E-17 (b)): the real EKF step and the real
+# comms side in two threads.
+moto_host_test(test_lean_link_stress moto_rtcore_fw moto_rtcore_sim moto_rtcore_hal_host Threads::Threads)
+set_tests_properties(test_lean_link_stress PROPERTIES TIMEOUT 60)
 
 # SocketCAN backend: Linux only; skips (exit 77) when no vcan0 interface exists.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")

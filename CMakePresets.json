@@ -93,7 +93,7 @@
       },
       "filter": {
         "include": {
-          "name": "test_snapshot|test_alive|test_comms_ekf|test_imu$"
+          "name": "test_snapshot|test_alive|test_comms_ekf|test_imu$|test_lean_link_stress$"
         }
       }
     },

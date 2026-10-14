@@ -46,7 +46,7 @@ CMake + STM32CubeMX (HAL) + arm-none-eabi-gcc (D-007). RTOS: FreeRTOS/CMSIS-RTOS
 - Skeleton: `/repo-bootstrap`; new feature: `/feature-module`.
 - Commands (CMake >= 3.20 + Ninja; `git submodule update --init` first, defs pinned to `v0.9.0`):
   - `cmake --preset host-tests && cmake --build --preset host-tests && ctest --preset host-tests` (Unity, ASan + UBSan, plus the 2 s SIL smoke run and the `--uds-scenario` UDS server run)
-  - `cmake --preset host-tsan && cmake --build --preset host-tsan && ctest --preset host-tsan` (ThreadSanitizer: the snapshot/alive/IMU tests, including the two-thread stress tests)
+  - `cmake --preset host-tsan && cmake --build --preset host-tsan && ctest --preset host-tsan` (ThreadSanitizer: the snapshot/alive/IMU tests, including the two-thread stress tests of the snapshot and of the lean link)
   - SIL program (D-034): `build/host-tests/src/moto_rtcore_host` (in-process bus + simulated CL250 ECU); on Linux `--vcan vcan0`
   - `cmake --preset target-m7-debug && cmake --build --preset target-m7-debug` (also `target-m7-release`); `-DARM_TOOLCHAIN_DIR=...` if `arm-none-eabi-gcc` is not on PATH
 - The target presets cross-compile only the pure logic (`moto_rtcore_logic`) for Cortex-M7 (flags shared by H743/H723). The board choice decides the CubeMX project (`cubemx/<board>.ioc`), startup and linker script; do not guess it.
