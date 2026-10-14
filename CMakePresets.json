@@ -23,7 +23,7 @@
       "inherits": "host-tests",
       "binaryDir": "${sourceDir}/build/host-coverage",
       "cacheVariables": {
-        "CMAKE_C_FLAGS": "--coverage -O0"
+        "CMAKE_C_FLAGS": "--coverage -O0 -fprofile-update=atomic"
       }
     },
     {
