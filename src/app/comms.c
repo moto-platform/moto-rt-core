@@ -78,15 +78,24 @@ bool comms_apply_filters(void)
 void comms_pass(uds_client_t* client, uds_server_t* server, vehicle_republish_t* republisher,
                 heartbeat_t* heartbeat, comms_ekf_t* ekf, lean_tx_t* lean)
 {
+    /* 0x020 runs only under the supervision it was opened with (D-065 amendment): an open
+     * lean link with another (or no) EKF counter here stops 0x020 and reads as a stalled
+     * EKF, never as "no EKF" (safety-reviewer MINOR-2 on 3b). */
+    const bool lean_open = (lean != NULL) && lean->opened;
+    const bool lean_supervised =
+        lean_open && (ekf != NULL) && (ekf->counter == lean_link_alive(lean->link));
+    lean_tx_t* const active = lean_supervised ? lean : NULL;
+
     can_sm_step(CAN_PORT_VEHICLE);
     (void)can_if_dispatch(CAN_PORT_VEHICLE, COMMS_RX_PER_PASS);
     uds_client_step(client);
-    lean_tx_publish_speed(lean, timebase_now_ms()); /* the sample the client wrote in this pass */
+    lean_tx_publish_speed(active, timebase_now_ms()); /* the sample the client wrote in this pass */
 
     can_sm_step(CAN_PORT_PLATFORM);
     (void)can_if_dispatch(CAN_PORT_PLATFORM, COMMS_RX_PER_PASS);
     vehicle_republish_step(republisher);
-    heartbeat_step(heartbeat, ekf_stalled(ekf));
-    lean_tx_step(lean, timebase_now_ms());
+    const bool stalled = ekf_stalled(ekf); /* sampled every pass */
+    heartbeat_step(heartbeat, stalled || (lean_open && !lean_supervised));
+    lean_tx_step(active, timebase_now_ms());
     uds_server_step(server);
 }

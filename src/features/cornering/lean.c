@@ -39,6 +39,8 @@ static bool reads_zero(const lean_speed_t* s, uint32_t now_ms)
     if ((s->state != LEAN_SPEED_VALID) || !(fabsf(s->speed_mps) < LEAN_STANDSTILL_MPS)) {
         return false; /* NaN fails the comparison */
     }
+    /* the core judges a speed's age against the IMU stamp; that stamp is this step's now
+     * (services/imu), so the same future limit applies here */
     if ((s->stamp_ms - now_ms) <= LEAN_SPEED_FUTURE_MAX_MS) {
         return true; /* slightly ahead of now: age 0, never a wrapped age */
     }
@@ -92,12 +94,16 @@ void lean_ekf_step(lean_ekf_t* e, uint32_t now_ms)
     }
     e->last = out;
 
-    const uint8_t wi = snapshot_write_index(&link->out_snap);
-    link->out_slots[wi].out = out;
-    link->out_slots[wi].stamp_ms = imu.stamp_ms;
-    link->out_slots[wi].fault =
-        snapshot_consumer_fault(&link->speed_snap) || snapshot_producer_fault(&link->out_snap);
-    snapshot_publish(&link->out_snap);
+    /* After a producer fault the write slot may be the comms task's front (the latching
+     * publish already stored it in the corrupted word), so it is never written again: the
+     * last record ages out to INVALID on the comms side (safety-reviewer MINOR-1 on 3b). */
+    if (!snapshot_producer_fault(&link->out_snap)) {
+        const uint8_t wi = snapshot_write_index(&link->out_snap);
+        link->out_slots[wi].out = out;
+        link->out_slots[wi].stamp_ms = imu.stamp_ms;
+        link->out_slots[wi].fault = snapshot_consumer_fault(&link->speed_snap);
+        snapshot_publish(&link->out_snap);
+    }
 
     alive_bump(&link->alive); /* last: only a complete cycle counts (E-17) */
 }

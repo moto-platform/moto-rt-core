@@ -30,8 +30,8 @@ bool lean_tx_open(lean_tx_t* tx, lean_link_t* link, const alive_counter_t* regis
 
 void lean_tx_publish_speed(lean_tx_t* tx, uint32_t now_ms)
 {
-    if ((tx == NULL) || !tx->opened) {
-        return;
+    if ((tx == NULL) || !tx->opened || snapshot_producer_fault(&tx->link->speed_snap)) {
+        return; /* after a producer fault the write slot may be the EKF's front (MINOR-1) */
     }
     vehicle_signal_sample_t s;
     (void)memset(&s, 0, sizeof s); /* VEHICLE_SIGNAL_NONE */

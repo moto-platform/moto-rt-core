@@ -14,6 +14,7 @@
 #include "app/host/sim_listener.h"
 #include "features/cornering/lean.h"
 #include "features/cornering/lean_tx.h"
+#include "hal/hal_atomic.h"
 #include "hal/host/can_port_host.h"
 #include "hal/host/hal_time_host.h"
 #include "hal/host/imu_host.h"
@@ -26,6 +27,7 @@
 #include "services/timebase.h"
 #include "services/vehicle_signals.h"
 
+#include <math.h>
 #include <string.h>
 #include <unity.h>
 
@@ -48,6 +50,7 @@ static lean_ekf_t lean;
 static lean_tx_t tx;
 static sim_ecu_t ecu;
 static uint32_t imu_pushed;
+static int16_t imu_z = Z_OFFSET; /* raw z the IMU fake streams (a straight line by default) */
 static moto_e2e_rx_state_t rx;
 
 typedef struct {
@@ -62,6 +65,7 @@ typedef struct {
     uint32_t lean_gap_max_ms;  /* longest gap between 0x020 frames */
     uint32_t lean_last_ms;
     bool last_lean_invalid;
+    uint8_t last_lean[PLATFORM_EKF_LEAN_LENGTH]; /* the last 0x020 frame's bytes */
 } seen_t;
 
 void setUp(void)
@@ -84,6 +88,7 @@ void setUp(void)
     vehicle_signals_init();
     imu_host_reset();
     imu_pushed = 0u;
+    imu_z = Z_OFFSET;
     memset(&client, 0, sizeof client);
     memset(&server, 0, sizeof server);
     TEST_ASSERT_EQUAL(ISOTP_OK, uds_client_open(&client));
@@ -127,13 +132,42 @@ static bool frame_is_invalid(const uint8_t* data)
     return memcmp(ref, data, sizeof ref) == 0;
 }
 
-/* The IMU fake gets an 800 Hz stream up to now: a bike at rest or riding straight. */
+/* True if data is the gen/ 0x020 frame with this state and LEAN for some QUALITY 1..100
+ * (packed with the frame's own E2E CRC and counter, as in frame_is_invalid()). */
+static bool frame_matches(const uint8_t* data, uint8_t state, int16_t lean_raw)
+{
+    for (uint8_t q = 1u; q <= 100u; q++) {
+        struct platform_ekf_lean_t m;
+        (void)platform_ekf_lean_init(&m);
+        m.lean_angle_state = state;
+        m.lean_angle = lean_raw;
+        m.lean_angle_quality = q;
+        m.e2_e_crc = data[MOTO_E2E_CRC_OFFSET];
+        m.e2_e_counter = (uint8_t)(data[MOTO_E2E_COUNTER_OFFSET] & MOTO_E2E_COUNTER_MASK);
+        uint8_t ref[PLATFORM_EKF_LEAN_LENGTH];
+        TEST_ASSERT_EQUAL_INT((int)PLATFORM_EKF_LEAN_LENGTH, platform_ekf_lean_pack(ref, &m, sizeof ref));
+        if (memcmp(ref, data, sizeof ref) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Raw z gyro of a steady coordinated turn at roll_deg and v_kmh, plus the offset. */
+static int16_t turn_z(float roll_deg, float v_kmh)
+{
+    const float v = v_kmh / LEAN_KMH_PER_MPS;
+    const float r = LEAN_GRAVITY_MPS2 * sinf(roll_deg * 0.017453292f) / v;
+    return (int16_t)(lroundf(r / IMU_HOST_DEFAULT_RPS_PER_LSB) + Z_OFFSET);
+}
+
+/* The IMU fake gets an 800 Hz stream up to now: at rest, straight, or a steady turn. */
 static void feed_imu(uint32_t now)
 {
     const uint32_t due = ((now - START_MS) * IMU_HOST_DEFAULT_ODR_HZ) / 1000u;
     while (imu_pushed < due) {
         const int16_t d = ((imu_pushed % 2u) == 0u) ? -1 : 1;
-        const hal_imu_sample_t s = {{d, d, (int16_t)(Z_OFFSET + d)}};
+        const hal_imu_sample_t s = {{d, d, (int16_t)(imu_z + d)}};
         (void)imu_host_push(&s);
         imu_pushed++;
     }
@@ -176,6 +210,7 @@ static seen_t run(uint32_t ms, uint32_t speed_kmh, uint32_t divider)
                 s.lean_last_ms = now;
                 s.lean_frames++;
                 s.last_lean_invalid = frame_is_invalid(got.data);
+                (void)memcpy(s.last_lean, got.data, sizeof s.last_lean);
                 s.lean_invalid += s.last_lean_invalid ? 1u : 0u;
             } else {
                 /* 0x021, 0x110: not checked here */
@@ -308,6 +343,80 @@ static void test_a_bus_off_drops_cycles_without_advancing_the_counter_and_the_re
     TEST_ASSERT_EQUAL_UINT32(0u, s.lean_e2e_bad);
 }
 
+static void test_a_corrupted_output_word_ages_out_to_invalid_MINOR_1(void)
+{
+    ride_to_estimated();
+    hal_atomic_u32_store(&link.out_snap.middle, 3u); /* a RAM fault: no slot index */
+    /* the last record may still go out within its age budget, then never again */
+    const seen_t t = run(LEAN_TX_AGE_MAX_MS + EKF_CYCLE_MS, 54u, 1u);
+    TEST_ASSERT_TRUE(snapshot_producer_fault(&link.out_snap));
+    TEST_ASSERT_LESS_OR_EQUAL_UINT32(2u, t.lean_frames - t.lean_invalid);
+    const seen_t s = run(1000u, 54u, 1u);
+    TEST_ASSERT_GREATER_THAN_UINT32(0u, s.lean_frames);
+    TEST_ASSERT_EQUAL_UINT32(s.lean_frames, s.lean_invalid);
+}
+
+static void test_a_corrupted_speed_word_sends_invalid_at_once_MINOR_1(void)
+{
+    ride_to_estimated();
+    hal_atomic_u32_store(&link.speed_snap.middle, 3u);
+    const seen_t s = run(1000u, 54u, 1u);
+    TEST_ASSERT_TRUE(snapshot_producer_fault(&link.speed_snap));
+    TEST_ASSERT_GREATER_THAN_UINT32(0u, s.lean_frames);
+    TEST_ASSERT_EQUAL_UINT32(s.lean_frames, s.lean_invalid);
+}
+
+static void test_another_ekf_supervision_stops_0x020_and_reads_degraded_MINOR_2(void)
+{
+    ride_to_estimated();
+    comms_ekf_init(&ekf); /* the comms task now gets a zeroed comms_ekf_t: "no EKF" */
+    (void)run(200u, 54u, 1u);
+    const seen_t s = run(1000u, 54u, 1u);
+    TEST_ASSERT_EQUAL_UINT32(0u, s.lean_frames); /* receivers see the timeout (D-042) */
+    TEST_ASSERT_GREATER_THAN_UINT32(0u, s.hb_frames);
+    TEST_ASSERT_EQUAL_UINT32(s.hb_frames, s.hb_degraded); /* never blind (D-065 amendment) */
+}
+
+static void test_a_null_supervision_with_an_open_lean_sends_no_0x020_MINOR_2(void)
+{
+    ride_to_estimated();
+    uint32_t lean_frames = 0u;
+    for (uint32_t i = 0u; i < 500u; i++) {
+        const uint32_t now = timebase_now_ms();
+        feed_imu(now);
+        if ((now % EKF_CYCLE_MS) == 0u) {
+            lean_ekf_step(&lean, now);
+        }
+        sim_ecu_step(&ecu, now);
+        comms_pass(&client, &server, &republisher, &heartbeat, NULL, &tx);
+        can_frame_t got;
+        while (vbus_recv(&bus_p, node_ppeer, &got) == CAN_PORT_OK) {
+            lean_frames += (got.id == PLATFORM_EKF_LEAN_FRAME_ID) ? 1u : 0u;
+        }
+        hal_time_host_advance(1u);
+    }
+    TEST_ASSERT_EQUAL_UINT32(0u, lean_frames);
+}
+
+static void test_a_real_lean_beyond_the_limit_goes_out_clamped_both_ways(void)
+{
+    ride_to_estimated();
+    imu_z = turn_z(62.0f, 54.0f);
+    seen_t s = run(4000u, 54u, 1u);
+    TEST_ASSERT_EQUAL(LEAN_OUT_ESTIMATED, lean.last.state);
+    TEST_ASSERT_GREATER_THAN_FLOAT(PLATFORM_LIMIT_LEAN_ANGLE_CLAMP_MAX_DEG, lean.last.roll_deg); /* EKF unclamped */
+    TEST_ASSERT_TRUE(frame_matches(s.last_lean, PLATFORM_EKF_LEAN_LEAN_ANGLE_STATE_CLAMPED_CHOICE,
+                                   platform_ekf_lean_lean_angle_encode(PLATFORM_LIMIT_LEAN_ANGLE_CLAMP_MAX_DEG)));
+    TEST_ASSERT_EQUAL_UINT32(0u, s.lean_e2e_bad);
+    imu_z = turn_z(-62.0f, 54.0f);
+    s = run(4000u, 54u, 1u);
+    TEST_ASSERT_EQUAL(LEAN_OUT_ESTIMATED, lean.last.state);
+    TEST_ASSERT_LESS_THAN_FLOAT(-PLATFORM_LIMIT_LEAN_ANGLE_CLAMP_MAX_DEG, lean.last.roll_deg);
+    TEST_ASSERT_TRUE(frame_matches(s.last_lean, PLATFORM_EKF_LEAN_LEAN_ANGLE_STATE_CLAMPED_CHOICE,
+                                   platform_ekf_lean_lean_angle_encode(-PLATFORM_LIMIT_LEAN_ANGLE_CLAMP_MAX_DEG)));
+    TEST_ASSERT_EQUAL_UINT32(0u, s.lean_e2e_bad);
+}
+
 static void test_a_comms_side_snapshot_fault_sends_invalid_MAJOR_4(void)
 {
     ride_to_estimated();
@@ -334,5 +443,10 @@ int main(void)
     RUN_TEST(test_a_refused_frame_is_retried_and_the_counter_advances_only_when_accepted);
     RUN_TEST(test_a_bus_off_drops_cycles_without_advancing_the_counter_and_the_receiver_resyncs);
     RUN_TEST(test_a_comms_side_snapshot_fault_sends_invalid_MAJOR_4);
+    RUN_TEST(test_a_corrupted_output_word_ages_out_to_invalid_MINOR_1);
+    RUN_TEST(test_a_corrupted_speed_word_sends_invalid_at_once_MINOR_1);
+    RUN_TEST(test_another_ekf_supervision_stops_0x020_and_reads_degraded_MINOR_2);
+    RUN_TEST(test_a_null_supervision_with_an_open_lean_sends_no_0x020_MINOR_2);
+    RUN_TEST(test_a_real_lean_beyond_the_limit_goes_out_clamped_both_ways);
     return UNITY_END();
 }

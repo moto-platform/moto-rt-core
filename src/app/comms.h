@@ -93,7 +93,8 @@ bool comms_apply_filters(void);
 
 /* ekf: never NULL in a correct setup; NULL reads as a stalled EKF (DEGRADED, the safe
  * side), while a zeroed comms_ekf_t means "no EKF". lean: NULL or a closed lean_tx_t
- * means no 0x020. */
+ * means no 0x020. An open lean whose link counter is not ekf's counter sends no 0x020
+ * and makes the heartbeat read a stalled EKF (D-065 amendment). */
 void comms_pass(uds_client_t* client, uds_server_t* server, vehicle_republish_t* republisher,
                 heartbeat_t* heartbeat, comms_ekf_t* ekf, lean_tx_t* lean);
 

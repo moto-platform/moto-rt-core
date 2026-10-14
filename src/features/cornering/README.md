@@ -75,7 +75,7 @@ A stamp up to `LEAN_SPEED_FUTURE_MAX_MS` (40 ms) ahead of the IMU stamp has age 
 - ~~An INVALID IMU sample gives an INVALID output without a core step~~ (tests: 1, 2 and 3 missed periods).
 - **Open:** report `reject_count` and the time without a learnt offset (UNLEARNED/RANGE) on 0xFD02 or as a DTC, so a bad gyro is visible. It needs a DID change in defs (`/signal-change`); E-17.
 - ~~A small future output stamp is age 0, a large one INVALID~~ (`lean_tx_core`, architecture-guard MAJOR-2).
-- ~~MAJOR-3, MAJOR-4, MINOR-4, MINOR-7~~: see "Lean glue" below. MAJOR-4 needs no separate atomic word: the EKF-side fault travels inside the output record, and a latched producer fault on the output snapshot stops publishing, so the record ages out (INVALID within `LEAN_TX_AGE_MAX_MS`).
+- ~~MAJOR-3, MAJOR-4, MINOR-4, MINOR-7~~: see "Lean glue" below. MAJOR-4 needs no separate atomic word: the EKF-side consumer fault travels inside the output record. A latched producer fault stops every further write to that snapshot's slots, not only the publish, because the latching publish already handed the write slot to the consumer (safety-reviewer MINOR-1 on 3b). The last output record then ages out to INVALID within `LEAN_TX_AGE_MAX_MS`, and a speed producer fault makes 0x020 INVALID at once (comms-side fault).
 - T1: measure the period-mean spread at idle on the CL250; above 1 deg/s the offset is never learnt. Also the raw per-axis LSB spread with the engine off (false FROZEN at standstill), and add per-axis stuck detection on x and z (a single stuck channel is not FROZEN today; safety-reviewer MINOR-D on the 3a fixes).
 
 **Availability cost (fail-safe, to measure on T1/T4).** Each of these makes the lean INVALID until the variance has converged again:
@@ -107,7 +107,7 @@ The EKF task holds no lock, prints nothing and never allocates. It never touches
 | 2 | comms task: `comms_pass()` | ≤ `VEHICLE_CL250_CLIENT_STEP_MAX_MS` (10 ms) |
 | 3 | anomaly, FFT, logging (later) | — |
 
-The H7 port must static-assert `configTICK_RATE_HZ == 1000` and a 32-bit `TickType_t`, so the ms timebase and its wrap arithmetic hold (E-17).
+The H7 port must static-assert `configTICK_RATE_HZ == 1000` and a 32-bit `TickType_t`, so the ms timebase and its wrap arithmetic hold (E-17). It must also place `lean_link_t` in SRAM with ECC enabled: `services/snapshot` detects only a corrupted index outside the three slots, and a bit flip to another valid index would let both tasks share a slot unnoticed (safety-reviewer, round 2 on 3b).
 
 ### Boot order (MINOR-7; `app/host/main.c` follows it)
 
@@ -121,9 +121,9 @@ The H7 port must static-assert `configTICK_RATE_HZ == 1000` and a 32-bit `TickTy
 
 If step 4 or 5 fails, 0x020 stays closed and never reaches the bus: receivers see its timeout (D-042 fallback, D-065 amendment).
 
-### WCET budget (MINOR-7; provisional, measured on the board with DWT CYCCNT, Q-019)
+### WCET budget (MINOR-7; user, 2026-10-14; measured on the board with DWT CYCCNT, Q-019)
 
-`lean_ekf_step()` takes at most **1 ms** per call: 5 % of its 20 ms period, and inside `LEAN_TX_JITTER_MS` (5 ms), which the 0x020 output-age budget allows for the EKF preempting comms. The work per call is bounded: at most `IMU_DRAIN_MAX` (64) FIFO samples, one `lean_core_step()` (one `sinf`, one `cosf`, one `sqrtf`, up to four divisions), two snapshot operations and one alive bump. No loop runs longer than the drain bound.
+`lean_ekf_step()` takes at most **1 ms** per call: 5 % of its 20 ms period. The 0x020 output-age budget allows `LEAN_TX_JITTER_MS` (5 ms) of EKF and comms release jitter; the EKF preempting comms only moves an output stamp ahead of the comms `now`, which the 10 ms future window covers. The budget holds only while `hal_imu_pop()` reads RAM that the IMU ISR filled, never a blocking bus read. The work per call is bounded: at most `IMU_DRAIN_MAX` (64) FIFO samples, one `lean_core_step()` (one `sinf`, one `cosf`, one `sqrtf`, up to four divisions), two snapshot operations and one alive bump. No loop runs longer than the drain bound.
 
 ### 0x020 rules (`lean_tx_core.h`)
 
@@ -159,6 +159,7 @@ The rules apply in order. The first that fails sends INVALID with LEAN 0 and QUA
   - a stalled comms task → INVALID within 300 ms;
   - speed hand-over only inside the gen/ range;
   - the standstill rules (above), and snapshot faults in the record;
+  - a corrupted `middle` word on either snapshot (a real RAM fault, not a set flag): the producer never writes that slot again (MINOR-1);
   - 0x020 opens only for this link's counter (MAJOR-3) and stays closed when its dedicated buffer is refused;
   - NULL and unbound calls.
 - `test_comms_lean` (SIL: real `comms_pass()`, UDS client, simulated ECU, heartbeat, a platform receiver checking E2E):
@@ -169,11 +170,14 @@ The rules apply in order. The first that fails sends INVALID with LEAN 0 and QUA
   - no registered EKF, or a foreign counter → no 0x020 at all;
   - a refused frame is retried with no counter gap and a fresh output;
   - a bus-off drops cycles without advancing the counter, and the receiver resyncs (INITIAL);
-  - comms-side snapshot faults → INVALID.
+  - comms-side snapshot faults → INVALID;
+  - a corrupted output word → INVALID once the last record is older than its budget; a corrupted speed word → INVALID at once (MINOR-1);
+  - a comms task given another (zeroed) `comms_ekf_t` → no 0x020 and NODE_MODE DEGRADED (MINOR-2);
+  - a real 62° turn both ways → 0x020 CLAMPED ±5500 with the sign kept, while the EKF itself reads above 55°.
 
 **Coverage:** `lean.c` has 100 % lines and branches; `lean_tx.c` and `lean_tx_core.c` have 100 % lines. The two branches left are a packing/E2E failure that a valid message cannot produce.
 
-**Mutation check** (19 mutants on the glue, the sender and `comms_open_lean()`): 18 are killed. The survivor, `comms_open_lean()` skipping its own registration check, is equivalent: `lean_tx_open()` refuses the same NULL counter.
+**Mutation check** (24 mutants on the glue, the sender and `app/comms`): 23 are killed. The survivor, `comms_open_lean()` skipping its own registration check, is equivalent: `lean_tx_open()` refuses the same NULL counter.
 
 ## Memory and timing
 
@@ -219,7 +223,9 @@ The rules apply in order. The first that fails sends INVALID with LEAN 0 and QUA
 
 ## HIL scenarios (with the board, moto-hil-bench)
 
-- `lean_steady_turn`: replay a coordinated turn (IMU and speed restbus) at 30° and 15 m/s. Expected: 0x020 ESTIMATED within 1 s, |error| ≤ 1°, QUALITY ≥ 90.
+- `lean_steady_turn`: replay a coordinated turn (IMU and speed restbus) at +30° and at −30°, 15 m/s. Expected: 0x020 ESTIMATED within 1 s with the right sign, |error| ≤ 1°, QUALITY ≥ 90. The sign check catches an IMU mounted wrong (x and z both inverted would read a consistent but mirrored lean); the H7 `hal/imu` port's mounting matrix is also checked on the bench.
+- `lean_imu_dead`: unpower the IMU while the EKF runs. Expected: 0x020 INVALID for good and safety-node's D-042 fallback active; NODE_MODE stays NORMAL until the 0xFD02/DTC report exists (E-17).
+- `platform_comms_starved_e2e` extended to 0x020: a pending 0x020 sent after a comms stall longer than the timeout reads INITIAL at the receiver, never OK.
 - `lean_speed_stall`: freeze the restbus speed during a turn. Expected: 0x020 INVALID with LEAN 0 and QUALITY 0 within 300 ms + one 0x020 cycle. NODE_MODE is unchanged, because the EKF still runs.
 - `lean_imu_gap`: drop IMU samples for 60 ms. Expected: INVALID at once, then ESTIMATED again after reconvergence (≤ 1 s).
 - `heartbeat_ekf_stall`: stop the EKF task on the target. Expected: NODE_MODE DEGRADED within the alive window, and 0x020 INVALID within `LEAN_TX_AGE_MAX_MS`.

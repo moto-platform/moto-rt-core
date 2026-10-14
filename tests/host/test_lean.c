@@ -6,6 +6,7 @@
  */
 #include "features/cornering/lean.h"
 #include "features/cornering/lean_tx.h"
+#include "hal/hal_atomic.h"
 #include "hal/host/imu_host.h"
 #include "services/can_if.h"
 #include "services/vehicle_signals.h"
@@ -261,6 +262,48 @@ static void test_snapshot_faults_reach_the_record_and_read_invalid(void)
     TEST_ASSERT_EQUAL_UINT8(PLATFORM_EKF_LEAN_LEAN_ANGLE_STATE_INVALID_CHOICE, m.lean_angle_state);
 }
 
+static void test_a_corrupted_output_word_stops_every_write_MINOR_1(void)
+{
+    stand();
+    for (uint32_t i = 0u; i < 100u; i++) {
+        (void)cycle(54.0f, 0, turn_z(30.0f, 54.0f));
+    }
+    hal_atomic_u32_store(&link.out_snap.middle, 3u); /* a RAM fault: no slot index */
+    (void)cycle(54.0f, 0, turn_z(30.0f, 54.0f));     /* this publish latches */
+    TEST_ASSERT_TRUE(snapshot_producer_fault(&link.out_snap));
+    /* the comms side takes the latching cycle's slot, which the EKF never writes again */
+    const lean_record_t taken = newest_record();
+    TEST_ASSERT_FALSE(taken.fault);
+    for (uint32_t i = 0u; i < 10u; i++) {
+        (void)cycle(54.0f, 0, turn_z(-30.0f, 54.0f));
+    }
+    const lean_record_t later = newest_record();
+    TEST_ASSERT_EQUAL_MEMORY(&taken, &later, sizeof taken);
+    /* so it ages out */
+    struct platform_ekf_lean_t m;
+    lean_tx_msg(&later, false, later.stamp_ms + LEAN_TX_AGE_MAX_MS + 1u, &m);
+    TEST_ASSERT_EQUAL_UINT8(PLATFORM_EKF_LEAN_LEAN_ANGLE_STATE_INVALID_CHOICE, m.lean_angle_state);
+}
+
+static void test_a_corrupted_speed_word_stops_the_hand_over_MINOR_1(void)
+{
+    stand();
+    for (uint32_t i = 0u; i < 50u; i++) {
+        (void)cycle(54.0f, 0, Z_OFFSET);
+    }
+    hal_atomic_u32_store(&link.speed_snap.middle, 3u);
+    comms_speed(54.0f, now); /* this publish latches */
+    TEST_ASSERT_TRUE(snapshot_producer_fault(&link.speed_snap));
+    push_imu(0, Z_OFFSET);
+    lean_ekf_step(&ekf, now); /* the EKF takes the latching publish's slot */
+    now += CYCLE_MS;
+    const lean_speed_t held = ekf.speed;
+    for (uint32_t i = 0u; i < 5u; i++) {
+        (void)cycle(20.0f, 0, Z_OFFSET); /* comms never writes that slot again */
+    }
+    TEST_ASSERT_EQUAL_MEMORY(&held, &ekf.speed, sizeof held);
+}
+
 static void test_0x020_opens_only_for_this_links_counter_MAJOR_3(void)
 {
     lean_link_t other;
@@ -377,6 +420,8 @@ int main(void)
     RUN_TEST(test_only_a_valid_speed_inside_the_gen_range_is_handed_over);
     RUN_TEST(test_standstill_needs_two_recent_zero_samples);
     RUN_TEST(test_snapshot_faults_reach_the_record_and_read_invalid);
+    RUN_TEST(test_a_corrupted_output_word_stops_every_write_MINOR_1);
+    RUN_TEST(test_a_corrupted_speed_word_stops_the_hand_over_MINOR_1);
     RUN_TEST(test_0x020_opens_only_for_this_links_counter_MAJOR_3);
     RUN_TEST(test_an_unusable_speed_breaks_the_standstill_window_at_once);
     RUN_TEST(test_the_standstill_window_starts_at_the_second_zero_sample);
