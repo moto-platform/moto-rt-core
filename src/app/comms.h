@@ -5,8 +5,10 @@
  * The comms pass (Ç1, ISSUES D-2): the fixed order of rt-core's CAN work, shared by the
  * host program and the H7 comms task (one task runs both UDS roles):
  *   can_sm_step(VEHICLE)  -> can_if_dispatch(VEHICLE)  -> uds_client_step()
+ *                                                      -> lean_tx_publish_speed()
  *   can_sm_step(PLATFORM) -> can_if_dispatch(PLATFORM) -> vehicle_republish_step()
  *                                                      -> heartbeat_step()
+ *                                                      -> lean_tx_step()  (0x020)
  *                                                      -> uds_server_step()
  * The client steps before the server: the server reports what the client wrote in the
  * same pass (services/diag, vehicle_signals), and the vehicle tester's step period
@@ -15,7 +17,9 @@
  * seen by the links in the same pass. The republisher (D-056 item 4) sends the samples
  * the client wrote in this pass, sees the platform port's current state, and its E2E
  * frame never waits behind server work. The pass period therefore bounds 0x021's
- * freshness: the 20 ms EKF work (0x020) must not join this task (CLAUDE.md rule 4).
+ * freshness: the 20 ms EKF work must not join this task (CLAUDE.md rule 4); this task
+ * only hands the EKF the speed the client wrote in the same pass and sends the EKF's
+ * newest output as 0x020 (D-065 item 2: the EKF task never touches can_if).
  * The heartbeat (0x081, D-064) follows for the same reasons; it sees the DTC results
  * the server's monitors reported in the previous pass, and reads their conditions
  * directly as well, so a server that does not step never makes it read healthy.
@@ -29,6 +33,7 @@
  * hal/can_types.h).
  */
 
+#include "features/cornering/lean_tx.h"
 #include "features/heartbeat/heartbeat.h"
 #include "features/uds/uds_client.h"
 #include "features/uds/uds_server.h"
@@ -74,15 +79,24 @@ bool comms_ekf_register(comms_ekf_t* ekf, const alive_counter_t* counter);
  * (D-065 PR 3): a lean never goes out unsupervised. */
 bool comms_ekf_registered(const comms_ekf_t* ekf);
 
+/* Boot only, after comms_ekf_register() and before comms_apply_filters(): opens 0x020
+ * (lean_tx_open()) only when ekf supervises exactly link's alive counter (D-065
+ * amendment, architecture-guard MAJOR-3). False otherwise: tx stays closed, no speed is
+ * handed to the EKF and 0x020 never goes out (fail-closed). */
+bool comms_open_lean(const comms_ekf_t* ekf, lean_tx_t* tx, lean_link_t* link);
+
 /* Applies the acceptance filters (and the platform port's dedicated TX buffers) of both
- * ports (services/can_if) after the client, the server, the republisher and the heartbeat opened.
+ * ports (services/can_if) after the client, the server, the republisher, the heartbeat
+ * and 0x020 opened.
  * False if a port refused them. */
 bool comms_apply_filters(void);
 
 /* ekf: never NULL in a correct setup; NULL reads as a stalled EKF (DEGRADED, the safe
- * side), while a zeroed comms_ekf_t means "no EKF". */
+ * side), while a zeroed comms_ekf_t means "no EKF". lean: NULL or a closed lean_tx_t
+ * means no 0x020. An open lean whose link counter is not ekf's counter sends no 0x020
+ * and makes the heartbeat read a stalled EKF (D-065 amendment). */
 void comms_pass(uds_client_t* client, uds_server_t* server, vehicle_republish_t* republisher,
-                heartbeat_t* heartbeat, comms_ekf_t* ekf);
+                heartbeat_t* heartbeat, comms_ekf_t* ekf, lean_tx_t* lean);
 
 #ifdef __cplusplus
 }

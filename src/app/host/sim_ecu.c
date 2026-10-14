@@ -70,7 +70,8 @@ static uint16_t negative(uint8_t* out, uint8_t sid, uint8_t nrc)
 static uint16_t read_answer(const sim_ecu_t* ecu, const vehicle_cl250_did_t* e,
                             const uint8_t* req, uint32_t now_ms, uint8_t* out)
 {
-    uint32_t raw = synthetic_raw(e, now_ms);
+    uint32_t raw = (ecu->fixed_enabled && (e->did == ecu->fixed_did)) ? ecu->fixed_raw
+                                                                       : synthetic_raw(e, now_ms);
     out[0] = (uint8_t)(UDS_SID_READ_DATA_BY_IDENTIFIER + UDS_POSITIVE_RESPONSE_OFFSET);
     out[1] = req[1];
     out[2] = req[2];

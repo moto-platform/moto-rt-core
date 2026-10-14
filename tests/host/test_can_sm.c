@@ -745,7 +745,7 @@ static void test_comms_applies_the_filters_and_the_sil_exchange_still_works(void
     uint32_t heartbeat_frames = 0u;
     for (uint32_t i = 0u; i < 300u; i++) {
         sim_ecu_step(&ecu, timebase_now_ms());
-        comms_pass(&client, &server, &republisher, &heartbeat, &ekf);
+        comms_pass(&client, &server, &republisher, &heartbeat, &ekf, NULL);
         can_frame_t got;
         while (vbus_recv(&bus_p, node_ppeer, &got) == CAN_PORT_OK) {
             speed_frames += (got.id == PLATFORM_VEHICLE_SPEED_FRAME_ID) ? 1u : 0u;
@@ -798,7 +798,7 @@ static void test_comms_heartbeat_reads_normal_until_a_silent_ecu_arms_u0100(void
     const uint32_t run_ms =
         VEHICLE_CL250_ECU_ABSENT_TIMEOUT_MS + (3u * PLATFORM_HEARTBEAT_RT_CORE_CYCLE_TIME_MS);
     for (uint32_t i = 0u; i < run_ms; i++) {
-        comms_pass(&client, &server, &republisher, &heartbeat, &ekf);
+        comms_pass(&client, &server, &republisher, &heartbeat, &ekf, NULL);
         can_frame_t got;
         while (vbus_recv(&bus_p, node_ppeer, &got) == CAN_PORT_OK) {
             if (got.id != PLATFORM_HEARTBEAT_RT_CORE_FRAME_ID) {
@@ -859,7 +859,7 @@ static struct platform_heartbeat_rt_core_t run_comms(uint32_t ms, bool client_ru
     for (uint32_t i = 0u; i < ms; i++) {
         sim_ecu_step(&ecu, timebase_now_ms());
         if (client_runs) {
-            comms_pass(&client, &server, &republisher, &heartbeat, &ekf);
+            comms_pass(&client, &server, &republisher, &heartbeat, &ekf, NULL);
         } else {
             comms_pass_without_client();
         }
