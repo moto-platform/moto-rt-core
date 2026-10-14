@@ -21,6 +21,7 @@
 #include "platform.h"
 #include "platform_e2e.h"
 #include "services/can_if.h"
+#include "services/can_sm.h"
 #include "services/diag.h"
 #include "services/timebase.h"
 #include "services/vehicle_signals.h"
@@ -56,6 +57,8 @@ typedef struct {
     uint32_t lean_frames;
     uint32_t lean_invalid;
     uint32_t lean_e2e_bad;     /* frames the receiver's E2E check did not accept */
+    uint32_t lean_e2e_ok;      /* counter exactly +1 */
+    uint32_t lean_e2e_initial; /* resync after a gap beyond the timeout */
     uint32_t lean_gap_max_ms;  /* longest gap between 0x020 frames */
     uint32_t lean_last_ms;
     bool last_lean_invalid;
@@ -165,6 +168,8 @@ static seen_t run(uint32_t ms, uint32_t speed_kmh, uint32_t divider)
                     PLATFORM_EKF_LEAN_E2E_DATA_ID, PLATFORM_EKF_LEAN_E2E_MAX_DELTA_COUNTER,
                     PLATFORM_EKF_LEAN_E2E_TIMEOUT_MS, got.data, got.dlc, &rx, now);
                 s.lean_e2e_bad += ((st == MOTO_E2E_OK) || (st == MOTO_E2E_INITIAL)) ? 0u : 1u;
+                s.lean_e2e_ok += (st == MOTO_E2E_OK) ? 1u : 0u;
+                s.lean_e2e_initial += (st == MOTO_E2E_INITIAL) ? 1u : 0u;
                 if ((s.lean_frames > 0u) && ((now - s.lean_last_ms) > s.lean_gap_max_ms)) {
                     s.lean_gap_max_ms = now - s.lean_last_ms;
                 }
@@ -253,6 +258,8 @@ static void test_without_a_registered_ekf_0x020_is_never_sent(void)
 {
     TEST_ASSERT_FALSE(boot(NULL));
     TEST_ASSERT_FALSE(tx.opened);
+    TEST_ASSERT_FALSE(comms_open_lean(&ekf, NULL, &link)); /* NULL tx: nothing to reset */
+    TEST_ASSERT_FALSE(comms_open_lean(NULL, &tx, &link));
     const seen_t s = run(3000u, 0u, 1u); /* the EKF runs, unsupervised */
     TEST_ASSERT_EQUAL_UINT32(0u, s.lean_frames);
     TEST_ASSERT_GREATER_THAN_UINT32(0u, s.hb_frames);
@@ -267,6 +274,54 @@ static void test_a_foreign_registered_counter_does_not_open_0x020_MAJOR_3(void)
     TEST_ASSERT_EQUAL_UINT32(0u, s.lean_frames);
 }
 
+static void test_a_refused_frame_is_retried_and_the_counter_advances_only_when_accepted(void)
+{
+    ride_to_estimated();
+    const moto_e2e_tx_state_t before = tx.e2e;
+    vbus_set_tx_blocked(&bus_p, node_platform, true);
+    const seen_t b = run(EKF_CYCLE_MS + 5u, 54u, 1u); /* due once, refused in every pass */
+    TEST_ASSERT_EQUAL_UINT32(0u, b.lean_frames);
+    TEST_ASSERT_GREATER_THAN_UINT32(0u, tx.stats.retried);
+    TEST_ASSERT_EQUAL_UINT8(before.counter, tx.e2e.counter); /* D-056 item 5 */
+    vbus_set_tx_blocked(&bus_p, node_platform, false);
+    const seen_t s = run(2u * EKF_CYCLE_MS, 54u, 1u);
+    TEST_ASSERT_GREATER_THAN_UINT32(0u, s.lean_frames);
+    TEST_ASSERT_EQUAL_UINT32(s.lean_frames, s.lean_e2e_ok); /* no counter gap */
+    TEST_ASSERT_EQUAL_UINT32(0u, s.lean_invalid);           /* the retry carries a fresh output */
+    TEST_ASSERT_EQUAL_UINT32(0u, tx.stats.dropped);
+}
+
+static void test_a_bus_off_drops_cycles_without_advancing_the_counter_and_the_receiver_resyncs(void)
+{
+    ride_to_estimated();
+    const moto_e2e_tx_state_t before = tx.e2e;
+    vbus_set_bus_off(&bus_p, node_platform, true);
+    const seen_t b = run(5u * EKF_CYCLE_MS, 54u, 1u);
+    TEST_ASSERT_EQUAL_UINT32(0u, b.lean_frames);
+    TEST_ASSERT_GREATER_THAN_UINT32(0u, tx.stats.dropped); /* one per cycle, no retry storm */
+    TEST_ASSERT_LESS_OR_EQUAL_UINT32(5u, tx.stats.dropped);
+    TEST_ASSERT_EQUAL_UINT8(before.counter, tx.e2e.counter);
+    vbus_set_bus_off(&bus_p, node_platform, false);
+    const seen_t s = run(CAN_SM_PLATFORM_BACKOFF_INITIAL_MS + (10u * EKF_CYCLE_MS), 54u, 1u);
+    TEST_ASSERT_GREATER_THAN_UINT32(0u, s.lean_frames);
+    TEST_ASSERT_EQUAL_UINT32(1u, s.lean_e2e_initial); /* the gap exceeded the timeout */
+    TEST_ASSERT_EQUAL_UINT32(0u, s.lean_e2e_bad);
+}
+
+static void test_a_comms_side_snapshot_fault_sends_invalid_MAJOR_4(void)
+{
+    ride_to_estimated();
+    link.out_snap.consumer_fault = true; /* comms reads the output */
+    seen_t s = run(2u * EKF_CYCLE_MS, 54u, 1u);
+    TEST_ASSERT_GREATER_THAN_UINT32(0u, s.lean_frames);
+    TEST_ASSERT_EQUAL_UINT32(s.lean_frames, s.lean_invalid);
+    link.out_snap.consumer_fault = false;
+    link.speed_snap.producer_fault = true; /* comms writes the speed */
+    s = run(2u * EKF_CYCLE_MS, 54u, 1u);
+    TEST_ASSERT_GREATER_THAN_UINT32(0u, s.lean_frames);
+    TEST_ASSERT_EQUAL_UINT32(s.lean_frames, s.lean_invalid);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -276,5 +331,8 @@ int main(void)
     RUN_TEST(test_a_stalled_comms_task_leaves_the_ekf_output_invalid_within_300_ms);
     RUN_TEST(test_without_a_registered_ekf_0x020_is_never_sent);
     RUN_TEST(test_a_foreign_registered_counter_does_not_open_0x020_MAJOR_3);
+    RUN_TEST(test_a_refused_frame_is_retried_and_the_counter_advances_only_when_accepted);
+    RUN_TEST(test_a_bus_off_drops_cycles_without_advancing_the_counter_and_the_receiver_resyncs);
+    RUN_TEST(test_a_comms_side_snapshot_fault_sends_invalid_MAJOR_4);
     return UNITY_END();
 }

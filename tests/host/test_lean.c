@@ -284,6 +284,76 @@ static void test_0x020_opens_only_for_this_links_counter_MAJOR_3(void)
     TEST_ASSERT_TRUE(lean_tx_open(&t, &link, lean_link_alive(&link)));
 }
 
+/* One EKF cycle with no new speed sample (the last one stays in the snapshot). */
+static void imu_only_cycle(void)
+{
+    push_imu(0, Z_OFFSET);
+    lean_ekf_step(&ekf, now);
+    now += CYCLE_MS;
+}
+
+static void test_an_unusable_speed_breaks_the_standstill_window_at_once(void)
+{
+    /* 1.9 s of zeros: not yet learnt */
+    for (uint32_t i = 0u; i < 95u; i++) {
+        (void)cycle(0.0f, 0, Z_OFFSET);
+    }
+    TEST_ASSERT_FALSE(ekf.imu.core.offset_learned);
+    /* an out-of-range sample (UNUSABLE, handed over as 0 m/s) right after the zeros, then
+     * no new sample for 180 ms: the window must not reach 2 s through it */
+    TEST_ASSERT_TRUE(vehicle_signals_write(VEHICLE_CL250_IDX_VEHICLE_SPEED, 0u, 256.0f, now));
+    lean_tx_publish_speed(&tx, now);
+    imu_only_cycle();
+    TEST_ASSERT_EQUAL(LEAN_SPEED_UNUSABLE, ekf.speed.state);
+    for (uint32_t i = 0u; i < 9u; i++) {
+        imu_only_cycle();
+    }
+    TEST_ASSERT_FALSE(ekf.imu.core.offset_learned);
+    /* 1.2 s more of zeros: 2.4 s since the first zero, but only 1.2 s since the break */
+    for (uint32_t i = 0u; i < 60u; i++) {
+        (void)cycle(0.0f, 0, Z_OFFSET);
+    }
+    TEST_ASSERT_FALSE(ekf.imu.core.offset_learned);
+    stand();
+}
+
+static void test_the_standstill_window_starts_at_the_second_zero_sample(void)
+{
+    for (uint32_t i = 0u; i < 10u; i++) {
+        (void)cycle(10.0f, 0, Z_OFFSET);
+    }
+    /* from here a 0 km/h sample every 100 ms, as a slower poll would deliver */
+    uint32_t second_zero_ms = 0u;
+    bool learned = false;
+    for (uint32_t k = 0u; (k < 150u) && !learned; k++) {
+        if ((k % 5u) == 0u) {
+            comms_speed(0.0f, now);
+            second_zero_ms = (k == 5u) ? now : second_zero_ms;
+        }
+        push_imu(0, Z_OFFSET);
+        lean_ekf_step(&ekf, now);
+        learned = ekf.imu.core.offset_learned;
+        if (!learned) {
+            now += CYCLE_MS;
+        }
+    }
+    TEST_ASSERT_TRUE(learned);
+    /* the first zero alone never starts the window (one glitched 0 is not enough): it
+     * opens with the IMU period that ends at the second zero, one cycle before it */
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT32(IMU_OFFSET_WINDOW_MS - CYCLE_MS, now - second_zero_ms);
+}
+
+static void test_a_refused_dedicated_buffer_leaves_0x020_closed(void)
+{
+    /* setUp already registered 0x020: a second registration is refused (CAN_IF_ERR_DUP) */
+    lean_tx_t t;
+    TEST_ASSERT_FALSE(lean_tx_open(&t, &link, lean_link_alive(&link)));
+    TEST_ASSERT_FALSE(t.opened);
+    TEST_ASSERT_NULL(t.link);
+    lean_tx_step(&t, now);
+    TEST_ASSERT_EQUAL_UINT32(0u, t.stats.sent + t.stats.retried + t.stats.dropped);
+}
+
 static void test_null_and_unbound_steps_do_nothing(void)
 {
     lean_ekf_t unbound;
@@ -308,6 +378,9 @@ int main(void)
     RUN_TEST(test_standstill_needs_two_recent_zero_samples);
     RUN_TEST(test_snapshot_faults_reach_the_record_and_read_invalid);
     RUN_TEST(test_0x020_opens_only_for_this_links_counter_MAJOR_3);
+    RUN_TEST(test_an_unusable_speed_breaks_the_standstill_window_at_once);
+    RUN_TEST(test_the_standstill_window_starts_at_the_second_zero_sample);
+    RUN_TEST(test_a_refused_dedicated_buffer_leaves_0x020_closed);
     RUN_TEST(test_null_and_unbound_steps_do_nothing);
     return UNITY_END();
 }
