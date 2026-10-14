@@ -23,7 +23,7 @@
       "inherits": "host-tests",
       "binaryDir": "${sourceDir}/build/host-coverage",
       "cacheVariables": {
-        "CMAKE_C_FLAGS": "--coverage -O0"
+        "CMAKE_C_FLAGS": "--coverage -O0 -fprofile-update=atomic"
       }
     },
     {
@@ -93,7 +93,7 @@
       },
       "filter": {
         "include": {
-          "name": "test_snapshot|test_alive|test_comms_ekf|test_imu$"
+          "name": "test_snapshot|test_alive|test_comms_ekf|test_imu$|test_lean_link_stress$"
         }
       }
     },

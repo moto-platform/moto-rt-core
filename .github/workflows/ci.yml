@@ -82,6 +82,8 @@ jobs:
 
       # Coverage of the target code (host-only hal/host and app/host excluded).
       # Floors, measured 2026-09-29: 97 % lines / 87 % branches (clang); raise them as tests grow.
+      # -fprofile-update=atomic (host-coverage preset): the two-thread stress tests would
+      # otherwise race the gcov counters into negative hits, which gcovr rejects.
       - name: Coverage (gcov + gcovr, floors 95 % lines / 80 % branches)
         run: |
           pipx install gcovr >/dev/null
@@ -156,7 +158,8 @@ jobs:
 
   # The lock-free cross-task exchange (D-065 item 2: services/snapshot, services/alive)
   # under ThreadSanitizer, which cannot share a build with ASan. Includes the two-thread
-  # stress test; a data race or a torn/out-of-order record fails the job.
+  # stress tests (the snapshot, and the lean link's EKF and comms sides); a data race or a
+  # torn/out-of-order record fails the job.
   thread-sanitizer:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
