@@ -33,8 +33,37 @@ typedef struct {
 } log_entry_t;
 static log_entry_t log_buf[LOG_MAX];
 static uint32_t log_n;
-static uint32_t silent_mask; /* DIDs (bit per index) the fake ECU leaves unanswered */
+static uint64_t silent_mask; /* DIDs (bit per index) the fake ECU leaves unanswered */
 static bool ecu_silent;      /* the fake ECU answers nothing */
+
+/* D-068 / D-069: how the fake ECU answers a read of one DID (drive()). */
+typedef enum {
+    M_ANSWER = 0, /* positive answer, raw 1 (ENGINE_SPEED: rpm_raw) */
+    M_NRC31,      /* NRC 0x31 requestOutOfRange */
+    M_NRC_OTHER,  /* NRC other_nrc */
+    M_FF          /* a segmented (longer than a Single Frame) answer */
+} did_mode_t;
+static did_mode_t did_mode[VEHICLE_CL250_DID_COUNT];
+static uint8_t other_nrc;
+static uint32_t rpm_raw; /* the raw ENGINE_SPEED the fake ECU answers */
+
+/* Scripted ENGINE_SPEED answers (D-069 item 3), used up one per read, then rpm_raw. */
+#define RPM_NRC 0xFFFFFFF0u    /* NRC 0x22 */
+#define RPM_SILENT 0xFFFFFFF1u /* no answer: the read times out */
+#define RPM_SLOW 0xFFFFFFF2u   /* NRC 0x78 now, a raw-400 answer after the poll period */
+#define RPM_UP 400u            /* 100 rpm */
+static uint32_t rpm_script[8];
+static uint32_t rpm_script_len;
+static uint32_t rpm_script_n;
+static bool late_valid; /* a delayed answer (RPM_SLOW) is due at late_t */
+static uint32_t late_t;
+static uint32_t late_idx;
+static uint32_t late_raw;
+
+static uint64_t did_bit(uint32_t idx)
+{
+    return (uint64_t)1u << idx;
+}
 
 void setUp(void)
 {
@@ -43,6 +72,12 @@ void setUp(void)
     log_n = 0u;
     silent_mask = 0u;
     ecu_silent = false;
+    memset(did_mode, 0, sizeof did_mode);
+    other_nrc = 0u;
+    rpm_raw = 1u;
+    rpm_script_len = 0u;
+    rpm_script_n = 0u;
+    late_valid = false;
 }
 
 void tearDown(void) {}
@@ -148,12 +183,68 @@ static void bring_up(uint32_t t)
     TEST_ASSERT_EQUAL(K_TP, poll_at(t));
 }
 
+/* The fake ECU's reaction to a read of idx at t (see did_mode_t and the rpm script). */
+static void ecu_reacts(uint32_t t, uint32_t idx)
+{
+    uint32_t raw = 1u;
+    if ((silent_mask & did_bit(idx)) != 0u) {
+        return;
+    }
+    if (idx == VEHICLE_CL250_IDX_ENGINE_SPEED) {
+        raw = rpm_raw;
+        if (rpm_script_n < rpm_script_len) {
+            raw = rpm_script[rpm_script_n];
+            rpm_script_n++;
+        }
+        if (raw == RPM_SILENT) {
+            return;
+        }
+        if (raw == RPM_NRC) {
+            nrc(t, UDS_SID_READ_DATA_BY_IDENTIFIER, 0x22u);
+            return;
+        }
+        if (raw == RPM_SLOW) {
+            nrc(t, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_RESPONSE_PENDING);
+            late_valid = true;
+            late_t = t + vehicle_cl250_dids[idx].poll_period_ms + 20u;
+            late_idx = idx;
+            late_raw = RPM_UP;
+            return;
+        }
+    }
+    switch (did_mode[idx]) {
+    case M_NRC31:
+        nrc(t, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_REQUEST_OUT_OF_RANGE);
+        break;
+    case M_NRC_OTHER:
+        nrc(t, UDS_SID_READ_DATA_BY_IDENTIFIER, other_nrc);
+        break;
+    case M_FF: {
+        uint8_t d[12] = {0};
+        d[0] = (uint8_t)(UDS_SID_READ_DATA_BY_IDENTIFIER + POS_OFFSET);
+        d[1] = (uint8_t)(vehicle_cl250_dids[idx].did >> 8u);
+        d[2] = (uint8_t)(vehicle_cl250_dids[idx].did & 0xFFu);
+        TEST_ASSERT_FALSE(indicate(t, d, (uint16_t)sizeof d));
+        break;
+    }
+    case M_ANSWER:
+    default:
+        TEST_ASSERT_TRUE(answer_read(t, idx, raw));
+        break;
+    }
+}
+
 /* Polls every ms in [from, to) and plays a fake ECU that answers at once, unless it is
- * silent (all, or for the DIDs in silent_mask). Every request is logged. */
+ * silent (all, or for the DIDs in silent_mask) or did_mode says otherwise. Every request
+ * is logged. */
 static void drive(uint32_t from, uint32_t to)
 {
     for (uint32_t t = from; t != to; t++) {
         kind_t k;
+        if (late_valid && (late_t == t)) {
+            late_valid = false;
+            TEST_ASSERT_TRUE(answer_read(t, late_idx, late_raw));
+        }
         while ((k = poll_at(t)) != K_NONE) {
             const uint32_t idx = (k == K_READ) ? req_idx() : 0u;
             if (log_n < LOG_MAX) {
@@ -167,8 +258,8 @@ static void drive(uint32_t from, uint32_t to)
             }
             if (k == K_SESSION) {
                 answer_session(t);
-            } else if ((k == K_READ) && ((silent_mask & (1u << idx)) == 0u)) {
-                TEST_ASSERT_TRUE(answer_read(t, idx, 1u));
+            } else if (k == K_READ) {
+                ecu_reacts(t, idx);
             } else {
                 /* tester present: response suppressed */
             }
@@ -593,17 +684,24 @@ static void test_positive_response_gives_raw_and_physical_from_gen(void)
         {VEHICLE_CL250_IDX_BATTERY_VOLTAGE, 0xFFFFu, 65.535f}, /* (A*256+B)/1000, max */
     };
     uint32_t order[VEHICLE_CL250_DID_COUNT];
-    TEST_ASSERT_EQUAL_UINT32(sizeof cases / sizeof cases[0], expected_order(order));
+    TEST_ASSERT_EQUAL_UINT32(VEHICLE_CL250_DID_COUNT, expected_order(order));
     bring_up(0u);
     for (uint32_t n = 0u; n < VEHICLE_CL250_DID_COUNT; n++) {
         const uint32_t i = order[n];
-        TEST_ASSERT_EQUAL_UINT32(i, cases[i].idx); /* cases are in table order */
         TEST_ASSERT_EQUAL(K_READ, poll_at(0u));
-        TEST_ASSERT_EQUAL_UINT32(cases[i].idx, req_idx());
-        TEST_ASSERT_TRUE(answer_read(0u, cases[i].idx, cases[i].raw));
-        TEST_ASSERT_EQUAL_UINT32(cases[i].idx, smp.idx);
-        TEST_ASSERT_EQUAL_UINT32(cases[i].raw, smp.raw);
-        TEST_ASSERT_FLOAT_WITHIN(0.001f, cases[i].physical, smp.physical);
+        TEST_ASSERT_EQUAL_UINT32(i, req_idx());
+        if (i < (sizeof cases / sizeof cases[0])) {
+            /* the verified DIDs (the first table entries, D-068 item 1); cases are in table order */
+            TEST_ASSERT_EQUAL_UINT32(i, cases[i].idx);
+            TEST_ASSERT_TRUE(vehicle_cl250_dids[i].verified);
+            TEST_ASSERT_TRUE(answer_read(0u, i, cases[i].raw));
+            TEST_ASSERT_EQUAL_UINT32(cases[i].raw, smp.raw);
+            TEST_ASSERT_FLOAT_WITHIN(0.001f, cases[i].physical, smp.physical);
+        } else {
+            TEST_ASSERT_TRUE(answer_read(0u, i, 1u)); /* unverified: a mid-range raw value */
+            TEST_ASSERT_EQUAL_UINT32(1u, smp.raw);
+        }
+        TEST_ASSERT_EQUAL_UINT32(i, smp.idx);
     }
     TEST_ASSERT_EQUAL_UINT32(VEHICLE_CL250_DID_COUNT, stats()->reads_ok);
 }
@@ -655,7 +753,7 @@ static void test_silent_speed_restarts_its_period_and_the_normal_dids_are_still_
     const uint32_t base = VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS;
     const uint32_t period = vehicle_cl250_dids[speed].poll_period_ms;
     bring_up(0u);
-    silent_mask = 1u << speed;
+    silent_mask = did_bit(speed);
     uint32_t t = 0u;
     while (stats()->did_skips == 0u) {
         drive(t, t + 1u);
@@ -1136,7 +1234,7 @@ static void test_one_lost_speed_answer_costs_one_more_faulty_round(void)
     const uint32_t base = VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS;
     const uint32_t period = vehicle_cl250_dids[speed].poll_period_ms;
     bring_up(0u);
-    silent_mask = 1u << speed;
+    silent_mask = did_bit(speed);
     drive(0u, base + 1u); /* the first speed read is lost and times out at base */
     TEST_ASSERT_EQUAL_UINT32(1u, stats()->timeouts);
     TEST_ASSERT_EQUAL_UINT8(1u, c.did[speed].consecutive_timeouts);
@@ -1965,7 +2063,7 @@ static void test_did_is_skipped_after_gen_max_consecutive_timeouts_then_resumes(
     const uint32_t max_to = VEHICLE_CL250_MAX_CONSECUTIVE_TIMEOUTS;
     const uint32_t cooldown = VEHICLE_CL250_DID_SKIP_COOLDOWN_MS;
     bring_up(0u);
-    silent_mask = 1u << VEHICLE_CL250_IDX_ENGINE_SPEED;
+    silent_mask = did_bit(VEHICLE_CL250_IDX_ENGINE_SPEED);
     uint32_t t = 0u;
     uint32_t skipped_at = 0u;
     while (stats()->did_skips == 0u) {
@@ -2372,6 +2470,736 @@ static void test_null_arguments_are_harmless(void)
     TEST_ASSERT_FALSE(uds_client_core_ecu_present(&c, 0u)); /* nothing seen yet */
 }
 
+/* ------------------------------------------------------------------------- */
+/* D-068 items 1-2: unverified DIDs (session gate, stop rule, no NRC 0x78)     */
+/* D-069 item 3: the engine-start re-ask                                       */
+/* ------------------------------------------------------------------------- */
+
+static bool is_unverified(uint32_t idx)
+{
+    return !vehicle_cl250_dids[idx].verified;
+}
+
+static uint32_t unverified_count(void)
+{
+    uint32_t n = 0u;
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        if (is_unverified(i)) {
+            n++;
+        }
+    }
+    return n;
+}
+
+static uint32_t first_unverified(void)
+{
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        if (is_unverified(i)) {
+            return i;
+        }
+    }
+    TEST_FAIL_MESSAGE("no unverified DID in the gen/ table");
+    return 0u;
+}
+
+static void set_mode_unverified(did_mode_t m)
+{
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        if (is_unverified(i)) {
+            did_mode[i] = m;
+        }
+    }
+}
+
+static uint32_t stopped_count(void)
+{
+    uint32_t n = 0u;
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        if (uds_client_core_did_stopped(&c, i)) {
+            n++;
+        }
+    }
+    return n;
+}
+
+/* Polls at t, answering every read but idx's with raw 1, until the read of idx is the
+ * pending request (not answered). */
+static void serve_until_read(uint32_t t, uint32_t idx)
+{
+    for (uint32_t n = 0u; n < (VEHICLE_CL250_DID_COUNT + 4u); n++) {
+        const kind_t k = poll_at(t);
+        TEST_ASSERT_TRUE_MESSAGE(k != K_NONE, "the read is not due");
+        if (k == K_READ) {
+            if (req_idx() == idx) {
+                return;
+            }
+            TEST_ASSERT_TRUE(answer_read(t, req_idx(), 1u));
+        }
+    }
+    TEST_FAIL_MESSAGE("the read did not come");
+}
+
+/* Advances *t until the read of idx is the pending request; other reads are answered. */
+static void wait_for_read(uint32_t* t, uint32_t idx)
+{
+    for (uint32_t guard = 0u; guard < 20000u; guard++) {
+        kind_t k;
+        while ((k = poll_at(*t)) != K_NONE) {
+            if (k == K_READ) {
+                if (req_idx() == idx) {
+                    return;
+                }
+                TEST_ASSERT_TRUE(answer_read(*t, req_idx(), 1u));
+            }
+        }
+        (*t)++;
+    }
+    TEST_FAIL_MESSAGE("the read did not come");
+}
+
+/* Time of the first logged read of idx at or after from_t, or UINT32_MAX. */
+static uint32_t first_read_at_or_after(uint32_t idx, uint32_t from_t)
+{
+    for (uint32_t i = 0u; i < log_n; i++) {
+        if ((log_buf[i].k == K_READ) && (log_buf[i].idx == idx) && (log_buf[i].t >= from_t)) {
+            return log_buf[i].t;
+        }
+    }
+    return UINT32_MAX;
+}
+
+/* Time of the last logged read of idx before before_t. */
+static uint32_t last_read_before(uint32_t idx, uint32_t before_t)
+{
+    uint32_t last = 0u;
+    for (uint32_t i = 0u; i < log_n; i++) {
+        if ((log_buf[i].k == K_READ) && (log_buf[i].idx == idx) && (log_buf[i].t < before_t)) {
+            last = log_buf[i].t;
+        }
+    }
+    return last;
+}
+
+/* E-19 (1): the whole v0.12.0 table, every unverified DID refused with NRC 0x31. */
+static void test_d068_every_unverified_did_refused_with_nrc31_is_read_twice_then_never(void)
+{
+    const uint32_t end = 40000u;
+    bring_up(0u);
+    set_mode_unverified(M_NRC31);
+    drive(0u, end);
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        const uint32_t period = vehicle_cl250_dids[i].poll_period_ms;
+        if (is_unverified(i)) {
+            TEST_ASSERT_EQUAL_UINT32_MESSAGE(2u, count_did_reads(i, 0u, end), "two reads, then none");
+            TEST_ASSERT_EQUAL_UINT32(1u, count_did_reads(i, period, period + 1u));
+            TEST_ASSERT_TRUE(uds_client_core_did_stopped(&c, i));
+        } else {
+            TEST_ASSERT_EQUAL_UINT32((end + period - 1u) / period, count_did_reads(i, 0u, end));
+            TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, i));
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(unverified_count(), stats()->did_stops);
+    TEST_ASSERT_EQUAL_UINT32(unverified_count(), stopped_count());
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->did_skips);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->timeouts);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->rearms);
+}
+
+static void test_d068_one_nrc31_does_not_stop_and_a_positive_answer_ends_the_rule(void)
+{
+    const uint32_t u = first_unverified();
+    const uint32_t period = vehicle_cl250_dids[u].poll_period_ms;
+    bring_up(0u);
+    did_mode[u] = M_NRC31;
+    drive(0u, 1u);
+    TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, u));
+    TEST_ASSERT_EQUAL_UINT8(1u, c.did[u].nrc31_count);
+    did_mode[u] = M_ANSWER; /* the ECU serves it after all (e.g. the other response ID) */
+    drive(1u, period + 1u);
+    TEST_ASSERT_TRUE(c.did[u].answered);
+    TEST_ASSERT_EQUAL_UINT8(0u, c.did[u].nrc31_count);
+    /* From now on NRC 0x31 never stops it: it keeps the D-050..D-053 behaviour. */
+    did_mode[u] = M_NRC31;
+    drive(period + 1u, (5u * period) + 1u);
+    TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, u));
+    TEST_ASSERT_EQUAL_UINT32(6u, count_did_reads(u, 0u, (5u * period) + 1u));
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->did_stops);
+}
+
+static void test_d068_nrc31_in_the_quiet_window_after_a_timeout_does_not_count(void)
+{
+    const uint32_t a = first_unverified();
+    const uint32_t u = a + 1u; /* unverified, ordered after a */
+    const uint32_t period = vehicle_cl250_dids[u].poll_period_ms;
+    const uint32_t base = VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS;
+    const uint32_t quiet = VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS;
+    TEST_ASSERT_EQUAL_UINT32(period, vehicle_cl250_dids[a].poll_period_ms);
+    bring_up(0u);
+    silent_mask = did_bit(a);
+    did_mode[u] = M_NRC31;
+    drive(0u, base + 1u);
+    /* a timed out at base; u was read right after it, inside the quiet window: its NRC may
+     * be a's answer, so it does not count. */
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->timeouts);
+    TEST_ASSERT_EQUAL_UINT8(0u, c.did[u].nrc31_count);
+    silent_mask = 0u;
+    drive(base + 1u, base + quiet + 1u); /* both are due at base + period, window over */
+    TEST_ASSERT_EQUAL_UINT8(1u, c.did[u].nrc31_count);
+    TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, u));
+    drive(base + quiet + 1u, base + quiet + period + 1u);
+    TEST_ASSERT_TRUE(uds_client_core_did_stopped(&c, u));
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->did_stops);
+}
+
+static void test_d068_max_timeouts_stop_a_never_answered_unverified_did_instead_of_the_skip(void)
+{
+    const uint32_t u = first_unverified();
+    bring_up(0u);
+    silent_mask = did_bit(u);
+    drive(0u, 20000u);
+    TEST_ASSERT_TRUE(uds_client_core_did_stopped(&c, u));
+    TEST_ASSERT_FALSE(uds_client_core_did_skipped(&c, u, 20000u));
+    TEST_ASSERT_EQUAL_UINT32(VEHICLE_CL250_MAX_CONSECUTIVE_TIMEOUTS, count_did_reads(u, 0u, 20000u));
+    TEST_ASSERT_EQUAL_UINT32(VEHICLE_CL250_MAX_CONSECUTIVE_TIMEOUTS, stats()->timeouts);
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->did_stops);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->did_skips);
+    drive(20000u, 60000u);
+    TEST_ASSERT_EQUAL_UINT32(VEHICLE_CL250_MAX_CONSECUTIVE_TIMEOUTS, count_did_reads(u, 0u, 60000u));
+}
+
+static void test_d068_max_timeouts_still_skip_an_answered_unverified_and_every_verified_did(void)
+{
+    const uint32_t u = first_unverified();
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t cooldown = VEHICLE_CL250_DID_SKIP_COOLDOWN_MS;
+    bring_up(0u);
+    drive(0u, 1u); /* every DID answered once */
+    TEST_ASSERT_TRUE(c.did[u].answered);
+    silent_mask = did_bit(u) | did_bit(speed);
+    drive(1u, 12000u);
+    TEST_ASSERT_EQUAL_UINT32(2u, stats()->did_skips >= 2u ? 2u : stats()->did_skips);
+    TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, u));
+    TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, speed));
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->did_stops);
+    /* the skip ends after the cooldown and the DID is read again (D-050..D-053 unchanged) */
+    silent_mask = 0u;
+    uint32_t skip_end = 0u;
+    for (uint32_t t = 12000u; t < (12000u + cooldown + 3000u); t++) {
+        if (!uds_client_core_did_skipped(&c, u, t)) {
+            skip_end = t;
+            break;
+        }
+    }
+    TEST_ASSERT_GREATER_THAN_UINT32(0u, skip_end);
+    drive(12000u, skip_end + vehicle_cl250_dids[u].poll_period_ms + 1u);
+    TEST_ASSERT_GREATER_THAN_UINT32(0u, count_did_reads(u, skip_end, skip_end + vehicle_cl250_dids[u].poll_period_ms + 1u));
+}
+
+static void test_d068_a_segmented_answer_stops_a_never_answered_unverified_did(void)
+{
+    const uint32_t u = first_unverified();
+    bring_up(0u);
+    did_mode[u] = M_FF;
+    drive(0u, 30000u);
+    TEST_ASSERT_TRUE(uds_client_core_did_stopped(&c, u));
+    TEST_ASSERT_EQUAL_UINT32(1u, count_did_reads(u, 0u, 30000u));
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->unavailable);
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->did_stops);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->did_skips);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->timeouts);
+}
+
+static void test_d068_a_segmented_answer_still_skips_an_answered_unverified_and_a_verified_did(void)
+{
+    const uint32_t u = first_unverified();
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    bring_up(0u);
+    drive(0u, 1u);
+    did_mode[u] = M_FF;
+    did_mode[speed] = M_FF;
+    drive(1u, vehicle_cl250_dids[u].poll_period_ms + 1u);
+    TEST_ASSERT_TRUE(uds_client_core_did_skipped(&c, u, vehicle_cl250_dids[u].poll_period_ms));
+    TEST_ASSERT_TRUE(uds_client_core_did_skipped(&c, speed, vehicle_cl250_dids[u].poll_period_ms));
+    TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, u));
+    TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, speed));
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->did_stops);
+}
+
+static void test_d068_a_withheld_fc_stops_a_never_answered_unverified_did(void)
+{
+    const uint32_t u = first_unverified();
+    bring_up(0u);
+    serve_until_read(0u, u);
+    uds_client_core_on_fc_withheld(&c, 0u);
+    TEST_ASSERT_TRUE(uds_client_core_did_stopped(&c, u));
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->did_skips);
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->did_stops);
+    TEST_ASSERT_EQUAL(K_NONE, poll_at(VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS - 1u)); /* the hold */
+    /* A verified DID, and one that answered, are skipped as before. */
+    setUp();
+    bring_up(0u);
+    drive(0u, 1u);
+    serve_until_read(vehicle_cl250_dids[u].poll_period_ms, u);
+    uds_client_core_on_fc_withheld(&c, vehicle_cl250_dids[u].poll_period_ms);
+    TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, u));
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->did_skips);
+    setUp();
+    bring_up(0u);
+    serve_until_read(0u, VEHICLE_CL250_IDX_VEHICLE_SPEED);
+    uds_client_core_on_fc_withheld(&c, 0u);
+    TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, VEHICLE_CL250_IDX_VEHICLE_SPEED));
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->did_skips);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->did_stops);
+}
+
+static void test_d068_other_nrcs_never_stop_a_did(void)
+{
+    const uint8_t codes[] = {0x11u, 0x12u, 0x22u, 0x33u};
+    const uint32_t u = first_unverified();
+    const uint32_t period = vehicle_cl250_dids[u].poll_period_ms;
+    for (uint32_t n = 0u; n < sizeof codes; n++) {
+        setUp();
+        bring_up(0u);
+        did_mode[u] = M_NRC_OTHER;
+        other_nrc = codes[n];
+        drive(0u, (6u * period) + 1u);
+        TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, u));
+        TEST_ASSERT_EQUAL_UINT32(7u, count_did_reads(u, 0u, (6u * period) + 1u));
+        TEST_ASSERT_EQUAL_UINT32(0u, stats()->did_stops);
+        TEST_ASSERT_EQUAL_UINT32(0u, stats()->did_skips);
+    }
+}
+
+static void test_d068_nrc31_never_stops_a_verified_did(void)
+{
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t period = vehicle_cl250_dids[speed].poll_period_ms;
+    bring_up(0u);
+    did_mode[speed] = M_NRC31;
+    drive(0u, (20u * period) + 1u);
+    TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, speed));
+    TEST_ASSERT_EQUAL_UINT32(21u, count_did_reads(speed, 0u, (20u * period) + 1u));
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->did_stops);
+}
+
+static void test_d068_an_unverified_read_gets_no_nrc_0x78_extension(void)
+{
+    const uint32_t u = first_unverified();
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    const uint32_t base = VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS;
+    bring_up(0u);
+    serve_until_read(0u, u);
+    nrc(10u, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_RESPONSE_PENDING);
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->response_pending);
+    TEST_ASSERT_EQUAL_UINT32(base, c.wait_ms); /* not doubled */
+    nrc(60u, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_RESPONSE_PENDING);
+    (void)poll_at(base - 1u);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->timeouts);
+    (void)poll_at(base); /* the base timeout from the request ends it */
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->timeouts);
+    /* Control: a verified DID that is not faulty still gets the extension. */
+    setUp();
+    bring_up(0u);
+    serve_until_read(0u, speed);
+    nrc(10u, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_RESPONSE_PENDING);
+    TEST_ASSERT_EQUAL_UINT32(2u * base, c.wait_ms);
+}
+
+static void test_d068_nrc_0x7e_and_0x7f_drop_the_session_and_the_confirmation_rearms(void)
+{
+    const uint8_t codes[] = {UDS_NRC_SUBFUNCTION_NOT_SUPPORTED_IN_ACTIVE_SESSION,
+                             UDS_NRC_SERVICE_NOT_SUPPORTED_IN_ACTIVE_SESSION};
+    for (uint32_t n = 0u; n < sizeof codes; n++) {
+        setUp();
+        bring_up(0u);
+        set_mode_unverified(M_NRC31);
+        drive(0u, 10001u);
+        TEST_ASSERT_EQUAL_UINT32(unverified_count(), stopped_count());
+        uint32_t t = 10001u;
+        while (poll_at(t) != K_READ) { /* a verified read, the unverified ones are stopped */
+            t++;
+        }
+        TEST_ASSERT_TRUE(is_unverified(req_idx()) == false);
+        nrc(t, UDS_SID_READ_DATA_BY_IDENTIFIER, codes[n]);
+        TEST_ASSERT_FALSE(uds_client_core_session_up(&c));
+        TEST_ASSERT_EQUAL_UINT32(1u, stats()->session_losses);
+        TEST_ASSERT_EQUAL(K_SESSION, poll_skip_tp(t));
+        answer_session(t);
+        TEST_ASSERT_EQUAL_UINT32(0u, stopped_count());
+        for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+            if (is_unverified(i)) {
+                TEST_ASSERT_FALSE(c.did[i].requested); /* due at once */
+                TEST_ASSERT_FALSE(c.did[i].answered);
+                TEST_ASSERT_EQUAL_UINT8(0u, c.did[i].nrc31_count);
+            }
+        }
+        log_n = 0u;
+        drive(t, t + 1u);
+        for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+            if (is_unverified(i)) {
+                TEST_ASSERT_EQUAL_UINT32(1u, count_did_reads(i, t, t + 1u));
+                TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, i));
+                TEST_ASSERT_EQUAL_UINT8(1u, c.did[i].nrc31_count);
+            }
+        }
+    }
+}
+
+static void test_d068_confirmation_after_ecu_absence_rearms_every_unverified_did(void)
+{
+    bring_up(0u);
+    set_mode_unverified(M_NRC31);
+    drive(0u, 10001u);
+    TEST_ASSERT_EQUAL_UINT32(unverified_count(), stopped_count());
+    ecu_silent = true;
+    drive(10001u, 10001u + VEHICLE_CL250_ECU_ABSENT_TIMEOUT_MS + 500u);
+    TEST_ASSERT_FALSE(uds_client_core_session_up(&c));
+    ecu_silent = false;
+    uint32_t t = 10001u + VEHICLE_CL250_ECU_ABSENT_TIMEOUT_MS + 500u;
+    log_n = 0u;
+    while (!uds_client_core_session_up(&c)) {
+        drive(t, t + 1u);
+        t++;
+        TEST_ASSERT_LESS_THAN_UINT32(40000u, t);
+    }
+    t--; /* the ms of the confirmation: its reads are in the log */
+    TEST_ASSERT_EQUAL_UINT32(0u, stopped_count());
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        if (is_unverified(i)) {
+            TEST_ASSERT_EQUAL_UINT32(1u, count_did_reads(i, t, t + 1u));
+            TEST_ASSERT_EQUAL_UINT8(1u, c.did[i].nrc31_count);
+        }
+    }
+}
+
+/*
+ * D-068 item 1 fault-mode bounds of the five verified DIDs with every unverified DID
+ * silent (the worst case: 35 reads at once at each confirmation, each holding the slot
+ * for the base timeout), in the rt-core order of the decision. Gap = time between two
+ * answers of the DID. With storm, the silent DIDs send NRC 0x78 every 50 ms instead.
+ */
+static void run_verified_gaps(bool storm, uint32_t rtt, uint32_t duration_ms)
+{
+    static const struct {
+        uint32_t idx;
+        uint32_t bound_ms;
+    } bounds[] = {
+        {VEHICLE_CL250_IDX_ENGINE_SPEED, 260u},
+        {VEHICLE_CL250_IDX_VEHICLE_SPEED, 220u},
+        {VEHICLE_CL250_IDX_THROTTLE_POS, 480u},
+        {VEHICLE_CL250_IDX_COOLANT_TEMP, 1740u},
+        {VEHICLE_CL250_IDX_BATTERY_VOLTAGE, 2270u},
+    };
+    const uint32_t base = VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS;
+    const uint32_t t0 = 1000u;
+    uint32_t last[VEHICLE_CL250_DID_COUNT];
+    uint32_t worst[VEHICLE_CL250_DID_COUNT];
+    bool answer_due = false;
+    uint32_t answer_t = 0u;
+    uint32_t answer_idx = 0u;
+    bool unv = false; /* an unverified read is pending */
+    uint32_t unv_t = 0u;
+    bring_up(t0);
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        last[i] = t0;
+        worst[i] = 0u;
+    }
+    for (uint32_t t = t0; t < (t0 + duration_ms); t++) {
+        if (answer_due && (t == answer_t)) {
+            TEST_ASSERT_TRUE(answer_read(t, answer_idx, 1u));
+            if ((t - last[answer_idx]) > worst[answer_idx]) {
+                worst[answer_idx] = t - last[answer_idx];
+            }
+            last[answer_idx] = t;
+            answer_due = false;
+        }
+        if (storm && unv && (t != unv_t) && (((t - unv_t) % 50u) == 0u)) {
+            nrc(t, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_RESPONSE_PENDING);
+        }
+        for (;;) {
+            const kind_t k = poll_at(t);
+            TEST_ASSERT_TRUE_MESSAGE(k != K_SESSION, "session lost");
+            if (unv && ((uds_client_core_pending(&c) != UDS_CLIENT_REQ_READ) || (k == K_READ))) {
+                /* the unverified read ended in this poll: at the base timeout at the latest */
+                TEST_ASSERT_LESS_OR_EQUAL_UINT32_MESSAGE(base, t - unv_t,
+                                                         "an unverified read held the slot");
+                unv = false;
+            }
+            if (k == K_NONE) {
+                break;
+            }
+            if (k == K_READ) {
+                TEST_ASSERT_FALSE_MESSAGE(answer_due || unv, "two requests in flight");
+                if (is_unverified(req_idx())) {
+                    unv = true;
+                    unv_t = t;
+                } else {
+                    answer_due = true;
+                    answer_idx = req_idx();
+                    answer_t = t + rtt;
+                }
+            }
+        }
+    }
+    for (uint32_t n = 0u; n < (sizeof bounds / sizeof bounds[0]); n++) {
+        const uint32_t i = bounds[n].idx;
+        if ((t0 + duration_ms - last[i]) > worst[i]) {
+            worst[i] = t0 + duration_ms - last[i];
+        }
+        TEST_ASSERT_TRUE(vehicle_cl250_dids[i].verified);
+        TEST_ASSERT_LESS_OR_EQUAL_UINT32_MESSAGE(bounds[n].bound_ms, worst[i],
+                                                 "a verified DID exceeded its D-068 item 1 bound");
+        TEST_ASSERT_LESS_OR_EQUAL_UINT32(vehicle_cl250_dids[i].stale_after_ms, worst[i]);
+    }
+    TEST_ASSERT_EQUAL_UINT32(unverified_count(), stats()->did_stops); /* all stopped, none skipped */
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->did_skips);
+}
+
+static void test_d068_verified_gaps_stay_within_the_fault_mode_bounds_with_every_unverified_did_silent(void)
+{
+    /* the run helper plays the ECU itself: it answers only the verified reads */
+    run_verified_gaps(false, VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS, 60000u);
+    setUp();
+    run_verified_gaps(false, 1u, 60000u);
+}
+
+static void test_d068_verified_gaps_stay_within_the_bounds_while_every_unverified_did_sends_0x78(void)
+{
+    run_verified_gaps(true, VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS, 60000u);
+}
+
+/* Stops every unverified DID with NRC 0x31 while the ECU reports rpm_raw (0 = engine off). */
+static void stop_all_with_the_engine_off(void)
+{
+    bring_up(0u);
+    rpm_raw = 0u;
+    set_mode_unverified(M_NRC31);
+    drive(0u, 10001u);
+    TEST_ASSERT_EQUAL_UINT32(unverified_count(), stopped_count());
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->rearms);
+}
+
+static void test_d069_engine_start_makes_stopped_dids_pollable_one_period_after_their_last_request(void)
+{
+    stop_all_with_the_engine_off();
+    uint32_t last_req[VEHICLE_CL250_DID_COUNT];
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        last_req[i] = last_read_before(i, 10001u);
+    }
+    rpm_raw = RPM_UP;
+    uint32_t rearm_t = 10001u;
+    while (stats()->rearms == 0u) {
+        drive(rearm_t, rearm_t + 1u);
+        rearm_t++;
+        TEST_ASSERT_LESS_THAN_UINT32(11000u, rearm_t);
+    }
+    rearm_t--;
+    TEST_ASSERT_EQUAL_UINT32(unverified_count(), stats()->rearms);
+    TEST_ASSERT_EQUAL_UINT32(0u, stopped_count());
+    TEST_ASSERT_EQUAL_UINT32(2u, count_did_reads(VEHICLE_CL250_IDX_ENGINE_SPEED, 10001u, rearm_t + 1u));
+    drive(rearm_t + 1u, 31001u);
+    bool now_due = false;
+    bool deferred = false;
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        if (!is_unverified(i)) {
+            continue;
+        }
+        const uint32_t due = last_req[i] + vehicle_cl250_dids[i].poll_period_ms;
+        const uint32_t expect = (due > rearm_t) ? due : rearm_t;
+        TEST_ASSERT_EQUAL_UINT32(expect, first_read_at_or_after(i, 10001u));
+        now_due = now_due || (due <= rearm_t);
+        deferred = deferred || (due > rearm_t);
+        /* the stop rule starts again from zero: two more NRC 0x31 reads stop it again */
+        TEST_ASSERT_EQUAL_UINT32(2u, count_did_reads(i, 10001u, 31001u));
+        TEST_ASSERT_TRUE(uds_client_core_did_stopped(&c, i));
+    }
+    TEST_ASSERT_TRUE_MESSAGE(now_due, "no DID was overdue at the engine start");
+    TEST_ASSERT_TRUE_MESSAGE(deferred, "no DID waited for its next tier slot");
+    TEST_ASSERT_EQUAL_UINT32(2u * unverified_count(), stats()->did_stops);
+}
+
+static void test_d069_the_reask_happens_once_per_confirmed_session(void)
+{
+    stop_all_with_the_engine_off();
+    rpm_raw = RPM_UP;
+    drive(10001u, 10600u);
+    TEST_ASSERT_EQUAL_UINT32(unverified_count(), stats()->rearms);
+    /* stopped again (rule from zero), then a stall and a restart in the same session */
+    drive(10600u, 31001u);
+    TEST_ASSERT_EQUAL_UINT32(unverified_count(), stopped_count());
+    rpm_raw = 0u;
+    drive(31001u, 31600u);
+    rpm_raw = RPM_UP;
+    drive(31600u, 32600u);
+    TEST_ASSERT_EQUAL_UINT32(unverified_count(), stats()->rearms);
+    TEST_ASSERT_EQUAL_UINT32(unverified_count(), stopped_count());
+    /* a new confirmation re-arms the DIDs and the engine start may re-ask once more */
+    log_n = 0u;
+    uint32_t t = 32600u;
+    while (poll_at(t) != K_READ) {
+        t++;
+    }
+    nrc(t, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_SERVICE_NOT_SUPPORTED_IN_ACTIVE_SESSION);
+    TEST_ASSERT_EQUAL(K_SESSION, poll_skip_tp(t));
+    answer_session(t);
+    TEST_ASSERT_EQUAL_UINT32(0u, stopped_count());
+    rpm_raw = 0u;
+    drive(t, t + 20001u); /* engine off: every unverified DID is stopped again */
+    TEST_ASSERT_EQUAL_UINT32(unverified_count(), stopped_count());
+    rpm_raw = RPM_UP;
+    drive(t + 20001u, t + 21000u);
+    TEST_ASSERT_EQUAL_UINT32(2u * unverified_count(), stats()->rearms);
+    TEST_ASSERT_EQUAL_UINT32(0u, stopped_count());
+}
+
+static void test_d069_a_running_engine_without_a_valid_zero_before_it_does_not_rearm(void)
+{
+    const uint32_t u = first_unverified();
+    bring_up(0u);
+    rpm_raw = RPM_UP; /* the engine is running from the start of the session */
+    did_mode[u] = M_NRC31;
+    drive(0u, vehicle_cl250_dids[u].poll_period_ms + 1u);
+    TEST_ASSERT_TRUE(uds_client_core_did_stopped(&c, u));
+    drive(vehicle_cl250_dids[u].poll_period_ms + 1u, 5000u);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->rearms);
+    TEST_ASSERT_TRUE(uds_client_core_did_stopped(&c, u));
+    /* one sample above zero is not an engine start either */
+    setUp();
+    bring_up(0u);
+    rpm_raw = 0u;
+    did_mode[u] = M_NRC31;
+    drive(0u, vehicle_cl250_dids[u].poll_period_ms + 1u);
+    TEST_ASSERT_TRUE(uds_client_core_did_stopped(&c, u));
+    rpm_script[0] = RPM_UP;
+    rpm_script_len = 1u;
+    rpm_script_n = 0u;
+    drive(vehicle_cl250_dids[u].poll_period_ms + 1u, 4000u);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->rearms);
+    TEST_ASSERT_TRUE(uds_client_core_did_stopped(&c, u));
+}
+
+/* A run of one valid RPM > 0, a break X, then one more RPM > 0 and zeros: no engine start. */
+static void rpm_break_then_one_sample(uint32_t x)
+{
+    const uint32_t u = first_unverified();
+    const uint32_t stop_t = vehicle_cl250_dids[u].poll_period_ms + 1u;
+    bring_up(0u);
+    rpm_raw = 0u;
+    did_mode[u] = M_NRC31;
+    drive(0u, stop_t);
+    TEST_ASSERT_TRUE(uds_client_core_did_stopped(&c, u));
+    rpm_script[0] = RPM_UP;
+    rpm_script[1] = x;
+    rpm_script[2] = RPM_UP;
+    rpm_script_len = 3u;
+    rpm_script_n = 0u;
+    uint32_t t = stop_t;
+    while (c.rpm_run != 1u) { /* the first sample of the run */
+        drive(t, t + 1u);
+        t++;
+        TEST_ASSERT_LESS_THAN_UINT32(stop_t + 1000u, t);
+    }
+    while (c.rpm_run != 0u) { /* the break */
+        drive(t, t + 1u);
+        t++;
+        TEST_ASSERT_LESS_THAN_UINT32(stop_t + 1000u, t);
+    }
+    if (x == RPM_SILENT) {
+        /* broken by the timeout itself, not by the slow answer that follows */
+        TEST_ASSERT_EQUAL_UINT32(1u, stats()->timeouts);
+        TEST_ASSERT_EQUAL_UINT32(0u, stats()->slow_answers);
+    }
+    drive(t, t + 2000u); /* the last RPM > 0 alone, then zeros */
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->rearms);
+    TEST_ASSERT_TRUE(uds_client_core_did_stopped(&c, u));
+}
+
+static void test_d069_an_nrc_on_rpm_breaks_the_run(void)
+{
+    rpm_break_then_one_sample(RPM_NRC);
+}
+
+static void test_d069_a_timeout_on_rpm_breaks_the_run(void)
+{
+    rpm_break_then_one_sample(RPM_SILENT);
+}
+
+static void test_d069_a_slow_answer_on_rpm_breaks_the_run(void)
+{
+    rpm_break_then_one_sample(RPM_SLOW);
+    TEST_ASSERT_GREATER_THAN_UINT32(0u, stats()->slow_answers);
+}
+
+static void test_d069_a_segmented_answer_on_rpm_breaks_the_run(void)
+{
+    const uint32_t u = first_unverified();
+    const uint32_t stop_t = vehicle_cl250_dids[u].poll_period_ms + 1u;
+    bring_up(0u);
+    rpm_raw = 0u;
+    did_mode[u] = M_NRC31;
+    drive(0u, stop_t);
+    rpm_raw = RPM_UP;
+    uint32_t t = stop_t;
+    while (c.rpm_run != 1u) {
+        drive(t, t + 1u);
+        t++;
+        TEST_ASSERT_LESS_THAN_UINT32(stop_t + 1000u, t);
+    }
+    did_mode[VEHICLE_CL250_IDX_ENGINE_SPEED] = M_FF;
+    while (c.rpm_run != 0u) {
+        drive(t, t + 1u);
+        t++;
+        TEST_ASSERT_LESS_THAN_UINT32(stop_t + 1000u, t);
+    }
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->rearms);
+}
+
+static void test_d069_the_loss_of_the_session_breaks_the_run(void)
+{
+    const uint32_t u = first_unverified();
+    const uint32_t stop_t = vehicle_cl250_dids[u].poll_period_ms + 1u;
+    bring_up(0u);
+    rpm_raw = 0u;
+    did_mode[u] = M_NRC31;
+    drive(0u, stop_t);
+    rpm_raw = RPM_UP;
+    uint32_t t = stop_t;
+    while (c.rpm_run != 1u) {
+        drive(t, t + 1u);
+        t++;
+        TEST_ASSERT_LESS_THAN_UINT32(stop_t + 1000u, t);
+    }
+    /* the next RPM read is refused with NRC 0x7F: the session is lost */
+    wait_for_read(&t, VEHICLE_CL250_IDX_ENGINE_SPEED);
+    nrc(t, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_SERVICE_NOT_SUPPORTED_IN_ACTIVE_SESSION);
+    TEST_ASSERT_EQUAL_UINT8(0u, c.rpm_run);
+    TEST_ASSERT_EQUAL(K_SESSION, poll_skip_tp(t));
+    answer_session(t);
+    /* the new session needs its own zero before an engine start counts */
+    drive(t, t + 6000u);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->rearms);
+    TEST_ASSERT_TRUE(uds_client_core_did_stopped(&c, u));
+}
+
+static void test_d069_two_consecutive_samples_after_a_zero_are_enough_with_a_late_zero(void)
+{
+    /* positive control of the break tests: [0, 400, 400] re-asks, and so does a zero seen
+     * long before the two samples */
+    const uint32_t u = first_unverified();
+    const uint32_t stop_t = vehicle_cl250_dids[u].poll_period_ms + 1u;
+    bring_up(0u);
+    rpm_raw = 0u;
+    did_mode[u] = M_NRC31;
+    drive(0u, stop_t);
+    TEST_ASSERT_TRUE(uds_client_core_did_stopped(&c, u));
+    drive(stop_t, stop_t + 3000u); /* the engine stays off for a long time */
+    rpm_raw = RPM_UP;
+    drive(stop_t + 3000u, stop_t + 3500u);
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->rearms); /* u only: the others answer */
+    TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, u));
+    TEST_ASSERT_TRUE(c.did[u].requested);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -2457,5 +3285,29 @@ int main(void)
     RUN_TEST(test_ecu_presence_needs_a_new_answer_after_absence);
     RUN_TEST(test_schedule_is_wrap_safe);
     RUN_TEST(test_null_arguments_are_harmless);
+    RUN_TEST(test_d068_every_unverified_did_refused_with_nrc31_is_read_twice_then_never);
+    RUN_TEST(test_d068_one_nrc31_does_not_stop_and_a_positive_answer_ends_the_rule);
+    RUN_TEST(test_d068_nrc31_in_the_quiet_window_after_a_timeout_does_not_count);
+    RUN_TEST(test_d068_max_timeouts_stop_a_never_answered_unverified_did_instead_of_the_skip);
+    RUN_TEST(test_d068_max_timeouts_still_skip_an_answered_unverified_and_every_verified_did);
+    RUN_TEST(test_d068_a_segmented_answer_stops_a_never_answered_unverified_did);
+    RUN_TEST(test_d068_a_segmented_answer_still_skips_an_answered_unverified_and_a_verified_did);
+    RUN_TEST(test_d068_a_withheld_fc_stops_a_never_answered_unverified_did);
+    RUN_TEST(test_d068_other_nrcs_never_stop_a_did);
+    RUN_TEST(test_d068_nrc31_never_stops_a_verified_did);
+    RUN_TEST(test_d068_an_unverified_read_gets_no_nrc_0x78_extension);
+    RUN_TEST(test_d068_nrc_0x7e_and_0x7f_drop_the_session_and_the_confirmation_rearms);
+    RUN_TEST(test_d068_confirmation_after_ecu_absence_rearms_every_unverified_did);
+    RUN_TEST(test_d068_verified_gaps_stay_within_the_fault_mode_bounds_with_every_unverified_did_silent);
+    RUN_TEST(test_d068_verified_gaps_stay_within_the_bounds_while_every_unverified_did_sends_0x78);
+    RUN_TEST(test_d069_engine_start_makes_stopped_dids_pollable_one_period_after_their_last_request);
+    RUN_TEST(test_d069_the_reask_happens_once_per_confirmed_session);
+    RUN_TEST(test_d069_a_running_engine_without_a_valid_zero_before_it_does_not_rearm);
+    RUN_TEST(test_d069_an_nrc_on_rpm_breaks_the_run);
+    RUN_TEST(test_d069_a_timeout_on_rpm_breaks_the_run);
+    RUN_TEST(test_d069_a_slow_answer_on_rpm_breaks_the_run);
+    RUN_TEST(test_d069_a_segmented_answer_on_rpm_breaks_the_run);
+    RUN_TEST(test_d069_the_loss_of_the_session_breaks_the_run);
+    RUN_TEST(test_d069_two_consecutive_samples_after_a_zero_are_enough_with_a_late_zero);
     return UNITY_END();
 }
