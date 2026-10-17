@@ -559,6 +559,8 @@ static void test_vehicle_sample_dids_go_none_valid_stale_with_big_endian_raw(voi
         if (d->encoding != (uint8_t)PLATFORM_UDS_ENC_VEHICLE_SAMPLE) {
             continue;
         }
+        TEST_ASSERT_TRUE_MESSAGE(vehicle_cl250_dids[d->vehicle_idx].verified,
+                                 "only the verified DIDs have a sample DID (D-068: 35 more are polled, not served)");
         checked++;
         vehicle_signals_init();
         const uint16_t rlen = (uint16_t)(d->length - PLATFORM_UDS_VEHICLE_SAMPLE_HEADER_LEN);
@@ -589,7 +591,13 @@ static void test_vehicle_sample_dids_go_none_valid_stale_with_big_endian_raw(voi
         TEST_ASSERT_GREATER_THAN_UINT16(vehicle_cl250_dids[d->vehicle_idx].stale_after_ms, stale_age);
         TEST_ASSERT_EQUAL_UINT32(raw, be32(&got[3u + PLATFORM_UDS_VEHICLE_SAMPLE_HEADER_LEN], rlen));
     }
-    TEST_ASSERT_EQUAL_UINT32(VEHICLE_CL250_DID_COUNT, checked);
+    uint32_t verified = 0u;
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        if (vehicle_cl250_dids[i].verified) {
+            verified++;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(verified, checked); /* one sample DID per verified vehicle DID */
 }
 
 /* ------------------------------------------------------------------ DTCs, 0x14 */
