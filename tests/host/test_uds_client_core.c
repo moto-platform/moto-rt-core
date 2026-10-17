@@ -2876,10 +2876,18 @@ static void test_d068_confirmation_after_ecu_absence_rearms_every_unverified_did
  * D-068 item 1 fault-mode bounds of the five verified DIDs with every unverified DID
  * silent (the worst case: 35 reads at once at each confirmation, each holding the slot
  * for the base timeout), in the rt-core order of the decision. Gap = time between two
- * answers of the DID. With storm, the silent DIDs send NRC 0x78 every 50 ms instead.
+ * answers of the DID. GAP_STORM: the unverified DIDs send NRC 0x78 every 50 ms instead.
+ * GAP_CR_FAIL: each answers with a First Frame whose reception fails (N_Cr) 5 ms later.
+ * faulty_idx (or NO_FAULTY): a verified DID that never answers either (the fault-mode case
+ * behind the bounds); it is left out of the bound check.
  */
-static void run_verified_gaps(bool storm, uint32_t rtt, uint32_t duration_ms)
+typedef enum { GAP_SILENT = 0, GAP_STORM, GAP_CR_FAIL } gap_mode_t;
+#define NO_FAULTY UINT32_MAX
+
+static void run_verified_gaps(gap_mode_t mode, uint32_t rtt, uint32_t duration_ms,
+                              uint32_t faulty_idx)
 {
+    const bool storm = (mode == GAP_STORM);
     static const struct {
         uint32_t idx;
         uint32_t bound_ms;
@@ -2899,6 +2907,7 @@ static void run_verified_gaps(bool storm, uint32_t rtt, uint32_t duration_ms)
     uint32_t answer_idx = 0u;
     bool unv = false; /* an unverified read is pending */
     uint32_t unv_t = 0u;
+    uint32_t cr_t = 0u; /* GAP_CR_FAIL: the reception of the pending read fails at cr_t */
     bring_up(t0);
     for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
         last[i] = t0;
@@ -2912,6 +2921,10 @@ static void run_verified_gaps(bool storm, uint32_t rtt, uint32_t duration_ms)
             }
             last[answer_idx] = t;
             answer_due = false;
+        }
+        if ((mode == GAP_CR_FAIL) && unv && (t == cr_t)) {
+            TEST_ASSERT_FALSE(
+                uds_client_core_on_indication(&c, t, ISOTP_N_TIMEOUT_CR, NULL, 0u, &smp));
         }
         if (storm && unv && (t != unv_t) && (((t - unv_t) % 50u) == 0u)) {
             nrc(t, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_RESPONSE_PENDING);
@@ -2930,9 +2943,10 @@ static void run_verified_gaps(bool storm, uint32_t rtt, uint32_t duration_ms)
             }
             if (k == K_READ) {
                 TEST_ASSERT_FALSE_MESSAGE(answer_due || unv, "two requests in flight");
-                if (is_unverified(req_idx())) {
+                if (is_unverified(req_idx()) || (req_idx() == faulty_idx)) {
                     unv = true;
                     unv_t = t;
+                    cr_t = t + 5u;
                 } else {
                     answer_due = true;
                     answer_idx = req_idx();
@@ -2943,29 +2957,177 @@ static void run_verified_gaps(bool storm, uint32_t rtt, uint32_t duration_ms)
     }
     for (uint32_t n = 0u; n < (sizeof bounds / sizeof bounds[0]); n++) {
         const uint32_t i = bounds[n].idx;
+        if (i == faulty_idx) {
+            continue;
+        }
         if ((t0 + duration_ms - last[i]) > worst[i]) {
             worst[i] = t0 + duration_ms - last[i];
         }
         TEST_ASSERT_TRUE(vehicle_cl250_dids[i].verified);
-        TEST_ASSERT_LESS_OR_EQUAL_UINT32_MESSAGE(bounds[n].bound_ms, worst[i],
-                                                 "a verified DID exceeded its D-068 item 1 bound");
-        TEST_ASSERT_LESS_OR_EQUAL_UINT32(vehicle_cl250_dids[i].stale_after_ms, worst[i]);
+        if ((faulty_idx == NO_FAULTY) && (mode != GAP_CR_FAIL)) {
+            TEST_ASSERT_LESS_OR_EQUAL_UINT32_MESSAGE(bounds[n].bound_ms, worst[i],
+                                                     "a verified DID exceeded its D-068 item 1 bound");
+            TEST_ASSERT_LESS_OR_EQUAL_UINT32(vehicle_cl250_dids[i].stale_after_ms, worst[i]);
+        } else if (mode == GAP_CR_FAIL) {
+            /* OPEN FINDING (safety-reviewer follow-up): every failed reception also holds
+             * the tester for the link's N_Bs, once per DID: the decision bound plus HOLD_MS is
+             * all this scenario keeps, so the verified DIDs go STALE while the 35 unverified
+             * DIDs fail one after the other (README, "Open"). */
+            TEST_ASSERT_LESS_OR_EQUAL_UINT32(bounds[n].bound_ms + HOLD_MS, worst[i]);
+        } else {
+            /* OPEN FINDING: with a verified DID faulty too (e.g. VEHICLE_SPEED's fresh
+             * attempt, high priority again after a skip cooldown) RPM measured 280 ms, above
+             * its 260 ms decision bound; only stale_after_ms (330) holds. */
+            TEST_ASSERT_LESS_OR_EQUAL_UINT32(vehicle_cl250_dids[i].stale_after_ms, worst[i]);
+        }
     }
-    TEST_ASSERT_EQUAL_UINT32(unverified_count(), stats()->did_stops); /* all stopped, none skipped */
-    TEST_ASSERT_EQUAL_UINT32(0u, stats()->did_skips);
+    TEST_ASSERT_EQUAL_UINT32(unverified_count(), stats()->did_stops); /* all stopped */
+    if (faulty_idx == NO_FAULTY) {
+        TEST_ASSERT_EQUAL_UINT32(0u, stats()->did_skips); /* none skipped */
+    } else {
+        TEST_ASSERT_GREATER_THAN_UINT32(0u, stats()->did_skips); /* the faulty verified one */
+    }
 }
 
 static void test_d068_verified_gaps_stay_within_the_fault_mode_bounds_with_every_unverified_did_silent(void)
 {
     /* the run helper plays the ECU itself: it answers only the verified reads */
-    run_verified_gaps(false, VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS, 60000u);
+    run_verified_gaps(GAP_SILENT, VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS, 60000u, NO_FAULTY);
     setUp();
-    run_verified_gaps(false, 1u, 60000u);
+    run_verified_gaps(GAP_SILENT, 1u, 60000u, NO_FAULTY);
 }
 
 static void test_d068_verified_gaps_stay_within_the_bounds_while_every_unverified_did_sends_0x78(void)
 {
-    run_verified_gaps(true, VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS, 60000u);
+    run_verified_gaps(GAP_STORM, VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS, 60000u, NO_FAULTY);
+}
+
+static void test_d068_verified_gaps_hold_with_one_faulty_verified_did_and_every_unverified_did_silent(void)
+{
+    const uint32_t rtt = VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS;
+    run_verified_gaps(GAP_SILENT, rtt, 60000u, VEHICLE_CL250_IDX_VEHICLE_SPEED);
+    setUp();
+    run_verified_gaps(GAP_SILENT, rtt, 60000u, VEHICLE_CL250_IDX_ENGINE_SPEED);
+    setUp();
+    run_verified_gaps(GAP_SILENT, rtt, 60000u, VEHICLE_CL250_IDX_THROTTLE_POS);
+}
+
+/* MAJOR-1: a First Frame whose reception then fails is a First Frame answer. */
+static void test_d068_a_failed_segmented_reception_stops_a_never_answered_unverified_did(void)
+{
+    const uint32_t u = first_unverified();
+    bring_up(0u);
+    serve_until_read(0u, u);
+    TEST_ASSERT_FALSE(uds_client_core_on_indication(&c, 10u, ISOTP_N_TIMEOUT_CR, NULL, 0u, &smp));
+    TEST_ASSERT_TRUE(uds_client_core_did_stopped(&c, u));
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->did_stops);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->did_skips);
+    drive(10u + HOLD_MS, 60000u);
+    TEST_ASSERT_EQUAL_UINT32(1u, count_did_reads(u, 0u, 60000u) + 1u); /* u's one read is not logged */
+    /* an answered unverified DID and a verified one are skipped as before */
+    setUp();
+    bring_up(0u);
+    drive(0u, 1u);
+    serve_until_read(vehicle_cl250_dids[u].poll_period_ms, u);
+    TEST_ASSERT_FALSE(uds_client_core_on_indication(&c, vehicle_cl250_dids[u].poll_period_ms + 1u,
+                                                    ISOTP_N_TIMEOUT_CR, NULL, 0u, &smp));
+    TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, u));
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->did_skips);
+    setUp();
+    bring_up(0u);
+    serve_until_read(0u, VEHICLE_CL250_IDX_VEHICLE_SPEED);
+    TEST_ASSERT_FALSE(uds_client_core_on_indication(&c, 1u, ISOTP_N_TIMEOUT_CR, NULL, 0u, &smp));
+    TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, VEHICLE_CL250_IDX_VEHICLE_SPEED));
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->did_skips);
+}
+
+static void test_d068_verified_gaps_with_every_unverified_reception_failing(void)
+{
+    run_verified_gaps(GAP_CR_FAIL, VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS, 60000u, NO_FAULTY);
+}
+
+/* MINOR-3: the quiet window across the uint32 ms wrap. */
+static void test_d068_quiet_window_is_wrap_safe(void)
+{
+    const uint32_t a = first_unverified();
+    const uint32_t u = a + 1u;
+    const uint32_t period = vehicle_cl250_dids[u].poll_period_ms;
+    const uint32_t base = VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS;
+    const uint32_t quiet = VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS;
+    const uint32_t o = UINT32_MAX - 150u; /* the timeout at o + 100, its window ends after the wrap */
+    bring_up(o);
+    silent_mask = did_bit(a);
+    did_mode[u] = M_NRC31;
+    drive(o, o + base + 1u);
+    TEST_ASSERT_EQUAL_UINT8(0u, c.did[u].nrc31_count);
+    silent_mask = 0u;
+    drive(o + base + 1u, o + base + quiet + 1u);
+    TEST_ASSERT_EQUAL_UINT8(1u, c.did[u].nrc31_count);
+    drive(o + base + quiet + 1u, o + base + quiet + period + 1u);
+    TEST_ASSERT_TRUE(uds_client_core_did_stopped(&c, u));
+}
+
+/* MINOR-3: the engine-start re-ask across the wrap: due one period after the last request. */
+static void test_d069_reask_is_wrap_safe(void)
+{
+    const uint32_t u = first_unverified();
+    const uint32_t period = vehicle_cl250_dids[u].poll_period_ms;
+    const uint32_t o = UINT32_MAX - (period / 2u); /* the second read of u is after the wrap */
+    bring_up(o);
+    rpm_raw = 0u;
+    did_mode[u] = M_NRC31;
+    drive(o, o + period + 1u);
+    TEST_ASSERT_TRUE(uds_client_core_did_stopped(&c, u));
+    rpm_raw = RPM_UP;
+    drive(o + period + 1u, o + period + 400u);
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->rearms);
+    drive(o + period + 400u, o + (2u * period) + 1u);
+    uint32_t reads_before = 0u;
+    uint32_t reads_at = 0u;
+    for (uint32_t i = 0u; i < log_n; i++) {
+        if ((log_buf[i].k == K_READ) && (log_buf[i].idx == u)) {
+            const uint32_t rel = log_buf[i].t - o;
+            reads_before += (rel > period) && (rel < (2u * period));
+            reads_at += (rel == (2u * period));
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(0u, reads_before); /* not at once */
+    TEST_ASSERT_EQUAL_UINT32(1u, reads_at);     /* one period after its last request */
+}
+
+/* MINOR-3: a dropped read of an armed unverified DID is due again at once. */
+static void test_d068_not_sent_keeps_an_armed_unverified_read_due_at_once(void)
+{
+    const uint32_t u = first_unverified();
+    bring_up(0u);
+    serve_until_read(0u, u);
+    uds_client_core_not_sent(&c);
+    TEST_ASSERT_FALSE(c.did[u].requested);
+    TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, u));
+    TEST_ASSERT_EQUAL(K_READ, poll_skip_tp(1u));
+    TEST_ASSERT_EQUAL_UINT32(u, req_idx());
+}
+
+/* MINOR-3: the latch while DIDs are stopped. */
+static void test_d068_latch_with_stopped_dids_sends_nothing_and_keeps_the_state_sane(void)
+{
+    bring_up(0u);
+    set_mode_unverified(M_NRC31);
+    drive(0u, 10001u);
+    const uint32_t stopped = stopped_count();
+    TEST_ASSERT_EQUAL_UINT32(unverified_count(), stopped);
+    uds_client_core_latch(&c);
+    log_n = 0u;
+    drive(10001u, 40000u);
+    TEST_ASSERT_EQUAL_UINT32(0u, log_n);
+    TEST_ASSERT_TRUE(uds_client_core_failed(&c));
+    TEST_ASSERT_FALSE(uds_client_core_session_up(&c));
+    TEST_ASSERT_EQUAL_UINT32(stopped, stopped_count());
+    TEST_ASSERT_EQUAL_UINT32(stopped, stats()->did_stops);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->rearms);
+    /* init clears it all */
+    uds_client_core_init(&c, HOLD_MS);
+    TEST_ASSERT_EQUAL_UINT32(0u, stopped_count());
 }
 
 /* Stops every unverified DID with NRC 0x31 while the ECU reports rpm_raw (0 = engine off). */
@@ -3302,6 +3464,13 @@ int main(void)
     RUN_TEST(test_d068_verified_gaps_stay_within_the_bounds_while_every_unverified_did_sends_0x78);
     RUN_TEST(test_d069_engine_start_makes_stopped_dids_pollable_one_period_after_their_last_request);
     RUN_TEST(test_d069_the_reask_happens_once_per_confirmed_session);
+    RUN_TEST(test_d068_verified_gaps_hold_with_one_faulty_verified_did_and_every_unverified_did_silent);
+    RUN_TEST(test_d068_a_failed_segmented_reception_stops_a_never_answered_unverified_did);
+    RUN_TEST(test_d068_verified_gaps_with_every_unverified_reception_failing);
+    RUN_TEST(test_d068_quiet_window_is_wrap_safe);
+    RUN_TEST(test_d069_reask_is_wrap_safe);
+    RUN_TEST(test_d068_not_sent_keeps_an_armed_unverified_read_due_at_once);
+    RUN_TEST(test_d068_latch_with_stopped_dids_sends_nothing_and_keeps_the_state_sane);
     RUN_TEST(test_d069_a_running_engine_without_a_valid_zero_before_it_does_not_rearm);
     RUN_TEST(test_d069_an_nrc_on_rpm_breaks_the_run);
     RUN_TEST(test_d069_a_timeout_on_rpm_breaks_the_run);

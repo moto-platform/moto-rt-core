@@ -2,6 +2,7 @@
 
 #include "uds_iso14229.h"
 
+#include <math.h>
 #include <stddef.h>
 
 /* ReadDataByIdentifier positive response: [SID + 0x40][DID hi][DID lo][data...]. */
@@ -239,7 +240,9 @@ static void rearm_stopped_reads(uds_client_core_t* c)
 /* A decoded, in-time ENGINE_SPEED answer to the pending read (D-069 item 3). */
 static void watch_engine_start(uds_client_core_t* c, float rpm)
 {
-    if (rpm <= 0.0f) {
+    if (!isfinite(rpm)) {
+        c->rpm_run = 0u; /* a NaN is neither a running engine nor a valid 0 */
+    } else if (rpm <= 0.0f) {
         c->rpm_zero_seen = true;
         c->rpm_run = 0u;
     } else if (c->rpm_zero_seen && !c->engine_rearmed) {
@@ -561,7 +564,9 @@ bool uds_client_core_on_indication(uds_client_core_t* c, uint32_t now_ms,
         count(&c->stats.unavailable);
         if (c->pending == UDS_CLIENT_REQ_READ) {
             break_rpm_run(c, c->pending_idx);
-            skip_did(c, c->pending_idx, now_ms);
+            /* D-068 item 2: a First Frame whose reception then failed is a First Frame
+             * answer too: stop a never-answered unverified DID, skip any other. */
+            stop_or_skip(c, c->pending_idx, now_ms);
         }
         c->pending = UDS_CLIENT_REQ_NONE;
         hold_for(c, now_ms, c->abort_hold_ms);
