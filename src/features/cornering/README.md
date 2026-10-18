@@ -121,7 +121,7 @@ The H7 port must static-assert `configTICK_RATE_HZ == 1000` and a 32-bit `TickTy
 6. `comms_apply_filters()` (seals the filters and the dedicated buffers);
 7. start the scheduler.
 
-If step 4 or 5 fails, 0x020 stays closed and never reaches the bus: receivers see its timeout (D-042 fallback, D-065 amendment).
+If step 4 or 5 fails, 0x020 stays closed and never reaches the bus: receivers see its timeout (D-042 fallback, D-065 amendment). The host program treats a `lean_tx_open()` failure as fatal and aborts the boot (`app/host/main.c`); **the H7 boot must do the same.** If it were ignored while a registered EKF runs, 0xFD03 would read `RECORD_FRESH` clear (no record ever reaches the copy) with `EKF_ALIVE_OK` set, which looks like the output-snapshot producer fault case (safety-reviewer MINOR-1; host test `test_REQ_FD03_a_failed_lean_tx_open_...` pins what the code gives).
 
 ### WCET budget (MINOR-7; user, 2026-10-14; measured on the board with DWT CYCCNT, Q-019)
 
@@ -143,6 +143,8 @@ Diagnostic only (QM): no safety decision reads it, and `lean_tx_msg()` ignores e
 2. `lean_tx_step()` is the only consumer call site. In the same call, from the index that read returned, it copies the record's fields into `services/lean_health` (a comms-task static) and then builds 0x020 from the same slot. No index or pointer outlives the call.
 3. The UDS server builds the DID from that comms-local copy plus comms-task flags. It never calls `snapshot_read_index()` and keeps no index, so it cannot take a record from 0x020.
 4. The copy is refreshed only when `lean_tx_step()` is due (every 20 ms), which is far inside the 500 ms window.
+
+**Deviation, kept on purpose (safety-reviewer MINOR-2).** `UNLEARNED_S` is anchored at the EKF's **first published step**, one EKF cycle or more after boot, while `uds/dids.yaml` says "since boot". Not changed silently; follow-up for the next defs change (user/defs choice): align the wording to "since the EKF's first step" and mention in the 0xFD03 description the closed-link case (0x020 never opened, so `RECORD_FRESH` stays clear while `EKF_ALIVE_OK` can be set). The saturation of `UNLEARNED_S` is latched per run (a run longer than the 2^32 ms timer wrap stays 0xFFFF).
 
 **EKF side.** `imu_offset_health()` gives learned / rejected / `reject_count`; `reject_count` saturates at the gen/ maximum 0xFFFF (never wraps). `lean_health_unlearned_s()` counts whole seconds of the current run without a learnt offset: it starts at the first published step (boot) and again whenever a learnt offset is lost (a rejected window drops it), is 0 while one is learnt and saturates at 0xFFFF. Everything is computed from `now_ms` in the step, with no extra clock.
 
@@ -223,7 +225,13 @@ The rules apply in order. The first that fails sends INVALID with LEAN 0 and QUA
 - **(c) H7 port:** ECC on the SRAM holding `lean_link_t` (the snapshot detects only out-of-range indices), `configTICK_RATE_HZ == 1000` and 32-bit `TickType_t` static asserts, and `hal_imu_pop()` RAM-only (WCET budget).
 - **(d) HIL scenarios** (list above, including the ±30° sign check, `lean_imu_dead` with the 0xFD03 report, `lean_task_priorities`). Add: read 0xFD03 while `lean_imu_dead`: expected `RECORD_FRESH` set, `OFFSET_LEARNED` clear and `UNLEARNED_S` growing after a power-up, `EKF_ALIVE_OK` set.
 - **(e) T1/T4:** tune the provisional constants (`lean_core` noise and gate, standstill 0.1 m/s / 200 ms, the offset window) and measure the reinit availability cost.
-- **0xFD03 only:** `UNLEARNED_S` starts at the EKF's first step; if the H7 EKF task starts noticeably after boot, that is the intended anchor, so state it in the bring-up notes.
+- **0xFD03 only:** `UNLEARNED_S` starts at the EKF's first step; if the H7 EKF task starts noticeably after boot, that is the intended anchor, so state it in the bring-up notes. Defs follow-ups at the next defs touch: the "since boot" wording, and the closed-link case in the description.
+- **HIL/target follow-ups for 0xFD03** (from safety-reviewer on rt-core#37; listed, not implemented):
+  - DWT WCET of `lean_ekf_step()` before and after the health fields (budget 1 ms).
+  - A 0xFD03 flood every 5-10 ms during a lean sweep: the 0x020 cycle, jitter and E2E counter unaffected.
+  - EKF task suspended: within 500 ms `RECORD_FRESH`, `OFFSET_LEARNED` and `EKF_ALIVE_OK` clear, 0x081 DEGRADED, 0x020 INVALID or timeout.
+  - IMU unplugged at boot: no record learnt, `OFFSET_LEARNED` clear, `UNLEARNED_S` counts.
+  - Standstill gyro z bias above 2 deg/s: `OFFSET_REJECTED` set, `OFFSET_REJECTS` +1 per window, `UNLEARNED_S` restarts.
 
 ## Memory and timing
 

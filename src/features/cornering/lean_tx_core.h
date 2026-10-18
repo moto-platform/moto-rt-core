@@ -25,7 +25,7 @@
 #include "platform.h"
 #include "platform_e2e.h"
 #include "platform_limits.h"
-#include "services/lean_health_core.h"
+#include "services/lean_health_types.h"
 #include "vehicle_cl250.h"
 
 #include <stdbool.h>

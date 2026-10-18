@@ -24,6 +24,7 @@
 #include "features/cornering/lean_tx_core.h"
 #include "services/alive.h"
 #include "services/imu.h"
+#include "services/lean_health_core.h"
 #include "services/snapshot.h"
 
 #include <stdbool.h>
