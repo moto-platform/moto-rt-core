@@ -79,7 +79,8 @@
  *     re-confirmation.
  *   - Engine-start re-ask (D-069 item 3): once per stop epoch, at the first engine
  *     start (two consecutive in-time ENGINE_SPEED samples > 0 after one == 0), every
- *     stopped DID is pollable again, due one poll_period_ms after its last request.
+ *     stopped DID is pollable again, due one poll_period_ms after its last request, and
+ *     the NRC counts of every unverified DID start from zero (its timeout count is kept).
  *   - ECU present while any response came within ECU_ABSENT_TIMEOUT_MS. Absence also
  *     ends every DID's D-050/D-051 fault state: no read from before it is answered.
  *   - No request is produced while the link cannot take one at once (tx_ready false,
@@ -146,9 +147,11 @@ typedef struct {
     uds_client_stop_reason_t stop_reason; /* NONE: not stopped (D-068 item 2, never due) */
     uint8_t consecutive_timeouts; /* timeouts since the last answer in time: the skip count */
     uint8_t stop_nrc_count; /* NRC 0x31/0x7E/0x7F reads of a never-answered unverified DID in
-                               this epoch; a positive answer clears it (D-068, D-075) */
-    uint8_t session_nrc_count; /* NRC 0x7E/0x7F reads of an unverified DID in this epoch; a
-                                  positive answer does not clear it (D-075 item 1 (f)) */
+                               this epoch since the re-ask; a positive answer clears it
+                               (D-068, D-075) */
+    uint8_t session_nrc_count; /* NRC 0x7E/0x7F reads of an unverified DID in this epoch since
+                                  the re-ask; a positive answer does not clear it (D-075
+                                  item 1 (f)) */
     bool requested;   /* last_request_ms is set */
     bool skipped;     /* in skip cooldown since skip_start_ms */
     bool slow;        /* last answer came more than poll_period_ms after its stamp (D-051) */

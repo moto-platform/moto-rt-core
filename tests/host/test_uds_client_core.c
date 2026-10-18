@@ -4172,16 +4172,19 @@ static void test_d075_session_requests_per_epoch_stay_within_four_per_unverified
 static void test_d075_the_f_stop_works_across_the_millis_wrap(void)
 {
     const uint32_t u = first_unverified();
-    const uint32_t t0 = 0xFFFFF000u;
+    /* the first counted refusal comes before the wrap, the second after it */
+    const uint32_t t0 = 0xFFFFF000u + 200u;
     bring_up(t0);
     drive(t0, t0 + 2000u);
     TEST_ASSERT_TRUE(c.did[u].answered);
     did_mode[u] = M_NRC7F;
     log_n = 0u;
     drive(t0 + 2000u, t0 + 40000u);
+    TEST_ASSERT_LESS_THAN_UINT32(LOG_MAX, log_n);
     TEST_ASSERT_TRUE(uds_client_core_did_stopped(&c, u));
     TEST_ASSERT_EQUAL(UDS_CLIENT_STOP_NRC_SESSION, uds_client_core_did_stop_reason(&c, u));
-    TEST_ASSERT_EQUAL_UINT32(2u, count_did_reads(u, 0u, UINT32_MAX));
+    TEST_ASSERT_EQUAL_UINT32(1u, count_did_reads(u, t0, UINT32_MAX));
+    TEST_ASSERT_EQUAL_UINT32(1u, count_did_reads(u, 0u, t0 + 40000u));
     TEST_ASSERT_EQUAL_UINT32(2u, stats()->session_losses);
 }
 
