@@ -269,6 +269,20 @@ static void test_REQ_FD03_the_unlearned_run_saturates_and_never_wraps(void)
     TEST_ASSERT_EQUAL_UINT16(0xFFFFu, lean_health_unlearned_s(&run, false, 0xFFFFFFFFu)); /* 49.7 days */
 }
 
+static void test_REQ_FD03_a_saturated_run_stays_saturated_beyond_the_ms_wrap_NIT_1(void)
+{
+    lean_health_run_t run = {0};
+    (void)lean_health_unlearned_s(&run, false, 0u);
+    TEST_ASSERT_EQUAL_UINT16(0xFFFFu, lean_health_unlearned_s(&run, false, 0xFFFFu * 1000u));
+    /* 2^32 ms later the 32-bit difference is small again: the latch holds */
+    TEST_ASSERT_EQUAL_UINT16(0xFFFFu, lean_health_unlearned_s(&run, false, 5000u));
+    TEST_ASSERT_EQUAL_UINT16(0xFFFFu, lean_health_unlearned_s(&run, false, 6000u));
+    /* only a new run clears it */
+    TEST_ASSERT_EQUAL_UINT16(0u, lean_health_unlearned_s(&run, true, 7000u));
+    TEST_ASSERT_EQUAL_UINT16(0u, lean_health_unlearned_s(&run, false, 8000u));
+    TEST_ASSERT_EQUAL_UINT16(1u, lean_health_unlearned_s(&run, false, 9000u));
+}
+
 static void test_REQ_FD03_the_unlearned_run_survives_the_timer_wrap(void)
 {
     lean_health_run_t run = {0};
@@ -332,6 +346,7 @@ int main(void)
     RUN_TEST(test_REQ_FD03_a_learnt_offset_reads_0_and_a_lost_one_starts_a_new_run);
     RUN_TEST(test_REQ_FD03_a_first_step_that_is_already_learnt_starts_no_run);
     RUN_TEST(test_REQ_FD03_the_unlearned_run_saturates_and_never_wraps);
+    RUN_TEST(test_REQ_FD03_a_saturated_run_stays_saturated_beyond_the_ms_wrap_NIT_1);
     RUN_TEST(test_REQ_FD03_the_unlearned_run_survives_the_timer_wrap);
     RUN_TEST(test_REQ_FD03_a_null_tracker_reads_0);
     RUN_TEST(test_REQ_FD03_the_service_starts_and_resets_to_no_record_and_no_flags);

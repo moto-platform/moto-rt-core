@@ -519,6 +519,20 @@ static void test_REQ_FD03_a_record_taken_by_another_reader_still_counts_as_publi
     TEST_ASSERT_NOT_EQUAL(0u, health_did[H_FLAGS] & PLATFORM_UDS_LEAN_HEALTH_RECORD_FRESH_MASK);
 }
 
+static void test_REQ_FD03_a_first_record_with_stamp_0_counts_through_the_new_flag(void)
+{
+    /* an EKF step at now 0 publishes stamp 0: only the read's "new" flag tells it */
+    const uint8_t wi = snapshot_write_index(&link.out_snap);
+    link.out_slots[wi].stamp_ms = 0u;
+    link.out_slots[wi].health.offset_learned = true;
+    snapshot_publish(&link.out_snap);
+    lean_tx_step(&tx, 100u);
+    TEST_ASSERT_TRUE(tx.have_record);
+    read_health_did(100u);
+    TEST_ASSERT_EQUAL_HEX8(PLATFORM_UDS_LEAN_HEALTH_RECORD_FRESH_MASK | PLATFORM_UDS_LEAN_HEALTH_OFFSET_LEARNED_MASK,
+                           health_did[H_FLAGS]);
+}
+
 static void test_REQ_FD03_opening_the_sender_resets_the_diagnostic_state(void)
 {
     stand();
@@ -581,6 +595,7 @@ int main(void)
     RUN_TEST(test_REQ_FD03_lean_tx_hands_the_comms_task_a_copy_of_the_record_it_read);
     RUN_TEST(test_REQ_FD03_the_boot_record_is_no_record_even_inside_the_window);
     RUN_TEST(test_REQ_FD03_a_record_taken_by_another_reader_still_counts_as_published);
+    RUN_TEST(test_REQ_FD03_a_first_record_with_stamp_0_counts_through_the_new_flag);
     RUN_TEST(test_REQ_FD03_opening_the_sender_resets_the_diagnostic_state);
     RUN_TEST(test_REQ_FD03_the_comms_side_latches_are_read_from_the_open_link);
     return UNITY_END();

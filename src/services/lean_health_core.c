@@ -45,12 +45,19 @@ uint16_t lean_health_unlearned_s(lean_health_run_t* run, bool learned, uint32_t 
         return 0u;
     }
     if (!run->started || run->learned) {
-        run->since_ms = now_ms; /* the first step, or a learnt offset was lost */
+        /* Anchored at the EKF's first published step, not at boot (the DID says "since
+         * boot"; kept, see the header), or a learnt offset was lost: a new run. */
+        run->since_ms = now_ms;
+        run->saturated = false;
     }
     run->started = true;
     run->learned = false;
-    return lean_health_sat16((now_ms - run->since_ms) / MS_PER_S,
-                             PLATFORM_UDS_LEAN_HEALTH_UNLEARNED_S_MAX);
+    const uint32_t secs = (now_ms - run->since_ms) / MS_PER_S;
+    if (secs >= PLATFORM_UDS_LEAN_HEALTH_UNLEARNED_S_MAX) {
+        run->saturated = true; /* sticky: the 32-bit ms difference wraps after 49.7 days */
+    }
+    return run->saturated ? (uint16_t)PLATFORM_UDS_LEAN_HEALTH_UNLEARNED_S_MAX
+                          : (uint16_t)secs; /* below the maximum here */
 }
 
 bool lean_health_record_fresh(const lean_health_rec_t* rec, uint32_t now_ms)

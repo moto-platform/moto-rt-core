@@ -24,6 +24,7 @@
  */
 
 #include "platform_uds.h"
+#include "services/lean_health_types.h"
 #include "vehicle_cl250.h"
 
 #include <stdbool.h>
@@ -38,13 +39,8 @@ extern "C" {
  * feature). */
 #define LEAN_HEALTH_FUTURE_MAX_MS (VEHICLE_CL250_CLIENT_STEP_MAX_MS)
 
-/* The EKF-side fields of the lean record (written by the EKF task each step). */
-typedef struct {
-    bool offset_learned;   /* services/imu holds a learnt gyro z offset */
-    bool offset_rejected;  /* the last learning window gave reason OFFSET_RANGE */
-    uint16_t reject_count; /* imu reject_count, saturated at the gen/ maximum */
-    uint16_t unlearned_s;  /* seconds of the current run without an offset, saturated */
-} lean_health_ekf_t;
+/* lean_health_ekf_t (the EKF-side fields of the lean record, written by the EKF task each
+ * step) lives in services/lean_health_types.h. */
 
 /* The comms task's copy of the last lean record (services/lean_health.h). The zero
  * state is "no record since boot". */
@@ -66,6 +62,7 @@ typedef struct {
 typedef struct {
     bool started;
     bool learned;       /* the offset was learnt at the last call */
+    bool saturated;     /* this run reached the maximum: latched until the run restarts */
     uint32_t since_ms;  /* start of the current run without a learnt offset */
 } lean_health_run_t;
 
@@ -73,9 +70,13 @@ typedef struct {
 uint16_t lean_health_sat16(uint32_t v, uint32_t max);
 
 /* EKF task, once per published step: whole seconds of the current run without a learnt
- * offset, saturating at the gen/ maximum; 0 while one is learnt. The run starts at the
- * first call (the EKF's first step, i.e. boot) and again whenever a learnt offset is
- * lost. A NULL tracker reads 0. */
+ * offset, saturating at the gen/ maximum (latched, so a run longer than the 2^32 ms
+ * timer wrap stays saturated); 0 while one is learnt. The run starts at the first call
+ * (the EKF's first published step) and again whenever a learnt offset is lost. A NULL
+ * tracker reads 0.
+ * Deviation from the DID text, kept on purpose (safety-reviewer MINOR-2): uds/dids.yaml
+ * says "since boot", this anchors at the EKF's first step, one EKF cycle or more later.
+ * Aligning the wording is a defs choice (ISSUES E-17). */
 uint16_t lean_health_unlearned_s(lean_health_run_t* run, bool learned, uint32_t now_ms);
 
 /* True when rec is a record the EKF published within the DID's window as of now_ms. */
