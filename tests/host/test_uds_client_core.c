@@ -3759,12 +3759,14 @@ static void test_d075_every_unverified_did_answering_0x7f_costs_two_session_requ
 /*
  * MINOR-4.1: how long the verified DIDs are dark while unverified DIDs answer NRC 0x7F, with
  * every request answered after the gen/ assumed round trip (also the session request).
- * all: every unverified DID, else the first one only.
+ * all: every unverified DID, else the first one only. refuse_from: until then the unverified
+ * DIDs answer too (so they are answered and only the (f) count stops them, round 3
+ * MINOR-2 (b)); the gaps are measured from then on. 0: they refuse from the start.
  */
-static void worst_verified_gaps_with_0x7f(bool all, uint32_t* worst)
+static void worst_verified_gaps_with_0x7f(bool all, uint32_t refuse_from, uint32_t* worst)
 {
     const uint32_t rtt = VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS;
-    const uint32_t end = 60000u;
+    const uint32_t end = refuse_from + 60000u;
     uint32_t last[VEHICLE_CL250_DID_COUNT] = {0};
     bool due = false;
     uint32_t due_t = 0u;
@@ -3773,10 +3775,18 @@ static void worst_verified_gaps_with_0x7f(bool all, uint32_t* worst)
     memset(worst, 0, VEHICLE_CL250_DID_COUNT * sizeof worst[0]);
     bring_up(0u);
     for (uint32_t t = 1u; t < end; t++) {
+        if (t == refuse_from) {
+            for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+                last[i] = t;
+                worst[i] = 0u;
+            }
+        }
         if (due && (t == due_t)) {
             due = false;
             if (due_k == K_SESSION) {
                 answer_session(t);
+            } else if (is_unverified(due_idx) && (t < refuse_from)) {
+                TEST_ASSERT_TRUE(answer_read(t, due_idx, 1u));
             } else if (is_unverified(due_idx)) {
                 nrc(t, UDS_SID_READ_DATA_BY_IDENTIFIER,
                     UDS_NRC_SERVICE_NOT_SUPPORTED_IN_ACTIVE_SESSION);
@@ -3818,9 +3828,9 @@ static void test_d075_verified_gaps_during_counted_0x7f_refusals_stay_within_sta
     };
     uint32_t one[VEHICLE_CL250_DID_COUNT];
     uint32_t all[VEHICLE_CL250_DID_COUNT];
-    worst_verified_gaps_with_0x7f(false, one);
+    worst_verified_gaps_with_0x7f(false, 0u, one);
     setUp();
-    worst_verified_gaps_with_0x7f(true, all);
+    worst_verified_gaps_with_0x7f(true, 0u, all);
     for (uint32_t n = 0u; n < (sizeof bounds / sizeof bounds[0]); n++) {
         const uint32_t i = bounds[n].idx;
         /* measured 140/140/230/840/860 ms (one DID) and 140/140/260/860/880 ms (all 35):
@@ -3976,6 +3986,205 @@ static void test_d075_a_refused_fast_session_request_waits_for_the_retry_interva
     }
 }
 
+/*
+ * Safety review round 3 on #42, MINOR-2 (a): a counted 0x7F on an unverified DID that has
+ * answered in this epoch ((f)) also asks for the session at the next step. The last
+ * session request is just before that read, so the retry interval would hold it ~2 s.
+ */
+static void test_d075_a_counted_0x7f_on_an_answered_did_requests_the_session_at_the_next_step(void)
+{
+    const uint32_t u = first_unverified();
+    bring_up(0u);
+    serve_until_read(0u, u);
+    TEST_ASSERT_TRUE(answer_read(0u, u, 1u));
+    TEST_ASSERT_TRUE(c.did[u].answered);
+    /* a refused verified read drops the session; it is asked again at the retry interval */
+    uint32_t t = 1u;
+    wait_for_read(&t, VEHICLE_CL250_IDX_ENGINE_SPEED);
+    nrc(t, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_SERVICE_NOT_SUPPORTED_IN_ACTIVE_SESSION);
+    TEST_ASSERT_EQUAL_UINT8(0u, c.did[VEHICLE_CL250_IDX_ENGINE_SPEED].session_nrc_count);
+    t++;
+    while (poll_skip_tp(t) != K_SESSION) {
+        t++;
+        TEST_ASSERT_LESS_THAN_UINT32(3000u, t);
+    }
+    const uint32_t s = t;
+    answer_session(s);
+    wait_for_read(&t, u);
+    TEST_ASSERT_LESS_THAN_UINT32(s + 100u, t);
+    nrc(t, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_SERVICE_NOT_SUPPORTED_IN_ACTIVE_SESSION);
+    TEST_ASSERT_EQUAL_UINT8(1u, c.did[u].session_nrc_count);
+    TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, u));
+    TEST_ASSERT_EQUAL(K_SESSION, poll_skip_tp(t + 1u));
+}
+
+/*
+ * Round 3 MINOR-2 (b): the verified gaps while answered unverified DIDs refuse every read
+ * ((f) is what stops them), round trip from gen/, one DID and all 35.
+ */
+static void test_d075_verified_gaps_while_answered_dids_refuse_with_0x7f_stay_within_stale_after(void)
+{
+    uint32_t one[VEHICLE_CL250_DID_COUNT];
+    uint32_t all[VEHICLE_CL250_DID_COUNT];
+    worst_verified_gaps_with_0x7f(false, 30000u, one);
+    setUp();
+    worst_verified_gaps_with_0x7f(true, 30000u, all);
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        if (is_unverified(i)) {
+            continue;
+        }
+        const uint32_t period = vehicle_cl250_dids[i].poll_period_ms;
+        TEST_ASSERT_LESS_OR_EQUAL_UINT32(period + (4u * VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS), one[i]);
+        TEST_ASSERT_LESS_OR_EQUAL_UINT32(period + (4u * VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS), all[i]);
+        TEST_ASSERT_LESS_OR_EQUAL_UINT32(vehicle_cl250_dids[i].stale_after_ms, one[i]);
+        TEST_ASSERT_LESS_OR_EQUAL_UINT32(vehicle_cl250_dids[i].stale_after_ms, all[i]);
+    }
+}
+
+/*
+ * Round 3 MINOR-1 and MINOR-2 (c): an answered DID with one counted 0x7F is not stopped,
+ * so before the fix the re-ask left its count at 1 and one later refusal stopped it. The
+ * re-ask clears the counts of every unverified DID: two refusals are needed again.
+ */
+static void test_d075_the_reask_clears_the_counts_of_a_did_that_is_not_stopped(void)
+{
+    const uint32_t u = first_unverified();
+    bring_up(0u);
+    drive(0u, 20000u);
+    TEST_ASSERT_TRUE(c.did[u].answered);
+    did_mode[u] = M_NRC7F;
+    uint32_t t = 20000u;
+    while (c.did[u].session_nrc_count == 0u) {
+        drive(t, t + 1u);
+        t++;
+        TEST_ASSERT_LESS_THAN_UINT32(60000u, t);
+    }
+    did_mode[u] = M_ANSWER;
+    TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, u));
+    drive(t, t + 1000u);
+    t += 1000u;
+    TEST_ASSERT_FALSE(c.engine_rearmed);
+    rpm_raw = 0u;
+    drive(t, t + 600u);
+    t += 600u;
+    rpm_raw = RPM_UP;
+    drive(t, t + 2000u);
+    t += 2000u;
+    TEST_ASSERT_TRUE(c.engine_rearmed);
+    TEST_ASSERT_EQUAL_UINT8(0u, c.did[u].session_nrc_count);
+    TEST_ASSERT_EQUAL_UINT8(0u, c.did[u].stop_nrc_count);
+    /* exactly two more refusals stop it */
+    did_mode[u] = M_NRC7F;
+    log_n = 0u;
+    const uint32_t t0 = t;
+    const uint32_t end = t + (3u * vehicle_cl250_dids[u].poll_period_ms) + 2000u;
+    while (!uds_client_core_did_stopped(&c, u) && (t < end)) {
+        drive(t, t + 1u);
+        t++;
+    }
+    TEST_ASSERT_TRUE(uds_client_core_did_stopped(&c, u));
+    TEST_ASSERT_EQUAL(UDS_CLIENT_STOP_NRC_SESSION, uds_client_core_did_stop_reason(&c, u));
+    TEST_ASSERT_EQUAL_UINT32(2u, count_did_reads(u, t0, t));
+}
+
+/*
+ * Round 3 MINOR-2 (c): with the 0x31 counted first, the re-ask clears both counts together,
+ * so a later stop by two 0x7F refusals has the reason NRC_SESSION, not NRC_31.
+ */
+static void test_d075_the_reask_keeps_the_stop_reason_precedence(void)
+{
+    const uint32_t u = first_unverified();
+    bring_up(0u);
+    rpm_raw = 0u;
+    did_mode[u] = M_NRC31;
+    uint32_t t = 0u;
+    while (c.did[u].stop_nrc_count == 0u) {
+        drive(t, t + 1u);
+        t++;
+        TEST_ASSERT_LESS_THAN_UINT32(60000u, t);
+    }
+    TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, u));
+    /* the engine starts before its next read (its period is far above two RPM periods) */
+    did_mode[u] = M_NRC7F;
+    rpm_raw = RPM_UP;
+    log_n = 0u;
+    const uint32_t t0 = t;
+    while (!c.engine_rearmed) {
+        drive(t, t + 1u);
+        t++;
+        TEST_ASSERT_LESS_THAN_UINT32(t0 + 2000u, t);
+    }
+    TEST_ASSERT_EQUAL_UINT32(0u, count_did_reads(u, t0, t));
+    TEST_ASSERT_EQUAL_UINT8(0u, c.did[u].stop_nrc_count);
+    TEST_ASSERT_EQUAL_UINT8(0u, c.did[u].session_nrc_count);
+    const uint32_t end = t + (3u * vehicle_cl250_dids[u].poll_period_ms) + 2000u;
+    while (!uds_client_core_did_stopped(&c, u) && (t < end)) {
+        drive(t, t + 1u);
+        t++;
+    }
+    TEST_ASSERT_EQUAL(UDS_CLIENT_STOP_NRC_SESSION, uds_client_core_did_stop_reason(&c, u));
+    TEST_ASSERT_EQUAL_UINT32(2u, count_did_reads(u, t0, t));
+}
+
+/* Round 3 MINOR-2 (d): a verified DID refusing every read with 0x7F for 60 s. */
+static void test_d075_a_verified_did_refusing_every_read_is_never_counted_or_stopped(void)
+{
+    bring_up(0u);
+    did_mode[VEHICLE_CL250_IDX_VEHICLE_SPEED] = M_NRC7F;
+    drive(0u, 60000u);
+    TEST_ASSERT_LESS_THAN_UINT32(LOG_MAX, log_n);
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        if (!is_unverified(i)) {
+            TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, i));
+            TEST_ASSERT_EQUAL_UINT8(0u, c.did[i].session_nrc_count);
+            TEST_ASSERT_EQUAL_UINT8(0u, c.did[i].stop_nrc_count);
+        }
+    }
+    /* never the fast path: at most one session request per retry interval */
+    TEST_ASSERT_LESS_OR_EQUAL_UINT32((60000u / VEHICLE_CL250_SESSION_RETRY_INTERVAL_MS) + 1u,
+                                     count_kind(K_SESSION, 0u, 60000u));
+}
+
+/*
+ * Round 3 test 5: the session-request ceiling of an epoch. Every unverified DID answered,
+ * then refuses every read, then the engine-start re-ask: four session requests per DID.
+ */
+static void test_d075_session_requests_per_epoch_stay_within_four_per_unverified_did(void)
+{
+    bring_up(0u);
+    drive(0u, 30000u);
+    set_mode_unverified(M_NRC7F);
+    log_n = 0u;
+    drive(30000u, 60000u);
+    TEST_ASSERT_EQUAL_UINT32(unverified_count(), stats()->did_stops);
+    rpm_raw = 0u;
+    drive(60000u, 61000u);
+    rpm_raw = RPM_UP;
+    drive(61000u, 90000u);
+    TEST_ASSERT_LESS_THAN_UINT32(LOG_MAX, log_n);
+    TEST_ASSERT_EQUAL_UINT32(unverified_count(), stats()->rearms);
+    TEST_ASSERT_EQUAL_UINT32(2u * unverified_count(), stats()->did_stops);
+    TEST_ASSERT_EQUAL_UINT32(4u * unverified_count(), stats()->session_losses);
+    TEST_ASSERT_LESS_OR_EQUAL_UINT32(4u * unverified_count(), count_kind(K_SESSION, 30000u, 90000u));
+}
+
+/* Round 3 test 6: the (f) stop of an answered DID across the millis wrap. */
+static void test_d075_the_f_stop_works_across_the_millis_wrap(void)
+{
+    const uint32_t u = first_unverified();
+    const uint32_t t0 = 0xFFFFF000u;
+    bring_up(t0);
+    drive(t0, t0 + 2000u);
+    TEST_ASSERT_TRUE(c.did[u].answered);
+    did_mode[u] = M_NRC7F;
+    log_n = 0u;
+    drive(t0 + 2000u, t0 + 40000u);
+    TEST_ASSERT_TRUE(uds_client_core_did_stopped(&c, u));
+    TEST_ASSERT_EQUAL(UDS_CLIENT_STOP_NRC_SESSION, uds_client_core_did_stop_reason(&c, u));
+    TEST_ASSERT_EQUAL_UINT32(2u, count_did_reads(u, 0u, UINT32_MAX));
+    TEST_ASSERT_EQUAL_UINT32(2u, stats()->session_losses);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -4106,6 +4315,13 @@ int main(void)
     RUN_TEST(test_d075_verified_gaps_during_counted_0x7f_refusals_stay_within_stale_after);
     RUN_TEST(test_d075_answered_unverified_dids_refusing_with_0x7f_are_stopped_by_their_own_count);
     RUN_TEST(test_d075_a_refused_fast_session_request_waits_for_the_retry_interval);
+    RUN_TEST(test_d075_a_counted_0x7f_on_an_answered_did_requests_the_session_at_the_next_step);
+    RUN_TEST(test_d075_verified_gaps_while_answered_dids_refuse_with_0x7f_stay_within_stale_after);
+    RUN_TEST(test_d075_the_reask_clears_the_counts_of_a_did_that_is_not_stopped);
+    RUN_TEST(test_d075_the_reask_keeps_the_stop_reason_precedence);
+    RUN_TEST(test_d075_a_verified_did_refusing_every_read_is_never_counted_or_stopped);
+    RUN_TEST(test_d075_session_requests_per_epoch_stay_within_four_per_unverified_did);
+    RUN_TEST(test_d075_the_f_stop_works_across_the_millis_wrap);
     RUN_TEST(test_d075_a_0x7f_did_in_the_quiet_window_is_not_counted_until_the_window_closes);
     return UNITY_END();
 }

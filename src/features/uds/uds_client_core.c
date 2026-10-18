@@ -63,17 +63,18 @@ static void start_request(uds_client_core_t* c, uds_client_req_kind_t kind, uint
     count(&c->stats.requests);
 }
 
-/*
- * D-068 item 2: the stop rule applies to an unverified DID that has had no positive
- * answer in this epoch. A verified DID, and one that has answered, keep the
- * D-050..D-053 skip and retry whatever the ECU says.
- */
 /* A DID is stopped while it has a stop reason (the state has no separate flag, D-075 size). */
 static bool is_stopped(const uds_client_did_state_t* d)
 {
     return d->stop_reason != UDS_CLIENT_STOP_NONE;
 }
 
+/*
+ * D-068 item 2: the 0x31, timeout and First Frame stop rule applies to an unverified DID
+ * that has had no positive answer in this epoch. A verified DID, and one that has
+ * answered, keep the D-050..D-053 skip and retry; D-075 item 1 (f) still stops an answered
+ * unverified DID after two NRC 0x7E/0x7F reads (on_negative()). Verified DIDs: never.
+ */
 static bool stoppable(const uds_client_core_t* c, uint32_t idx)
 {
     return !vehicle_cl250_dids[idx].verified && !c->did[idx].answered;
@@ -232,19 +233,25 @@ static void arm_unverified_reads(uds_client_core_t* c)
  * pollable again with the stop rule from zero. It keeps last_request_ms (and requested),
  * so it is due one poll_period_ms after its last request (not forced due: at once only if
  * that period has already passed), never faster than its tier: its tier rate
- * and the D-068 polling budget are not exceeded.
+ * and the D-068 polling budget are not exceeded. The NRC counts of every unverified DID,
+ * stopped or not, start from zero too (D-075 item 1 (f), safety review round 3 MINOR-1):
+ * a count left from before the engine start would stop it on one refusal. Both counts
+ * together, so `stop_nrc_count > session_nrc_count` still means "a 0x31 was counted".
  */
 static void rearm_stopped_reads(uds_client_core_t* c)
 {
     for (uint32_t idx = 0u; idx < VEHICLE_CL250_DID_COUNT; idx++) {
         uds_client_did_state_t* d = &c->did[idx];
+        if (vehicle_cl250_dids[idx].verified) {
+            continue; /* never counted, never stopped */
+        }
         if (is_stopped(d)) {
             d->stop_reason = UDS_CLIENT_STOP_NONE;
-            d->stop_nrc_count = 0u;
-            d->session_nrc_count = 0u;
             d->consecutive_timeouts = 0u;
             count(&c->stats.rearms);
         }
+        d->stop_nrc_count = 0u;
+        d->session_nrc_count = 0u;
     }
 }
 

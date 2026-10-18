@@ -63,9 +63,10 @@
  *     0x31 on two separate reads (not one in the quiet window after a read timeout),
  *     MAX_CONSECUTIVE_TIMEOUTS timeouts in a row, or a First Frame answer. A decoded answer
  *     marks it answered: from then on it, like every verified DID, keeps the skip/retry
- *     above. Other NRCs never stop a DID (D-075 item 1 (f): an answered unverified DID is stopped by two NRC 0x7E/0x7F reads, counted apart). NRC 0x7E/0x7F drop the session and, on a read of a
- *     never-answered unverified DID, count toward its stop like NRC 0x31 (D-075 (provisional)
- *     item 1).
+ *     above. Other NRCs never stop a DID (D-075 item 1 (f): an answered unverified
+ *     DID is stopped by two NRC 0x7E/0x7F reads, counted apart). NRC 0x7E/0x7F drop the
+ *     session and, on a read of a never-answered unverified DID, count toward its stop
+ *     like NRC 0x31 (D-075 (provisional) item 1).
  *   - Stop epoch (D-075 (provisional) item 1): the stop state and the engine-start flag
  *     belong to an epoch. It starts only at the tester's start and at the confirmation
  *     after the ECU was lost (ECU_ABSENT_TIMEOUT_MS); that confirmation arms every
@@ -130,7 +131,7 @@ typedef enum {
 /* Why an unverified DID is stopped (D-068 item 2, D-075), for the field and the bench. */
 typedef enum {
     UDS_CLIENT_STOP_NONE = 0,
-    UDS_CLIENT_STOP_NRC_31,      /* NRC 0x31 on two separate reads (with 0x7E/0x7F: the last) */
+    UDS_CLIENT_STOP_NRC_31,      /* NRC 0x31 on two separate reads, or a 0x31 and a 0x7E/0x7F */
     UDS_CLIENT_STOP_NRC_SESSION, /* NRC 0x7E/0x7F completed the count (D-075 item 1) */
     UDS_CLIENT_STOP_TIMEOUTS,    /* MAX_CONSECUTIVE_TIMEOUTS timeouts in a row */
     UDS_CLIENT_STOP_FIRST_FRAME  /* a First Frame answer, a withheld FC or a failed reception */
