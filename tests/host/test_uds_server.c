@@ -19,6 +19,7 @@
 #include "services/can_if.h"
 #include "services/can_sm.h"
 #include "services/diag.h"
+#include "services/lean_health.h"
 #include "services/timebase.h"
 #include "services/vehicle_signals.h"
 #include "uds_iso14229.h"
@@ -96,6 +97,7 @@ void setUp(void)
     can_if_init();
     diag_init(timebase_now_ms());
     vehicle_signals_init();
+    lean_health_init();
     memset(&server, 0, sizeof server);
     TEST_ASSERT_EQUAL(ISOTP_OK, uds_server_open(&server));
     tester_init();
@@ -1386,6 +1388,45 @@ static void test_a_latched_client_still_writes_fresh_step_counters(void)
     TEST_ASSERT_EQUAL_HEX8(0u, (uint8_t)(got[H(VEHICLE_LATCHED)] & LATCH_BIT)); /* client, not port */
 }
 
+/* ------------------------------------------------------------------ 0xFD03 lean health */
+
+#define LH(f) (3u + PLATFORM_UDS_LEAN_HEALTH_##f##_BYTE) /* field offset in got[] */
+
+static void test_lean_health_did_is_served_from_the_comms_task_copy_in_the_default_session(void)
+{
+    /* no record since boot and no flag: not fresh, UNLEARNED_S unknown, nothing else */
+    TEST_ASSERT_TRUE(read_did(PLATFORM_UDS_DID_LEAN_HEALTH));
+    TEST_ASSERT_EQUAL_UINT16(3u + PLATFORM_UDS_DID_LEAN_HEALTH_LENGTH, got_len);
+    TEST_ASSERT_EQUAL_HEX8(0u, got[LH(RECORD_FRESH)]);
+    TEST_ASSERT_EQUAL_UINT16(PLATFORM_UDS_LEAN_HEALTH_UNLEARNED_S_UNKNOWN, be16_at(LH(UNLEARNED_S)));
+    /* a fresh record and the comms flags */
+    lean_health_rec_t r = {true, timebase_now_ms(), {true, true, 0x0102u, 0x0304u}, true};
+    const lean_health_comms_t c = {true, true, true};
+    lean_health_set_record(&r);
+    lean_health_set_comms(&c);
+    TEST_ASSERT_TRUE(read_did(PLATFORM_UDS_DID_LEAN_HEALTH));
+    TEST_ASSERT_EQUAL_HEX8(PLATFORM_UDS_LEAN_HEALTH_RECORD_FRESH_MASK | PLATFORM_UDS_LEAN_HEALTH_OFFSET_LEARNED_MASK |
+                               PLATFORM_UDS_LEAN_HEALTH_OFFSET_REJECTED_MASK |
+                               PLATFORM_UDS_LEAN_HEALTH_SPEED_PRODUCER_FAULT_MASK |
+                               PLATFORM_UDS_LEAN_HEALTH_OUTPUT_CONSUMER_FAULT_MASK |
+                               PLATFORM_UDS_LEAN_HEALTH_SPEED_CONSUMER_FAULT_MASK |
+                               PLATFORM_UDS_LEAN_HEALTH_EKF_ALIVE_OK_MASK,
+                           got[LH(RECORD_FRESH)]);
+    TEST_ASSERT_EQUAL_UINT16(0x0102u, be16_at(LH(OFFSET_REJECTS)));
+    TEST_ASSERT_EQUAL_UINT16(0x0304u, be16_at(LH(UNLEARNED_S)));
+    /* the record ages out while the request waits: read at request time, not at the copy */
+    pump(PLATFORM_UDS_LEAN_HEALTH_MAX_AGE_MS + 1u);
+    TEST_ASSERT_TRUE(read_did(PLATFORM_UDS_DID_LEAN_HEALTH));
+    TEST_ASSERT_EQUAL_HEX8(PLATFORM_UDS_LEAN_HEALTH_OFFSET_REJECTED_MASK |
+                               PLATFORM_UDS_LEAN_HEALTH_SPEED_PRODUCER_FAULT_MASK |
+                               PLATFORM_UDS_LEAN_HEALTH_OUTPUT_CONSUMER_FAULT_MASK |
+                               PLATFORM_UDS_LEAN_HEALTH_SPEED_CONSUMER_FAULT_MASK |
+                               PLATFORM_UDS_LEAN_HEALTH_EKF_ALIVE_OK_MASK,
+                           got[LH(RECORD_FRESH)]);
+    TEST_ASSERT_EQUAL_UINT16(PLATFORM_UDS_LEAN_HEALTH_UNLEARNED_S_UNKNOWN, be16_at(LH(UNLEARNED_S)));
+    TEST_ASSERT_EQUAL_UINT16(0x0102u, be16_at(LH(OFFSET_REJECTS)));
+}
+
 static void test_four_health_reads_make_the_longest_segmented_answer(void)
 {
     sm_on = true;
@@ -1417,6 +1458,7 @@ int main(void)
     RUN_TEST(test_error_passive_and_bus_off_ports_are_reported_and_the_platform_still_answers);
     RUN_TEST(test_port_counters_above_0xffff_read_0xffff_and_the_burst_latches_the_vehicle);
     RUN_TEST(test_a_latched_client_still_writes_fresh_step_counters);
+    RUN_TEST(test_lean_health_did_is_served_from_the_comms_task_copy_in_the_default_session);
     RUN_TEST(test_four_health_reads_make_the_longest_segmented_answer);
     RUN_TEST(test_getters_and_step_are_safe_for_null_and_unopened_servers);
     RUN_TEST(test_a_full_receiver_table_fails_open_and_leaves_the_server_closed);

@@ -50,6 +50,7 @@ moto_host_test(test_comms_ekf moto_rtcore_fw moto_rtcore_sim moto_rtcore_hal_hos
 moto_host_test(test_lean_core)
 moto_host_test(test_imu_core)
 moto_host_test(test_lean_tx_core)
+moto_host_test(test_lean_health_core moto_rtcore_fw)
 moto_host_test(test_lean moto_rtcore_fw moto_rtcore_hal_host)
 moto_host_test(test_comms_lean moto_rtcore_fw moto_rtcore_sim moto_rtcore_hal_host)
 

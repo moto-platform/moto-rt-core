@@ -4,6 +4,7 @@
 #include "services/can_if.h"
 #include "services/can_sm.h"
 #include "services/diag.h"
+#include "services/lean_health.h"
 #include "services/timebase.h"
 #include "services/vehicle_signals.h"
 #include "uds_iso14229.h"
@@ -261,6 +262,10 @@ static uds_server_data_t provider_read_did(const void* ctx, uint32_t idx, uint8_
         break;
     case PLATFORM_UDS_IDX_RT_CORE_HEALTH:
         st = read_health(out, len, now);
+        break;
+    case PLATFORM_UDS_IDX_LEAN_HEALTH:
+        /* refuses a length that differs from gen/ rather than guess */
+        st = lean_health_read(now, out, len) ? UDS_SERVER_DATA_OK : UDS_SERVER_DATA_FAIL;
         break;
     case PLATFORM_UDS_IDX_UPTIME:
         put_be(out, len, timebase_elapsed_ms(now, server->open_ms) / MS_PER_S);
