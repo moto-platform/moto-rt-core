@@ -44,7 +44,7 @@ CMake + STM32CubeMX (HAL) + arm-none-eabi-gcc (D-007). RTOS: FreeRTOS/CMSIS-RTOS
 - `cubemx/` is generated code — only write into `USER CODE` blocks.
 - Pure logic (EKF, ISO-TP, UDS state machine, E2E, dyno) is written without a HAL dependency and tested under `tests/host/` with Unity. This plus Renode is the path forward while there's no H7 hardware.
 - Skeleton: `/repo-bootstrap`; new feature: `/feature-module`.
-- Commands (CMake >= 3.20 + Ninja; `git submodule update --init` first, defs pinned to `v0.14.0`):
+- Commands (CMake >= 3.20 + Ninja; `git submodule update --init` first, defs pinned to `v0.15.0`):
   - `cmake --preset host-tests && cmake --build --preset host-tests && ctest --preset host-tests` (Unity, ASan + UBSan, plus the 2 s SIL smoke run and the `--uds-scenario` UDS server run)
   - `cmake --preset host-tsan && cmake --build --preset host-tsan && ctest --preset host-tsan` (ThreadSanitizer: the snapshot/alive/IMU tests, including the two-thread stress tests of the snapshot and of the lean link)
   - SIL program (D-034): `build/host-tests/src/moto_rtcore_host` (in-process bus + simulated CL250 ECU); on Linux `--vcan vcan0`
@@ -83,4 +83,4 @@ CMake + STM32CubeMX (HAL) + arm-none-eabi-gcc (D-007). RTOS: FreeRTOS/CMSIS-RTOS
 
 ## Context
 
-Full architecture: `../moto-vehicle-defs/docs/ARCHITECTURE.md` (summary) · detail: `../moto-vehicle-defs/docs/hardware-architecture.md` (section index in `docs/README.md`) section 2-5 (general), section 5b (subsystems — except blind spot, which is in `moto-io-node`), section 8 (rationale for repo separation).
+Full architecture: `../moto-vehicle-defs/docs/ARCHITECTURE.md` (summary) · detail: `../moto-vehicle-defs/docs/hardware-architecture.md` (section index in `docs/README.md`) section 2-5 (general), section 5b (subsystems — except blind spot, which is in `moto-safety-node`, D-072), section 8 (rationale for repo separation).
