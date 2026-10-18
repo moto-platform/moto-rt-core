@@ -4,7 +4,7 @@
 
 ## What this repo is
 
-The main domain controller firmware running on **STM32H7**. CAN read/write, telemetry collection, logging, sensor fusion, UDS/ISO-TP/bootloader, XCP calibration, cornering safety EKF estimation, context classification, virtual dyno computation, the anomaly score's ESP safety-net rules (see below) — all of it lives here, as separate modules under `features/`.
+The main domain controller firmware running on the **Cortex-M7 core of the STM32H755** (NUCLEO-H755ZI-Q, D-072); the Cortex-M4 of the same chip is the safety partition (`moto-safety-node`), reached only through an E2E-checked inter-core mailbox, and rt-core never drives the LED ring or the mirror LEDs (D-041). Power management and park mode (from the retired io-node) also live here. CAN read/write, telemetry collection, logging, sensor fusion, UDS/ISO-TP/bootloader, XCP calibration, cornering safety EKF estimation, context classification, virtual dyno computation, the anomaly score's ESP safety-net rules (see below) — all of it lives here, as separate modules under `features/`.
 
 ## Directory structure (layered architecture — do not mix)
 
@@ -40,7 +40,7 @@ Reads signal/UDS definitions from `moto-vehicle-defs` (submodule: `external/moto
 
 ## Build
 
-CMake + STM32CubeMX (HAL) + arm-none-eabi-gcc (D-007). RTOS: FreeRTOS/CMSIS-RTOS2 (D-012). Target: STM32H7 (H743/H723 family).
+CMake + STM32CubeMX (HAL) + arm-none-eabi-gcc (D-007). RTOS: FreeRTOS/CMSIS-RTOS2 (D-012). Target: STM32H755 Cortex-M7 (D-072; flash bank 1, the M4 owns bank 2).
 - `cubemx/` is generated code — only write into `USER CODE` blocks.
 - Pure logic (EKF, ISO-TP, UDS state machine, E2E, dyno) is written without a HAL dependency and tested under `tests/host/` with Unity. This plus Renode is the path forward while there's no H7 hardware.
 - Skeleton: `/repo-bootstrap`; new feature: `/feature-module`.
@@ -49,7 +49,7 @@ CMake + STM32CubeMX (HAL) + arm-none-eabi-gcc (D-007). RTOS: FreeRTOS/CMSIS-RTOS
   - `cmake --preset host-tsan && cmake --build --preset host-tsan && ctest --preset host-tsan` (ThreadSanitizer: the snapshot/alive/IMU tests, including the two-thread stress tests of the snapshot and of the lean link)
   - SIL program (D-034): `build/host-tests/src/moto_rtcore_host` (in-process bus + simulated CL250 ECU); on Linux `--vcan vcan0`
   - `cmake --preset target-m7-debug && cmake --build --preset target-m7-debug` (also `target-m7-release`); `-DARM_TOOLCHAIN_DIR=...` if `arm-none-eabi-gcc` is not on PATH
-- The target presets cross-compile only the pure logic (`moto_rtcore_logic`) for Cortex-M7 (flags shared by H743/H723). The board choice decides the CubeMX project (`cubemx/<board>.ioc`), startup and linker script; do not guess it.
+- The target presets cross-compile only the pure logic (`moto_rtcore_logic`) for Cortex-M7 (flags shared by the H7 Cortex-M7 parts). The board is the NUCLEO-H755ZI-Q (D-072): the dual-core CubeMX project, startup, linker script, MPU, clock and option-byte init follow D-072 item 4 and are red-zone, invariant-8 code.
 - Current modules and layers:
   - `features/uds/isotp_core` (ISO-TP, Ç2)
   - `features/uds/isotp_link`: the core on a port + ID pair. `isotp_link_open_vehicle_cl250()` is the only vehicle-port link and takes its IDs and padding from gen/.
