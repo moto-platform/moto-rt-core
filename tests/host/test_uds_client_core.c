@@ -2617,11 +2617,11 @@ static void test_d068_one_nrc31_does_not_stop_and_a_positive_answer_ends_the_rul
     did_mode[u] = M_NRC31;
     drive(0u, 1u);
     TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, u));
-    TEST_ASSERT_EQUAL_UINT8(1u, c.did[u].refusal_count);
+    TEST_ASSERT_EQUAL_UINT8(1u, c.did[u].stop_nrc_count);
     did_mode[u] = M_ANSWER; /* the ECU serves it after all (e.g. the other response ID) */
     drive(1u, period + 1u);
     TEST_ASSERT_TRUE(c.did[u].answered);
-    TEST_ASSERT_EQUAL_UINT8(0u, c.did[u].refusal_count);
+    TEST_ASSERT_EQUAL_UINT8(0u, c.did[u].stop_nrc_count);
     /* From now on NRC 0x31 never stops it: it keeps the D-050..D-053 behaviour. */
     did_mode[u] = M_NRC31;
     drive(period + 1u, (5u * period) + 1u);
@@ -2645,10 +2645,10 @@ static void test_d068_nrc31_in_the_quiet_window_after_a_timeout_does_not_count(v
     /* a timed out at base; u was read right after it, inside the quiet window: its NRC may
      * be a's answer, so it does not count. */
     TEST_ASSERT_EQUAL_UINT32(1u, stats()->timeouts);
-    TEST_ASSERT_EQUAL_UINT8(0u, c.did[u].refusal_count);
+    TEST_ASSERT_EQUAL_UINT8(0u, c.did[u].stop_nrc_count);
     silent_mask = 0u;
     drive(base + 1u, base + quiet + 1u); /* both are due at base + period, window over */
-    TEST_ASSERT_EQUAL_UINT8(1u, c.did[u].refusal_count);
+    TEST_ASSERT_EQUAL_UINT8(1u, c.did[u].stop_nrc_count);
     TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, u));
     drive(base + quiet + 1u, base + quiet + period + 1u);
     TEST_ASSERT_TRUE(uds_client_core_did_stopped(&c, u));
@@ -2872,7 +2872,7 @@ static void test_d068_confirmation_after_ecu_absence_rearms_every_unverified_did
     for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
         if (is_unverified(i)) {
             TEST_ASSERT_EQUAL_UINT32(1u, count_did_reads(i, t, t + 1u));
-            TEST_ASSERT_EQUAL_UINT8(1u, c.did[i].refusal_count);
+            TEST_ASSERT_EQUAL_UINT8(1u, c.did[i].stop_nrc_count);
         }
     }
 }
@@ -3068,10 +3068,10 @@ static void test_d068_quiet_window_is_wrap_safe(void)
     silent_mask = did_bit(a);
     did_mode[u] = M_NRC31;
     drive(o, o + base + 1u);
-    TEST_ASSERT_EQUAL_UINT8(0u, c.did[u].refusal_count);
+    TEST_ASSERT_EQUAL_UINT8(0u, c.did[u].stop_nrc_count);
     silent_mask = 0u;
     drive(o + base + 1u, o + base + quiet + 1u);
-    TEST_ASSERT_EQUAL_UINT8(1u, c.did[u].refusal_count);
+    TEST_ASSERT_EQUAL_UINT8(1u, c.did[u].stop_nrc_count);
     drive(o + base + quiet + 1u, o + base + quiet + period + 1u);
     TEST_ASSERT_TRUE(uds_client_core_did_stopped(&c, u));
 }
@@ -3431,7 +3431,7 @@ static void test_d075_one_nrc_0x7e_does_not_stop_and_the_quiet_window_does_not_c
     serve_until_read(0u, u);
     nrc(0u, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_SUBFUNCTION_NOT_SUPPORTED_IN_ACTIVE_SESSION);
     TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, u));
-    TEST_ASSERT_EQUAL_UINT8(1u, c.did[u].refusal_count);
+    TEST_ASSERT_EQUAL_UINT8(1u, c.did[u].stop_nrc_count);
     /* a read that timed out opens the quiet window: an NRC inside it is not counted */
     setUp();
     bring_up(0u);
@@ -3441,7 +3441,7 @@ static void test_d075_one_nrc_0x7e_does_not_stop_and_the_quiet_window_does_not_c
     nrc(VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS + 1u, UDS_SID_READ_DATA_BY_IDENTIFIER,
         UDS_NRC_SERVICE_NOT_SUPPORTED_IN_ACTIVE_SESSION);
     for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
-        TEST_ASSERT_EQUAL_UINT8(0u, c.did[i].refusal_count);
+        TEST_ASSERT_EQUAL_UINT8(0u, c.did[i].stop_nrc_count);
     }
     TEST_ASSERT_EQUAL_UINT32(0u, stopped_count());
     /* a verified DID, or one that answered, is never stopped by it */
@@ -3449,7 +3449,7 @@ static void test_d075_one_nrc_0x7e_does_not_stop_and_the_quiet_window_does_not_c
     bring_up(0u);
     serve_until_read(0u, VEHICLE_CL250_IDX_VEHICLE_SPEED);
     nrc(0u, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_SERVICE_NOT_SUPPORTED_IN_ACTIVE_SESSION);
-    TEST_ASSERT_EQUAL_UINT8(0u, c.did[VEHICLE_CL250_IDX_VEHICLE_SPEED].refusal_count);
+    TEST_ASSERT_EQUAL_UINT8(0u, c.did[VEHICLE_CL250_IDX_VEHICLE_SPEED].stop_nrc_count);
     TEST_ASSERT_EQUAL_UINT32(0u, stats()->did_stops);
 }
 
@@ -3480,7 +3480,7 @@ static void test_d075_ecu_loss_starts_a_new_epoch_with_every_unverified_did_due_
     }
     t--; /* the ms of the confirmation */
     TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, u));
-    TEST_ASSERT_EQUAL_UINT8(1u, c.did[u].refusal_count); /* the stop rule starts from zero */
+    TEST_ASSERT_EQUAL_UINT8(1u, c.did[u].stop_nrc_count); /* the stop rule starts from zero */
     for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
         if (is_unverified(i)) {
             TEST_ASSERT_EQUAL_UINT32(1u, count_did_reads(i, t, t + 1u)); /* all due at once */
@@ -3530,7 +3530,7 @@ static void test_d075_a_positive_answer_undoes_the_stop(void)
     drive(stop_t, stop_t + 3000u);
     TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, u));
     TEST_ASSERT_TRUE(c.did[u].answered);
-    TEST_ASSERT_EQUAL_UINT8(0u, c.did[u].refusal_count);
+    TEST_ASSERT_EQUAL_UINT8(0u, c.did[u].stop_nrc_count);
     /* answered: NRC 0x7F no longer stops it */
     did_mode[u] = M_NRC7F;
     drive(stop_t + 3000u, stop_t + 13000u);
@@ -3613,7 +3613,7 @@ static void test_d075_only_a_counted_nrc_0x7f_requests_the_session_at_the_next_s
     bring_up(0u);
     serve_until_read(100u, u);
     nrc(100u, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_SERVICE_NOT_SUPPORTED_IN_ACTIVE_SESSION);
-    TEST_ASSERT_EQUAL_UINT8(1u, c.did[u].refusal_count);
+    TEST_ASSERT_EQUAL_UINT8(1u, c.did[u].stop_nrc_count);
     TEST_ASSERT_EQUAL(K_SESSION, poll_skip_tp(101u));
     /* 0x7F on a verified DID: the 2000 ms retry */
     setUp();
