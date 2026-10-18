@@ -12,7 +12,7 @@ rt-core's cornering **Layer 2 only**: estimates that feed safety-node's cornerin
 | (3a) | `hal/imu.h`, `services/imu` + `imu_core` (interval-mean rates, z offset at standstill), host IMU fake (user split PR 3, 2026-10-10) | done (rt-core#29) |
 | (3b) | glue `lean.c/.h` (EKF task, alive bump, snapshots), 0x020 send driven by `app/comms` with the output clamp (`lean_tx`, `lean_tx_core`), defs bump to v0.9.0, SIL IMU feed | done (rt-core#30) |
 | (b) | two-thread `test_lean_link_stress` (E-17 (b), D-067) | done (rt-core#31) |
-| (a) | DID 0xFD03 `LEAN_HEALTH` (E-17 (a), D-067), defs v0.14.0: EKF-side health fields in the lean record, `services/lean_health`, second-reader rule in `services/snapshot.h` | this PR (draft, stacked on rt-core#34 ← #33) |
+| (a) | DID 0xFD03 `LEAN_HEALTH` (E-17 (a), D-067), defs v0.14.0: EKF-side health fields in the lean record, `services/lean_health`, second-reader rule in `services/snapshot.h` | rt-core#37, landed on main by rt-core#39 |
 
 Other code includes `lean.h` (EKF task) and `lean_tx.h` (comms task), never `lean_core.h` directly: `lean.h` includes it for the payload types (`lean_speed_t`, `lean_out_t`).
 
