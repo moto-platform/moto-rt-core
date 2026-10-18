@@ -282,6 +282,25 @@ static void test_sil_ecu_off_goes_absent_and_stale_then_recovers(void)
     run(VEHICLE_CL250_SESSION_RETRY_INTERVAL_MS + 200u, false);
     TEST_ASSERT_TRUE(uds_client_session_up(&client));
     TEST_ASSERT_TRUE(uds_client_ecu_present(&client));
+    /* The five verified DIDs are back at once; the unverified ones were armed by the new
+     * session (D-068 item 2) and are all read again within a few ms. A read that was
+     * pending when the ECU went absent and timed out just after it keeps its old stamp
+     * until its next answer (conservative: the sample reads older, never younger), so
+     * "every DID valid" is checked after the slowest poll period. */
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        if (vehicle_cl250_dids[i].verified) {
+            vehicle_signal_sample_t s;
+            TEST_ASSERT_TRUE(vehicle_signals_get(i, timebase_now_ms(), &s));
+            TEST_ASSERT_EQUAL(VEHICLE_SIGNAL_VALID, s.state);
+        }
+    }
+    uint32_t max_period = 0u;
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        if (vehicle_cl250_dids[i].poll_period_ms > max_period) {
+            max_period = vehicle_cl250_dids[i].poll_period_ms;
+        }
+    }
+    run(max_period + 200u, false);
     TEST_ASSERT_TRUE(all_valid(timebase_now_ms()));
     TEST_ASSERT_EQUAL_UINT32(1u, uds_client_stats(&client)->session_losses);
     TEST_ASSERT_GREATER_THAN_UINT32(off, absent_from);
