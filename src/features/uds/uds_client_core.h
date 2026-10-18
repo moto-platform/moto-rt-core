@@ -63,7 +63,7 @@
  *     0x31 on two separate reads (not one in the quiet window after a read timeout),
  *     MAX_CONSECUTIVE_TIMEOUTS timeouts in a row, or a First Frame answer. A decoded answer
  *     marks it answered: from then on it, like every verified DID, keeps the skip/retry
- *     above. Other NRCs never stop a DID. NRC 0x7E/0x7F drop the session and, on a read of a
+ *     above. Other NRCs never stop a DID (D-075 item 1 (f): an answered unverified DID is stopped by two NRC 0x7E/0x7F reads, counted apart). NRC 0x7E/0x7F drop the session and, on a read of a
  *     never-answered unverified DID, count toward its stop like NRC 0x31 (D-075 (provisional)
  *     item 1).
  *   - Stop epoch (D-075 (provisional) item 1): the stop state and the engine-start flag
@@ -140,16 +140,23 @@ typedef struct {
     uint32_t last_request_ms; /* start of the poll period: last request, or its timeout */
     uint32_t skip_start_ms;
     uint32_t unanswered_ms; /* send time of the first timed-out read since the last answer */
+    /* Placed after the three uint32_t fields so the state is 24 B whether the compiler
+     * makes enums 1 B (arm-none-eabi-gcc short enums) or 4 B (host); asserted below. */
+    uds_client_stop_reason_t stop_reason; /* NONE: not stopped (D-068 item 2, never due) */
     uint8_t consecutive_timeouts; /* timeouts since the last answer in time: the skip count */
+    uint8_t stop_nrc_count; /* NRC 0x31/0x7E/0x7F reads of a never-answered unverified DID in
+                               this epoch; a positive answer clears it (D-068, D-075) */
+    uint8_t session_nrc_count; /* NRC 0x7E/0x7F reads of an unverified DID in this epoch; a
+                                  positive answer does not clear it (D-075 item 1 (f)) */
     bool requested;   /* last_request_ms is set */
     bool skipped;     /* in skip cooldown since skip_start_ms */
     bool slow;        /* last answer came more than poll_period_ms after its stamp (D-051) */
     bool unanswered;  /* a timed-out read is unanswered: unanswered_ms is the stamp (D-051) */
-    uint8_t stop_nrc_count; /* NRC 0x31/0x7E/0x7F reads in this epoch (unverified, D-068, D-075) */
-    uds_client_stop_reason_t stop_reason; /* why the DID is stopped (NONE while it is not) */
     bool answered;    /* a positive answer in this epoch: the stop rule no longer applies */
-    bool stopped;     /* unverified DID the ECU does not seem to serve: never due (D-068 item 2) */
 } uds_client_did_state_t;
+
+_Static_assert(sizeof(uds_client_did_state_t) <= 24u,
+               "the per-DID state must stay 24 B with 1 B and with 4 B enums");
 
 /* Diagnostic counters (saturating). */
 typedef struct {

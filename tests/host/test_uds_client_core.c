@@ -3531,11 +3531,16 @@ static void test_d075_a_positive_answer_undoes_the_stop(void)
     TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, u));
     TEST_ASSERT_TRUE(c.did[u].answered);
     TEST_ASSERT_EQUAL_UINT8(0u, c.did[u].stop_nrc_count);
-    /* answered: NRC 0x7F no longer stops it */
-    did_mode[u] = M_NRC7F;
+    /* answered: NRC 0x31 no longer stops it; NRC 0x7F stops it by its own count (item 1 (f)) */
+    did_mode[u] = M_NRC31;
     drive(stop_t + 3000u, stop_t + 13000u);
     TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, u));
     TEST_ASSERT_EQUAL_UINT32(1u, stats()->did_stops);
+    did_mode[u] = M_NRC7F;
+    drive(stop_t + 13000u, stop_t + 33000u);
+    TEST_ASSERT_TRUE(uds_client_core_did_stopped(&c, u));
+    TEST_ASSERT_EQUAL(UDS_CLIENT_STOP_NRC_SESSION, uds_client_core_did_stop_reason(&c, u));
+    TEST_ASSERT_EQUAL_UINT32(2u, stats()->did_stops);
 }
 
 /*
@@ -3623,24 +3628,17 @@ static void test_d075_only_a_counted_nrc_0x7f_requests_the_session_at_the_next_s
     TEST_ASSERT_EQUAL(K_NONE, poll_skip_tp(101u));
     TEST_ASSERT_EQUAL(K_NONE, poll_skip_tp(VEHICLE_CL250_SESSION_RETRY_INTERVAL_MS - 1u));
     TEST_ASSERT_EQUAL(K_SESSION, poll_skip_tp(VEHICLE_CL250_SESSION_RETRY_INTERVAL_MS));
-    /* an answered unverified DID is not counted: the retry interval */
-    setUp();
-    bring_up(0u);
-    serve_until_read(0u, u);
-    TEST_ASSERT_TRUE(answer_read(0u, u, 1u));
-    serve_until_read(vehicle_cl250_dids[u].poll_period_ms, u);
-    nrc(vehicle_cl250_dids[u].poll_period_ms, UDS_SID_READ_DATA_BY_IDENTIFIER,
-        UDS_NRC_SERVICE_NOT_SUPPORTED_IN_ACTIVE_SESSION);
-    TEST_ASSERT_TRUE(c.session_tried); /* not reset: the retry interval applies */
-    /* a refusal inside the quiet window is not counted either */
+    /* a refusal inside the quiet window is not counted: the retry counts from the last
+     * session request (at 0), so nothing goes out until 0 + SESSION_RETRY_INTERVAL_MS */
     setUp();
     bring_up(0u);
     serve_until_read(0u, u);
     (void)poll_skip_tp(VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS + 1u);
     nrc(VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS + 1u, UDS_SID_READ_DATA_BY_IDENTIFIER,
         UDS_NRC_SERVICE_NOT_SUPPORTED_IN_ACTIVE_SESSION);
-    TEST_ASSERT_TRUE(c.session_tried);
     TEST_ASSERT_EQUAL(K_NONE, poll_skip_tp(VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS + 2u));
+    TEST_ASSERT_EQUAL(K_NONE, poll_skip_tp(VEHICLE_CL250_SESSION_RETRY_INTERVAL_MS - 1u));
+    TEST_ASSERT_EQUAL(K_SESSION, poll_skip_tp(VEHICLE_CL250_SESSION_RETRY_INTERVAL_MS));
 }
 
 /* MAJOR-2: zero at key-on, a short ECU reset seen as 0x7F, then the engine starts: re-ask. */
@@ -3686,8 +3684,8 @@ static void test_d075_one_nrc_0x31_and_one_nrc_0x7f_stop_in_either_order(void)
         wait_for_read(&t, u);
         nrc(t, UDS_SID_READ_DATA_BY_IDENTIFIER, first[1u - order]);
         TEST_ASSERT_TRUE(uds_client_core_did_stopped(&c, u));
-        TEST_ASSERT_EQUAL(order == 0u ? UDS_CLIENT_STOP_NRC_SESSION : UDS_CLIENT_STOP_NRC_31,
-                          uds_client_core_did_stop_reason(&c, u));
+        /* once a 0x31 was counted the reason stays 0x31, whatever the order (item 1 (f)) */
+        TEST_ASSERT_EQUAL(UDS_CLIENT_STOP_NRC_31, uds_client_core_did_stop_reason(&c, u));
     }
     /* the other stop reasons */
     setUp();
@@ -3713,9 +3711,15 @@ static void test_d075_nrc_0x7f_for_tester_present_keeps_the_epoch_and_counts_not
     nrc(10001u, VEHICLE_CL250_TESTER_PRESENT_SID, UDS_NRC_SERVICE_NOT_SUPPORTED_IN_ACTIVE_SESSION);
     TEST_ASSERT_FALSE(uds_client_core_session_up(&c));
     TEST_ASSERT_EQUAL_UINT32(1u, stats()->session_losses);
-    TEST_ASSERT_TRUE(c.session_tried); /* not reset: the retry interval applies */
     TEST_ASSERT_EQUAL(K_SESSION, poll_skip_tp(10002u)); /* the last attempt is long past */
     answer_session(10002u);
+    /* a second loss soon after that attempt waits for the retry interval, counted from it */
+    nrc(10500u, VEHICLE_CL250_TESTER_PRESENT_SID, UDS_NRC_SERVICE_NOT_SUPPORTED_IN_ACTIVE_SESSION);
+    TEST_ASSERT_EQUAL(K_NONE, poll_skip_tp(10501u));
+    TEST_ASSERT_EQUAL(K_NONE,
+                      poll_skip_tp((10002u + VEHICLE_CL250_SESSION_RETRY_INTERVAL_MS) - 1u));
+    TEST_ASSERT_EQUAL(K_SESSION, poll_skip_tp(10002u + VEHICLE_CL250_SESSION_RETRY_INTERVAL_MS));
+    answer_session(10002u + VEHICLE_CL250_SESSION_RETRY_INTERVAL_MS);
     TEST_ASSERT_EQUAL_UINT32(unverified_count(), stopped_count());
     TEST_ASSERT_EQUAL_UINT32(stops, stats()->did_stops);
     TEST_ASSERT_EQUAL_UINT32(0u, stats()->rearms);
@@ -3819,9 +3823,17 @@ static void test_d075_verified_gaps_during_counted_0x7f_refusals_stay_within_sta
     worst_verified_gaps_with_0x7f(true, all);
     for (uint32_t n = 0u; n < (sizeof bounds / sizeof bounds[0]); n++) {
         const uint32_t i = bounds[n].idx;
-            /* measured 140..880 ms: inside the D-068 bound (plus the session round trip) */
+        /* measured 140/140/230/840/860 ms (one DID) and 140/140/260/860/880 ms (all 35):
+         * the DID's own period plus 3 (one DID) or 4 (all 35) round trips of the refusals and
+         * session requests (gen/ constants), well inside the D-068 bound and stale_after_ms */
+        const uint32_t period = vehicle_cl250_dids[i].poll_period_ms;
+        TEST_ASSERT_LESS_OR_EQUAL_UINT32(period + (3u * VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS),
+                                         one[i]);
+        TEST_ASSERT_LESS_OR_EQUAL_UINT32(period + (4u * VEHICLE_CL250_ASSUMED_ROUND_TRIP_MS),
+                                         all[i]);
         TEST_ASSERT_LESS_OR_EQUAL_UINT32(bounds[n].bound_ms, one[i]);
         TEST_ASSERT_LESS_OR_EQUAL_UINT32(bounds[n].bound_ms, all[i]);
+        TEST_ASSERT_LESS_OR_EQUAL_UINT32(vehicle_cl250_dids[i].stale_after_ms, one[i]);
         TEST_ASSERT_LESS_OR_EQUAL_UINT32(vehicle_cl250_dids[i].stale_after_ms, all[i]);
     }
 }
@@ -3873,6 +3885,95 @@ static void test_d075_a_0x7f_did_in_the_quiet_window_is_not_counted_until_the_wi
     /* the reads in the window are not counted: two more are needed after it closes */
     TEST_ASSERT_EQUAL_UINT32(in_window + 2u, total);
     TEST_ASSERT_EQUAL_UINT32(total, stats()->session_losses);
+}
+
+/*
+ * D-075 item 1 (f): two unverified DIDs answer in time first, then refuse every read with
+ * NRC 0x7F. Their own 0x7E/0x7F count (a positive answer does not reset it) stops them
+ * after two refusals each, so the session losses are bounded and the verified DIDs keep
+ * their gen/ stale_after_ms afterwards, over 120 s.
+ */
+static void test_d075_answered_unverified_dids_refusing_with_0x7f_are_stopped_by_their_own_count(void)
+{
+    const uint32_t u1 = first_unverified();
+    uint32_t u2 = u1;
+    for (uint32_t i = u1 + 1u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        if (is_unverified(i)) {
+            u2 = i;
+            break;
+        }
+    }
+    TEST_ASSERT_NOT_EQUAL_UINT32(u1, u2);
+    bring_up(0u);
+    drive(0u, 30000u); /* every DID answers: u1 and u2 are answered */
+    TEST_ASSERT_TRUE(c.did[u1].answered);
+    TEST_ASSERT_TRUE(c.did[u2].answered);
+    did_mode[u1] = M_NRC7F;
+    did_mode[u2] = M_NRC7F;
+    log_n = 0u;
+    drive(30000u, 150000u);
+    TEST_ASSERT_TRUE(uds_client_core_did_stopped(&c, u1));
+    TEST_ASSERT_TRUE(uds_client_core_did_stopped(&c, u2));
+    TEST_ASSERT_EQUAL(UDS_CLIENT_STOP_NRC_SESSION, uds_client_core_did_stop_reason(&c, u1));
+    TEST_ASSERT_EQUAL_UINT32(2u, stats()->did_stops);
+    TEST_ASSERT_EQUAL_UINT32(4u, stats()->session_losses); /* two per DID, then none */
+    TEST_ASSERT_EQUAL_UINT32(2u, count_did_reads(u1, 30000u, 150000u));
+    TEST_ASSERT_EQUAL_UINT32(2u, count_did_reads(u2, 30000u, 150000u));
+    /* after the last stop the verified DIDs are never dark for more than stale_after_ms */
+    uint32_t last_stop = 0u;
+    for (uint32_t i = 0u; i < log_n; i++) {
+        if ((log_buf[i].k == K_READ) && ((log_buf[i].idx == u1) || (log_buf[i].idx == u2))) {
+            last_stop = log_buf[i].t;
+        }
+    }
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        if (is_unverified(i)) {
+            continue;
+        }
+        uint32_t prev = last_stop;
+        for (uint32_t n = 0u; n < log_n; n++) {
+            if ((log_buf[n].k == K_READ) && (log_buf[n].idx == i) && (log_buf[n].t > last_stop)) {
+                TEST_ASSERT_LESS_OR_EQUAL_UINT32(vehicle_cl250_dids[i].stale_after_ms,
+                                                 log_buf[n].t - prev);
+                prev = log_buf[n].t;
+            }
+        }
+        TEST_ASSERT_GREATER_THAN_UINT32(last_stop, prev);
+    }
+    /* it comes back at the engine-start re-ask, counters cleared */
+    rpm_raw = 0u;
+    drive(150000u, 150600u);
+    rpm_raw = RPM_UP;
+    drive(150600u, 152000u);
+    TEST_ASSERT_EQUAL_UINT32(2u, stats()->rearms);
+    TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, u1));
+    TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, u2));
+}
+
+/*
+ * MINOR-F: a counted 0x7F at t, the fast 0x10 03 at t+1, refused or unanswered: the next
+ * 0x10 03 does not go out before t+1+SESSION_RETRY_INTERVAL_MS.
+ */
+static void test_d075_a_refused_fast_session_request_waits_for_the_retry_interval(void)
+{
+    const uint32_t u = first_unverified();
+    const uint8_t answers[3] = {0x22u, 0x21u, 0u}; /* 0u: no answer */
+    for (uint32_t n = 0u; n < 3u; n++) {
+        setUp();
+        bring_up(0u);
+        serve_until_read(100u, u);
+        nrc(100u, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_SERVICE_NOT_SUPPORTED_IN_ACTIVE_SESSION);
+        TEST_ASSERT_EQUAL(K_SESSION, poll_skip_tp(101u));
+        if (answers[n] != 0u) {
+            nrc(101u, VEHICLE_CL250_SESSION_SID, answers[n]);
+        }
+        const uint32_t next = 101u + VEHICLE_CL250_SESSION_RETRY_INTERVAL_MS;
+        for (uint32_t t = 102u; t < next; t++) {
+            /* the base timeout of the unanswered request ends it; nothing but TP goes out */
+            TEST_ASSERT_EQUAL_MESSAGE(K_NONE, poll_skip_tp(t), "a session request before the retry interval");
+        }
+        TEST_ASSERT_EQUAL(K_SESSION, poll_skip_tp(next));
+    }
 }
 
 int main(void)
@@ -4003,6 +4104,8 @@ int main(void)
     RUN_TEST(test_d075_nrc_0x7f_for_tester_present_keeps_the_epoch_and_counts_nothing);
     RUN_TEST(test_d075_every_unverified_did_answering_0x7f_costs_two_session_requests_each);
     RUN_TEST(test_d075_verified_gaps_during_counted_0x7f_refusals_stay_within_stale_after);
+    RUN_TEST(test_d075_answered_unverified_dids_refusing_with_0x7f_are_stopped_by_their_own_count);
+    RUN_TEST(test_d075_a_refused_fast_session_request_waits_for_the_retry_interval);
     RUN_TEST(test_d075_a_0x7f_did_in_the_quiet_window_is_not_counted_until_the_window_closes);
     return UNITY_END();
 }

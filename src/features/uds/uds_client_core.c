@@ -8,7 +8,7 @@
 /* ReadDataByIdentifier positive response: [SID + 0x40][DID hi][DID lo][data...]. */
 #define READ_RESPONSE_HEADER 3u
 
-/* D-068 item 2: NRC 0x31 on this many separate reads stops an unverified DID. */
+/* D-068 item 2, D-075: NRC 0x31/0x7E/0x7F on this many separate reads stops an unverified DID. */
 #define STOP_NRC_READS 2u
 
 /* D-069 item 3: consecutive valid ENGINE_SPEED samples > 0 (after a 0) = engine start. */
@@ -68,6 +68,12 @@ static void start_request(uds_client_core_t* c, uds_client_req_kind_t kind, uint
  * answer in this epoch. A verified DID, and one that has answered, keep the
  * D-050..D-053 skip and retry whatever the ECU says.
  */
+/* A DID is stopped while it has a stop reason (the state has no separate flag, D-075 size). */
+static bool is_stopped(const uds_client_did_state_t* d)
+{
+    return d->stop_reason != UDS_CLIENT_STOP_NONE;
+}
+
 static bool stoppable(const uds_client_core_t* c, uint32_t idx)
 {
     return !vehicle_cl250_dids[idx].verified && !c->did[idx].answered;
@@ -76,8 +82,7 @@ static bool stoppable(const uds_client_core_t* c, uint32_t idx)
 static void stop_did(uds_client_core_t* c, uint32_t idx, uds_client_stop_reason_t reason)
 {
     uds_client_did_state_t* d = &c->did[idx];
-    if (!d->stopped) {
-        d->stopped = true;
+    if (!is_stopped(d)) {
         d->stop_reason = reason;
         count(&c->stats.did_stops);
     }
@@ -209,9 +214,9 @@ static void arm_unverified_reads(uds_client_core_t* c)
         uds_client_did_state_t* d = &c->did[idx];
         if (!vehicle_cl250_dids[idx].verified) {
             d->requested = false;
-            d->stopped = false;
             d->answered = false;
             d->stop_nrc_count = 0u;
+            d->session_nrc_count = 0u;
             d->stop_reason = UDS_CLIENT_STOP_NONE;
             d->skipped = false;
             d->consecutive_timeouts = 0u;
@@ -233,10 +238,10 @@ static void rearm_stopped_reads(uds_client_core_t* c)
 {
     for (uint32_t idx = 0u; idx < VEHICLE_CL250_DID_COUNT; idx++) {
         uds_client_did_state_t* d = &c->did[idx];
-        if (d->stopped) {
-            d->stopped = false;
+        if (is_stopped(d)) {
             d->stop_reason = UDS_CLIENT_STOP_NONE;
             d->stop_nrc_count = 0u;
+            d->session_nrc_count = 0u;
             d->consecutive_timeouts = 0u;
             count(&c->stats.rearms);
         }
@@ -335,7 +340,7 @@ static bool next_read(uds_client_core_t* c, uint32_t now_ms, uint32_t* idx_out)
         if (d->skipped && expired(now_ms, d->skip_start_ms, VEHICLE_CL250_DID_SKIP_COOLDOWN_MS)) {
             d->skipped = false;
         }
-        const bool due = !d->skipped && !d->stopped &&
+        const bool due = !d->skipped && !is_stopped(d) &&
                          (!d->requested ||
                           expired(now_ms, d->last_request_ms,
                                   (uint32_t)vehicle_cl250_dids[idx].poll_period_ms));
@@ -494,22 +499,42 @@ static void on_negative(uds_client_core_t* c, uint32_t now_ms, uint8_t sid, uint
     }
     if (c->pending == UDS_CLIENT_REQ_READ) {
         const uint32_t idx = c->pending_idx;
-        const bool refusal = (nrc == UDS_NRC_REQUEST_OUT_OF_RANGE) ||
-                             (nrc == UDS_NRC_SUBFUNCTION_NOT_SUPPORTED_IN_ACTIVE_SESSION) ||
-                             (nrc == UDS_NRC_SERVICE_NOT_SUPPORTED_IN_ACTIVE_SESSION);
-        if (refusal && stoppable(c, idx) && !c->pending_quiet && !in_quiet_window(c, now_ms)) {
-            /* D-068 item 2: DID not supported. D-075 item 1: an NRC 0x7E/0x7F answer to a
-             * never-answered unverified DID counts the same way (the ECU fell back to the
-             * default session on it). Two separate reads (requests go to both response
-             * IDs, and one NRC may trail an earlier answer); never in the quiet window
-             * after a timeout, where this NRC may be the earlier read's. */
-            c->did[idx].stop_nrc_count++;
-            if (c->did[idx].stop_nrc_count >= STOP_NRC_READS) {
-                stop_did(c, idx,
-                         (nrc == UDS_NRC_REQUEST_OUT_OF_RANGE) ? UDS_CLIENT_STOP_NRC_31
-                                                              : UDS_CLIENT_STOP_NRC_SESSION);
+        const bool nrc31 = (nrc == UDS_NRC_REQUEST_OUT_OF_RANGE);
+        const bool fallback = (nrc == UDS_NRC_SUBFUNCTION_NOT_SUPPORTED_IN_ACTIVE_SESSION) ||
+                              (nrc == UDS_NRC_SERVICE_NOT_SUPPORTED_IN_ACTIVE_SESSION);
+        /* D-068 item 2: DID not supported. D-075 item 1: an NRC 0x7E/0x7F answer counts
+         * too (the ECU fell back to the default session on it). Two separate reads
+         * (requests go to both response IDs, and one NRC may trail an earlier answer);
+         * never in the quiet window after a timeout, where this NRC may be the earlier
+         * read's. */
+        if ((nrc31 || fallback) && !vehicle_cl250_dids[idx].verified && !c->pending_quiet &&
+            !in_quiet_window(c, now_ms)) {
+            uds_client_did_state_t* d = &c->did[idx];
+            if (stoppable(c, idx)) {
+                d->stop_nrc_count++;
+                if (fallback && (d->session_nrc_count < UINT8_MAX)) {
+                    d->session_nrc_count++;
+                }
+                if (d->stop_nrc_count >= STOP_NRC_READS) {
+                    /* once a 0x31 was counted its reason stays 0x31 (D-075 item 1 (f)) */
+                    stop_did(c, idx,
+                             (d->stop_nrc_count > d->session_nrc_count) ? UDS_CLIENT_STOP_NRC_31
+                                                                       : UDS_CLIENT_STOP_NRC_SESSION);
+                }
+            } else if (fallback) {
+                /* D-075 item 1 (f): an unverified DID that answered earlier in the epoch
+                 * is stopped by its own 0x7E/0x7F count, which a positive answer does
+                 * not reset. Otherwise N such DIDs would drop the session for ever. */
+                if (d->session_nrc_count < UINT8_MAX) {
+                    d->session_nrc_count++;
+                }
+                if (d->session_nrc_count >= STOP_NRC_READS) {
+                    stop_did(c, idx, UDS_CLIENT_STOP_NRC_SESSION);
+                }
+            } else {
+                /* NRC 0x31 on an answered DID: the D-050..D-053 behaviour */
             }
-            if (nrc != UDS_NRC_REQUEST_OUT_OF_RANGE) {
+            if (fallback) {
                 /* D-075 item 1 (amended, provisional): a counted 0x7E/0x7F asks for the
                  * session again at the next step, not after SESSION_RETRY_INTERVAL_MS,
                  * so it does not black out the verified DIDs. Every other session loss
@@ -629,9 +654,8 @@ bool uds_client_core_on_indication(uds_client_core_t* c, uint32_t now_ms,
         read_answered(c, now_ms);
         uds_client_did_state_t* d = &c->did[c->pending_idx];
         d->answered = true; /* D-068 item 2: a positive answer undoes a stop and ends the rule */
-        d->stopped = false;
         d->stop_reason = UDS_CLIENT_STOP_NONE;
-        d->stop_nrc_count = 0u;
+        d->stop_nrc_count = 0u; /* session_nrc_count stays: D-075 item 1 (f) */
         if (c->pending_idx == (uint32_t)VEHICLE_CL250_IDX_ENGINE_SPEED) {
             if (d->slow) {
                 c->rpm_run = 0u; /* D-051: a slow answer is not a fresh sample */
@@ -674,14 +698,14 @@ bool uds_client_core_did_skipped(const uds_client_core_t* c, uint32_t idx, uint3
 
 uds_client_stop_reason_t uds_client_core_did_stop_reason(const uds_client_core_t* c, uint32_t idx)
 {
-    return ((c != NULL) && (idx < VEHICLE_CL250_DID_COUNT) && c->did[idx].stopped)
+    return ((c != NULL) && (idx < VEHICLE_CL250_DID_COUNT) && is_stopped(&c->did[idx]))
                ? c->did[idx].stop_reason
                : UDS_CLIENT_STOP_NONE;
 }
 
 bool uds_client_core_did_stopped(const uds_client_core_t* c, uint32_t idx)
 {
-    return (c != NULL) && (idx < VEHICLE_CL250_DID_COUNT) && c->did[idx].stopped;
+    return (c != NULL) && (idx < VEHICLE_CL250_DID_COUNT) && is_stopped(&c->did[idx]);
 }
 
 uds_client_req_kind_t uds_client_core_pending(const uds_client_core_t* c)
