@@ -1,6 +1,6 @@
 # moto-rt-core
 
-Main domain controller firmware for the [moto-platform](https://github.com/moto-platform) motorcycle platform, running on an **STM32H7** (H743/H723 family; the board is not decided yet). It owns CAN on both buses, UDS/ISO-TP, logging, sensor fusion and the cornering EKF estimation (see `CLAUDE.md` for the scope and the safety rules).
+Main domain controller firmware for the [moto-platform](https://github.com/moto-platform) motorcycle platform, running on the **Cortex-M7 core of an STM32H755** (NUCLEO-H755ZI-Q, D-072; the Cortex-M4 runs `moto-safety-node`). It owns CAN on both buses, UDS/ISO-TP, logging, sensor fusion and the cornering EKF estimation (see `CLAUDE.md` for the scope and the safety rules).
 
 Signal, CAN and UDS definitions come only from [moto-vehicle-defs](https://github.com/moto-platform/moto-vehicle-defs) (submodule `external/moto-vehicle-defs`, pinned to `v0.8.0`).
 
