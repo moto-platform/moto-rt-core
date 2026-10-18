@@ -25,6 +25,7 @@
 #include "platform.h"
 #include "platform_e2e.h"
 #include "platform_limits.h"
+#include "services/lean_health_core.h"
 #include "vehicle_cl250.h"
 
 #include <stdbool.h>
@@ -51,6 +52,10 @@ typedef struct {
     lean_out_t out;
     uint32_t stamp_ms; /* the IMU stamp of the step that produced out */
     bool fault;        /* an EKF-side snapshot fault is latched (architecture-guard MAJOR-4) */
+    /* The EKF-side fields of DID 0xFD03 LEAN_HEALTH (D-067, E-17 (a)): diagnostic only,
+     * never read by lean_tx_msg(). They travel in this record, through the same SPSC
+     * snapshot, so no other shared state exists. */
+    lean_health_ekf_t health;
 } lean_record_t;
 
 /* Fills *msg from rec as seen at now_ms (see the rules above). comms_fault: the comms

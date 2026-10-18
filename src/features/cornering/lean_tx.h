@@ -28,6 +28,7 @@ typedef struct {
     com_cycle_t cycle;
     moto_e2e_tx_state_t e2e;    /* committed: advanced only by accepted frames */
     com_msg_stats_t stats;
+    bool have_record;           /* an EKF record was published since boot (0xFD03) */
     bool opened;                /* the only state that publishes speeds or sends 0x020 */
 } lean_tx_t;
 
@@ -46,8 +47,14 @@ bool lean_tx_open(lean_tx_t* tx, lean_link_t* link, const alive_counter_t* regis
  * is VALID and inside the gen/ 0x021 speed range (no hand-written limit); else UNUSABLE. */
 void lean_tx_publish_speed(lean_tx_t* tx, uint32_t now_ms);
 
+/* Comms task: the comms side's own snapshot latches for DID 0xFD03 (false while closed):
+ * the speed snapshot's producer fault and the output snapshot's consumer fault. */
+bool lean_tx_speed_producer_fault(const lean_tx_t* tx);
+bool lean_tx_output_consumer_fault(const lean_tx_t* tx);
+
 /* Comms task, every pass: sends 0x020 at its gen/ cycle from the newest EKF output
- * (lean_tx_core.h rules). Nothing while closed. */
+ * (lean_tx_core.h rules). Nothing while closed. When it is due, it also hands the record it
+ * read to services/lean_health as a copy (DID 0xFD03, D-067). */
 void lean_tx_step(lean_tx_t* tx, uint32_t now_ms);
 
 #ifdef __cplusplus

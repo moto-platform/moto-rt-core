@@ -30,6 +30,16 @@ typedef struct {
 /* Boot only, before the EKF task runs: no previous period, no offset. */
 void imu_init(imu_t* imu);
 
+/* The z offset learning state, for the lean health report (D-067, 0xFD03). */
+typedef struct {
+    bool offset_learned;
+    bool offset_rejected;   /* the last window's offset was beyond IMU_OFFSET_MAX_RPS (OFFSET_RANGE) */
+    uint32_t reject_count;  /* windows rejected since imu_init() */
+} imu_offset_health_t;
+
+/* EKF task only. NULL reads not learned, not rejected, 0. */
+imu_offset_health_t imu_offset_health(const imu_t* imu);
+
 /*
  * EKF task, once per period. Pops at most IMU_DRAIN_MAX samples; a FIFO that still holds
  * more is flushed (BACKLOG), as it is after a port fault, so no old sample leaks into

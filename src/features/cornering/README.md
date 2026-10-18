@@ -11,6 +11,8 @@ rt-core's cornering **Layer 2 only**: estimates that feed safety-node's cornerin
 | (2) | `lean_core`: pure 2-state roll EKF + host tests (this module) | done (rt-core#28) |
 | (3a) | `hal/imu.h`, `services/imu` + `imu_core` (interval-mean rates, z offset at standstill), host IMU fake (user split PR 3, 2026-10-10) | done (rt-core#29) |
 | (3b) | glue `lean.c/.h` (EKF task, alive bump, snapshots), 0x020 send driven by `app/comms` with the output clamp (`lean_tx`, `lean_tx_core`), defs bump to v0.9.0, SIL IMU feed | done (rt-core#30) |
+| (b) | two-thread `test_lean_link_stress` (E-17 (b), D-067) | done (rt-core#31) |
+| (a) | DID 0xFD03 `LEAN_HEALTH` (E-17 (a), D-067), defs v0.14.0: EKF-side health fields in the lean record, `services/lean_health`, second-reader rule in `services/snapshot.h` | this PR (draft, stacked on rt-core#34 ← #33) |
 
 Other code includes `lean.h` (EKF task) and `lean_tx.h` (comms task), never `lean_core.h` directly: `lean.h` includes it for the payload types (`lean_speed_t`, `lean_out_t`).
 
@@ -73,7 +75,7 @@ A stamp up to `LEAN_SPEED_FUTURE_MAX_MS` (40 ms) ahead of the IMU stamp has age 
 - ~~`IMU_REASON_NO_NEW` means "skip this step"~~ (no output, no alive bump; test).
 - ~~Standstill for `imu_read()`~~: VALID, below `LEAN_STANDSTILL_MPS`, at most `LEAN_STANDSTILL_AGE_MAX_MS` old, and the previous sample read 0 as well (tests: alternating samples, a zero that stops being refreshed, an UNUSABLE sample just before the learn, the window opening only at the second zero).
 - ~~An INVALID IMU sample gives an INVALID output without a core step~~ (tests: 1, 2 and 3 missed periods).
-- **Open:** report `reject_count` and the time without a learnt offset (UNLEARNED/RANGE), with the snapshot fault latches, so a bad gyro is visible. User, 2026-10-14 (D-067): on a new DID 0xFD03 `LEAN_HEALTH`, not on 0xFD02, after the two-thread `lean_link_t` stress test; it needs a defs MINOR release (`/signal-change`); E-17 (a). A 0xFD03 reader of `out_snap` in the comms task is a second read by the same consumer: no reader may keep a slot index or pointer across another `snapshot_read_index()` call (safety-reviewer note on E-17 (b)).
+- ~~Report `reject_count` and the time without a learnt offset (UNLEARNED/RANGE), with the snapshot fault latches, so a bad gyro is visible~~ (E-17 (a), D-067: DID 0xFD03 `LEAN_HEALTH`, see "DID 0xFD03" below). The second-reader rule is now in `services/snapshot.h`.
 - ~~A small future output stamp is age 0, a large one INVALID~~ (`lean_tx_core`, architecture-guard MAJOR-2).
 - ~~MAJOR-3, MAJOR-4, MINOR-4, MINOR-7~~: see "Lean glue" below. MAJOR-4 needs no separate atomic word: the EKF-side consumer fault travels inside the output record. A latched producer fault stops every further write to that snapshot's slots, not only the publish, because the latching publish already handed the write slot to the consumer (safety-reviewer MINOR-1 on 3b). The last output record then ages out to INVALID within `LEAN_TX_AGE_MAX_MS`, and a speed producer fault makes 0x020 INVALID at once (comms-side fault).
 - T1: measure the period-mean spread at idle on the CL250; above 1 deg/s the offset is never learnt. Also the raw per-axis LSB spread with the engine off (false FROZEN at standstill), and add per-axis stuck detection on x and z (a single stuck channel is not FROZEN today; safety-reviewer MINOR-D on the 3a fixes).
@@ -124,6 +126,36 @@ If step 4 or 5 fails, 0x020 stays closed and never reaches the bus: receivers se
 ### WCET budget (MINOR-7; user, 2026-10-14; measured on the board with DWT CYCCNT, Q-019)
 
 `lean_ekf_step()` takes at most **1 ms** per call: 5 % of its 20 ms period. The 0x020 output-age budget allows `LEAN_TX_JITTER_MS` (5 ms) of EKF and comms release jitter; the EKF preempting comms only moves an output stamp ahead of the comms `now`, which the 10 ms future window covers. The budget holds only while `hal_imu_pop()` reads RAM that the IMU ISR filled, never a blocking bus read. The work per call is bounded: at most `IMU_DRAIN_MAX` (64) FIFO samples, one `lean_core_step()` (one `sinf`, one `cosf`, one `sqrtf`, up to four divisions), two snapshot operations and one alive bump. No loop runs longer than the drain bound.
+
+### DID 0xFD03 `LEAN_HEALTH` (E-17 (a), D-067, defs v0.14.0)
+
+Diagnostic only (QM): no safety decision reads it, and `lean_tx_msg()` ignores every new field. A bad gyro (an offset beyond `IMU_OFFSET_MAX_RPS`, a dead IMU under NODE_MODE NORMAL) is now visible in a tester, not only as an INVALID 0x020. The layout, masks, widths, maxima and the 500 ms window are all gen/ (`PLATFORM_UDS_LEAN_HEALTH_*`); the rules are the DID's description and the comment block above its `max_age_ms` in `uds/dids.yaml` (the safety review's race-freedom contract).
+
+| Field | Source | Task |
+|---|---|---|
+| `OFFSET_LEARNED`, `OFFSET_REJECTED`, `OFFSET_REJECTS`, `UNLEARNED_S`, `SPEED_CONSUMER_FAULT` | the EKF's lean record (`lean_record_t.health` + the existing `fault`), written each step by `lean_ekf_step()` before the publish | EKF (producer), copied by the comms task |
+| `RECORD_FRESH` | the record's stamp against the request time, `lean_tx_core`'s age rule with the DID window | comms, at request time |
+| `SPEED_PRODUCER_FAULT`, `OUTPUT_CONSUMER_FAULT` | `lean_tx_speed_producer_fault()`, `lean_tx_output_consumer_fault()` | comms, set by `comms_pass()` right before `uds_server_step()` |
+| `EKF_ALIVE_OK` | `comms_ekf_registered()` AND NOT the value `comms_pass()` hands `heartbeat_step()` (`ekf_stalled` or an open lean with a foreign counter) | comms |
+
+**Race freedom.** No new shared state exists and no second reader of the output snapshot:
+1. The EKF fills the health fields of the slot it already owns (`snapshot_write_index()`) before the one `snapshot_publish()`, never after (a mutant that writes them after the publish is killed by TSan in `test_lean_link_stress`, 3 of 3 runs).
+2. `lean_tx_step()` is the only consumer call site. In the same call, from the index that read returned, it copies the record's fields into `services/lean_health` (a comms-task static) and then builds 0x020 from the same slot. No index or pointer outlives the call.
+3. The UDS server builds the DID from that comms-local copy plus comms-task flags. It never calls `snapshot_read_index()` and keeps no index, so it cannot take a record from 0x020.
+4. The copy is refreshed only when `lean_tx_step()` is due (every 20 ms), which is far inside the 500 ms window.
+
+**EKF side.** `imu_offset_health()` gives learned / rejected / `reject_count`; `reject_count` saturates at the gen/ maximum 0xFFFF (never wraps). `lean_health_unlearned_s()` counts whole seconds of the current run without a learnt offset: it starts at the first published step (boot) and again whenever a learnt offset is lost (a rejected window drops it), is 0 while one is learnt and saturates at 0xFFFF. Everything is computed from `now_ms` in the step, with no extra clock.
+
+**Fail-safe.**
+- No record since boot (the boot record's stamp 0 is never read as a record) or one older than the window: `RECORD_FRESH` and `OFFSET_LEARNED` clear, `UNLEARNED_S` = UNKNOWN (0xFFFF), the other EKF fields their last values (0 before the first record). Both saturation and "not fresh" read as not learnt.
+- A stamp more than `LEAN_HEALTH_FUTURE_MAX_MS` (= `LEAN_TX_FUTURE_MAX_MS`, static-asserted in `lean_tx.c`) ahead of now is not fresh, never a wrapped age.
+- A latched output-snapshot producer fault stops the records for good, so it reads `RECORD_FRESH` clear while `EKF_ALIVE_OK` stays set (the EKF task still runs); a stalled EKF clears `EKF_ALIVE_OK`.
+- `RECORD_FRESH` set does not mean 0x020 is valid (that needs the 35 ms `LEAN_TX_AGE_MAX_MS`, the state and the range).
+- RESERVED is never set. A DID length that differs from gen/ is refused (NRC 0x22), not guessed.
+
+**Tests.** `test_lean_health_core` (pure, 100 % line and branch): flags at their gen/ masks, window boundary 500 vs 501 ms, future stamp +10/+11 ms and +2^31, timer wrap, saturation, the unlearned run (anchor, learnt, lost, saturation at 49.7 days, wrap), NULL and wrong length, the service. `test_imu`: offset health follows learn, reject, relearn. `test_lean`: the record carries the fields, a rejected window, EKF-side saturation, the copy in `lean_tx_step()`, the boot record is no record, a record consumed by another reader still counts, latches. `test_comms_lean` (SIL, real `comms_pass()`): running, never-run, stopped, unregistered and foreign supervision EKF, producer fault, each latch, an unlearnable gyro, and that building the DID never costs 0x020 a frame. `test_uds_server`: the DID end to end over ISO-TP. `test_lean_link_stress`: `record_consistent()` checks the new fields on every record (the offset flags agree with the state and the stamp, a learnt offset never goes back, nothing rejected), and the comms thread builds the DID every pass from the production copy.
+
+**Memory (M7 release).** `lean_record_t` 16 -> 20 B (`lean_link_t` 104 -> 116 B), `lean_ekf_t` 156 -> 164 B (the 8 B unlearned-run tracker), `lean_tx_t` stays 32 B, `services/lean_health` 19 B bss. Text: `lean_health_core.c.obj` 206 B, `lean_health.c.obj` 100 B, `lean.c.obj` 454 -> 518 B, `lean_tx.c.obj` 366 -> 502 B.
 
 ### 0x020 rules (`lean_tx_core.h`)
 
@@ -184,6 +216,14 @@ The rules apply in order. The first that fails sends INVALID with LEAN 0 and QUA
 **Coverage:** `lean.c` has 100 % lines and branches; `lean_tx.c` and `lean_tx_core.c` have 100 % lines. The two branches left are a packing/E2E failure that a valid message cannot produce.
 
 **Mutation check** (24 mutants on the glue, the sender and `app/comms`): 23 are killed. The survivor, `comms_open_lean()` skipping its own registration check, is equivalent: `lean_tx_open()` refuses the same NULL counter.
+
+## Follow-ups (E-17 after (a))
+
+(a) is done in this PR. What remains of E-17, none of it blocking the lean path:
+- **(c) H7 port:** ECC on the SRAM holding `lean_link_t` (the snapshot detects only out-of-range indices), `configTICK_RATE_HZ == 1000` and 32-bit `TickType_t` static asserts, and `hal_imu_pop()` RAM-only (WCET budget).
+- **(d) HIL scenarios** (list above, including the ±30° sign check, `lean_imu_dead` with the 0xFD03 report, `lean_task_priorities`). Add: read 0xFD03 while `lean_imu_dead`: expected `RECORD_FRESH` set, `OFFSET_LEARNED` clear and `UNLEARNED_S` growing after a power-up, `EKF_ALIVE_OK` set.
+- **(e) T1/T4:** tune the provisional constants (`lean_core` noise and gate, standstill 0.1 m/s / 200 ms, the offset window) and measure the reinit availability cost.
+- **0xFD03 only:** `UNLEARNED_S` starts at the EKF's first step; if the H7 EKF task starts noticeably after boot, that is the intended anchor, so state it in the bring-up notes.
 
 ## Memory and timing
 

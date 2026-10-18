@@ -24,6 +24,7 @@
 #include "services/can_if.h"
 #include "services/can_sm.h"
 #include "services/diag.h"
+#include "services/lean_health.h"
 #include "services/timebase.h"
 #include "services/vehicle_signals.h"
 
@@ -431,6 +432,129 @@ static void test_a_comms_side_snapshot_fault_sends_invalid_MAJOR_4(void)
     TEST_ASSERT_EQUAL_UINT32(s.lean_frames, s.lean_invalid);
 }
 
+
+/* ------------------------------------------------------------------ DID 0xFD03 (E-17 (a), D-067) */
+
+#define FD03_FLAGS PLATFORM_UDS_LEAN_HEALTH_RECORD_FRESH_BYTE
+#define M_FRESH PLATFORM_UDS_LEAN_HEALTH_RECORD_FRESH_MASK
+#define M_LEARNED PLATFORM_UDS_LEAN_HEALTH_OFFSET_LEARNED_MASK
+#define M_REJECTED PLATFORM_UDS_LEAN_HEALTH_OFFSET_REJECTED_MASK
+#define M_SPEED_PROD PLATFORM_UDS_LEAN_HEALTH_SPEED_PRODUCER_FAULT_MASK
+#define M_OUT_CONS PLATFORM_UDS_LEAN_HEALTH_OUTPUT_CONSUMER_FAULT_MASK
+#define M_SPEED_CONS PLATFORM_UDS_LEAN_HEALTH_SPEED_CONSUMER_FAULT_MASK
+#define M_ALIVE_OK PLATFORM_UDS_LEAN_HEALTH_EKF_ALIVE_OK_MASK
+
+static uint8_t fd03[PLATFORM_UDS_DID_LEAN_HEALTH_LENGTH];
+
+static uint8_t fd03_flags(void)
+{
+    TEST_ASSERT_TRUE(lean_health_read(timebase_now_ms(), fd03, sizeof fd03));
+    return fd03[FD03_FLAGS];
+}
+
+static uint16_t fd03_u16(uint32_t byte)
+{
+    return (uint16_t)(((uint16_t)fd03[byte] << 8u) | fd03[byte + 1u]);
+}
+
+static void test_REQ_FD03_a_running_ekf_reads_fresh_learned_and_alive(void)
+{
+    ride_to_estimated();
+    TEST_ASSERT_EQUAL_HEX8(M_FRESH | M_LEARNED | M_ALIVE_OK, fd03_flags());
+    TEST_ASSERT_EQUAL_UINT16(0u, fd03_u16(PLATFORM_UDS_LEAN_HEALTH_OFFSET_REJECTS_BYTE));
+    TEST_ASSERT_EQUAL_UINT16(0u, fd03_u16(PLATFORM_UDS_LEAN_HEALTH_UNLEARNED_S_BYTE));
+}
+
+static void test_REQ_FD03_it_never_takes_a_record_away_from_0x020(void)
+{
+    ride_to_estimated();
+    /* the UDS server steps in every pass and builds this DID; 0x020 keeps its cadence */
+    for (uint32_t i = 0u; i < 5u; i++) {
+        (void)fd03_flags();
+    }
+    const seen_t s = run(1000u, 54u, 1u);
+    TEST_ASSERT_EQUAL_UINT32(1000u / EKF_CYCLE_MS, s.lean_frames);
+    TEST_ASSERT_EQUAL_UINT32(0u, s.lean_invalid);
+    TEST_ASSERT_EQUAL_HEX8(M_FRESH | M_LEARNED | M_ALIVE_OK, fd03_flags());
+}
+
+static void test_REQ_FD03_an_ekf_that_never_runs_reads_no_record_and_not_alive(void)
+{
+    TEST_ASSERT_TRUE(boot(lean_link_alive(&link)));
+    (void)run(1000u, 54u, 0u);
+    TEST_ASSERT_EQUAL_HEX8(0u, fd03_flags()); /* registered but stalled: ALIVE_OK clear */
+    TEST_ASSERT_EQUAL_UINT16(PLATFORM_UDS_LEAN_HEALTH_UNLEARNED_S_UNKNOWN,
+                             fd03_u16(PLATFORM_UDS_LEAN_HEALTH_UNLEARNED_S_BYTE));
+}
+
+static void test_REQ_FD03_a_stopped_ekf_loses_fresh_and_learned_and_alive(void)
+{
+    ride_to_estimated();
+    (void)run(PLATFORM_UDS_LEAN_HEALTH_MAX_AGE_MS + EKF_CYCLE_MS, 54u, 0u);
+    TEST_ASSERT_EQUAL_HEX8(0u, fd03_flags());
+    TEST_ASSERT_EQUAL_UINT16(PLATFORM_UDS_LEAN_HEALTH_UNLEARNED_S_UNKNOWN,
+                             fd03_u16(PLATFORM_UDS_LEAN_HEALTH_UNLEARNED_S_BYTE));
+}
+
+static void test_REQ_FD03_without_a_registered_ekf_alive_ok_is_clear(void)
+{
+    TEST_ASSERT_FALSE(boot(NULL));
+    (void)run(500u, 54u, 1u);
+    TEST_ASSERT_EQUAL_HEX8(0u, fd03_flags());
+}
+
+static void test_REQ_FD03_a_foreign_supervision_clears_alive_ok(void)
+{
+    ride_to_estimated();
+    comms_ekf_init(&ekf); /* a zeroed comms_ekf_t: not registered */
+    (void)run(100u, 54u, 1u);
+    TEST_ASSERT_EQUAL_UINT8(0u, fd03_flags() & M_ALIVE_OK);
+    TEST_ASSERT_TRUE(comms_ekf_register(&ekf, lean_link_alive(&link)));
+    (void)run(100u, 54u, 1u);
+    TEST_ASSERT_EQUAL_UINT8(M_ALIVE_OK, fd03_flags() & M_ALIVE_OK);
+}
+
+static void test_REQ_FD03_a_latched_output_producer_fault_reads_not_fresh_with_alive_ok(void)
+{
+    ride_to_estimated();
+    hal_atomic_u32_store(&link.out_snap.middle, 3u); /* a RAM fault: the EKF latches, stops writing */
+    (void)run(PLATFORM_UDS_LEAN_HEALTH_MAX_AGE_MS + (4u * EKF_CYCLE_MS), 54u, 1u);
+    TEST_ASSERT_TRUE(snapshot_producer_fault(&link.out_snap));
+    /* the record stream stopped for good; the EKF task itself still bumps alive */
+    const uint8_t f = fd03_flags();
+    TEST_ASSERT_EQUAL_UINT8(0u, f & (M_FRESH | M_LEARNED));
+    TEST_ASSERT_EQUAL_UINT8(M_ALIVE_OK, f & M_ALIVE_OK);
+}
+
+static void test_REQ_FD03_the_comms_and_ekf_side_snapshot_latches_each_have_their_flag(void)
+{
+    ride_to_estimated();
+    link.speed_snap.producer_fault = true; /* comms writes the speed */
+    (void)run(2u * EKF_CYCLE_MS, 54u, 1u);
+    TEST_ASSERT_EQUAL_HEX8(M_SPEED_PROD, fd03_flags() & (M_SPEED_PROD | M_OUT_CONS | M_SPEED_CONS));
+    link.speed_snap.producer_fault = false;
+    link.out_snap.consumer_fault = true; /* comms reads the output */
+    (void)run(2u * EKF_CYCLE_MS, 54u, 1u);
+    TEST_ASSERT_EQUAL_HEX8(M_OUT_CONS, fd03_flags() & (M_SPEED_PROD | M_OUT_CONS | M_SPEED_CONS));
+    link.out_snap.consumer_fault = false;
+    link.speed_snap.consumer_fault = true; /* the EKF reads the speed */
+    (void)run(2u * EKF_CYCLE_MS, 54u, 1u);
+    TEST_ASSERT_EQUAL_HEX8(M_SPEED_CONS, fd03_flags() & (M_SPEED_PROD | M_OUT_CONS | M_SPEED_CONS));
+}
+
+static void test_REQ_FD03_an_unlearnable_gyro_shows_rejects_and_the_unlearned_time(void)
+{
+    TEST_ASSERT_TRUE(boot(lean_link_alive(&link)));
+    imu_z = 100; /* beyond IMU_OFFSET_MAX_RPS at standstill */
+    (void)run(6000u, 0u, 1u);
+    const uint8_t f = fd03_flags();
+    TEST_ASSERT_EQUAL_HEX8(M_FRESH | M_REJECTED | M_ALIVE_OK, f);
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT16(2u, fd03_u16(PLATFORM_UDS_LEAN_HEALTH_OFFSET_REJECTS_BYTE));
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT16(5u, fd03_u16(PLATFORM_UDS_LEAN_HEALTH_UNLEARNED_S_BYTE));
+    TEST_ASSERT_LESS_THAN_UINT16(PLATFORM_UDS_LEAN_HEALTH_UNLEARNED_S_UNKNOWN,
+                                 fd03_u16(PLATFORM_UDS_LEAN_HEALTH_UNLEARNED_S_BYTE));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -448,5 +572,14 @@ int main(void)
     RUN_TEST(test_another_ekf_supervision_stops_0x020_and_reads_degraded_MINOR_2);
     RUN_TEST(test_a_null_supervision_with_an_open_lean_sends_no_0x020_MINOR_2);
     RUN_TEST(test_a_real_lean_beyond_the_limit_goes_out_clamped_both_ways);
+    RUN_TEST(test_REQ_FD03_a_running_ekf_reads_fresh_learned_and_alive);
+    RUN_TEST(test_REQ_FD03_it_never_takes_a_record_away_from_0x020);
+    RUN_TEST(test_REQ_FD03_an_ekf_that_never_runs_reads_no_record_and_not_alive);
+    RUN_TEST(test_REQ_FD03_a_stopped_ekf_loses_fresh_and_learned_and_alive);
+    RUN_TEST(test_REQ_FD03_without_a_registered_ekf_alive_ok_is_clear);
+    RUN_TEST(test_REQ_FD03_a_foreign_supervision_clears_alive_ok);
+    RUN_TEST(test_REQ_FD03_a_latched_output_producer_fault_reads_not_fresh_with_alive_ok);
+    RUN_TEST(test_REQ_FD03_the_comms_and_ekf_side_snapshot_latches_each_have_their_flag);
+    RUN_TEST(test_REQ_FD03_an_unlearnable_gyro_shows_rejects_and_the_unlearned_time);
     return UNITY_END();
 }

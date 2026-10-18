@@ -62,6 +62,7 @@ typedef struct {
     bool prior_zero;            /* the sample before it read 0 */
     /* EKF task only, like the rest of lean_ekf_t: another task (a UDS DID, a diagnostic)
      * reads the output through the link's snapshot, never these. */
+    lean_health_run_t unlearned_run; /* unlearned-run duration for 0xFD03 (D-067) */
     lean_out_t last;            /* the last output (tests, diagnostics) */
     imu_sample_t last_imu;      /* the last IMU sample (tests, diagnostics) */
 } lean_ekf_t;
@@ -80,7 +81,8 @@ void lean_ekf_init(lean_ekf_t* e, lean_link_t* link);
  * EKF task, once per cycle. Reads the newest speed, drains the IMU (services/imu, with the
  * standstill above), steps the core only for a new VALID IMU sample (an INVALID one gives
  * an INVALID output with reason INPUT and no core step, so a gap reaches the core's own
- * dt check), publishes {output, IMU stamp, EKF-side snapshot fault} (never again once the
+ * dt check), publishes {output, IMU stamp, EKF-side snapshot fault, IMU offset health for
+ * DID 0xFD03: learned / rejected, reject count, unlearned seconds} (never again once the
  * output snapshot's producer fault is latched: the record then ages out) and, at the very
  * end of the complete cycle, bumps the alive counter. A call in the same ms as the last
  * one (IMU NO_NEW) does nothing: no output, no bump. NULL or an unbound link does nothing.

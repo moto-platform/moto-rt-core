@@ -21,6 +21,17 @@
  * exchange per publish; the consumer one load, plus one exchange when there is something
  * new.
  *
+ * Second-reader rule (safety-reviewer on E-17 (b), 0xFD03 LEAN_HEALTH): a snapshot has
+ * ONE consumer call site. Every snapshot_read_index() takes the newest record away from
+ * the next caller (it moves the consumer's front), so a second reader of the same
+ * snapshot in the consumer task, for example a diagnostic, would starve the real
+ * consumer of a record. And no caller may keep a slot index or a pointer into a slot
+ * across another snapshot_read_index() on that snapshot: the producer may reuse the old
+ * front at its next publish, and the kept index then points into a slot being written.
+ * Whatever else needs the record gets a copy that the one read site makes, in the same
+ * call, from the index it just got (lean_tx_step() -> services/lean_health for DID
+ * 0xFD03). tests/host/test_lean_link_stress.c is the regression gate.
+ *
  * Rules: exactly one producer task and one consumer task per snapshot; the producer
  * writes only slots[snapshot_write_index()], the consumer reads only the index it got;
  * initialise the snapshot and all three slots to a safe value (e.g. INVALID) before
