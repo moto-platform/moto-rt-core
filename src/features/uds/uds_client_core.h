@@ -58,14 +58,21 @@
  *     for RESPONSE_TIMEOUT_MAX_MS, while the ECU waits for the Flow Control. A running
  *     hold is never shortened.
  *   - Unverified DIDs (D-068 item 2; vehicle_cl250_dids[idx].verified == false): each
- *     confirmed session arms them all (due at once). Until the next confirmation, one
+ *     stop epoch arms them all (due at once). Until the epoch ends, one
  *     without a positive answer in this session is stopped (never due, no skip) after NRC
  *     0x31 on two separate reads (not one in the quiet window after a read timeout),
  *     MAX_CONSECUTIVE_TIMEOUTS timeouts in a row, or a First Frame answer. A decoded answer
  *     marks it answered: from then on it, like every verified DID, keeps the skip/retry
- *     above. Other NRCs never stop a DID. NRC 0x7E/0x7F drop the session, so the next
- *     confirmation re-arms.
- *   - Engine-start re-ask (D-069 item 3): once per confirmed session, at the first engine
+ *     above. Other NRCs never stop a DID. NRC 0x7E/0x7F drop the session and, on a read of a
+ *     never-answered unverified DID, count toward its stop like NRC 0x31 (D-075 (provisional)
+ *     item 1).
+ *   - Stop epoch (D-075 (provisional) item 1): the stop state and the engine-start flag
+ *     belong to an epoch. It starts only at the tester's start and at the confirmation
+ *     after the ECU was lost (ECU_ABSENT_TIMEOUT_MS); that confirmation arms every
+ *     unverified DID (due at once). A confirmation after NRC 0x7E/0x7F stays in the
+ *     epoch: stops, answered flags and the engine-start flag are kept, and no DID is
+ *     made due (each keeps its last request time and is due at its tier rate).
+ *   - Engine-start re-ask (D-069 item 3): once per stop epoch, at the first engine
  *     start (two consecutive in-time ENGINE_SPEED samples > 0 after one == 0), every
  *     stopped DID is pollable again, due one poll_period_ms after its last request.
  *   - ECU present while any response came within ECU_ABSENT_TIMEOUT_MS. Absence also
@@ -192,7 +199,8 @@ typedef struct {
     bool pending_quiet;       /* the pending read was sent inside that quiet window */
     bool rpm_zero_seen;       /* D-069: a valid ENGINE_SPEED == 0 since the session was confirmed */
     uint8_t rpm_run;          /* consecutive valid ENGINE_SPEED samples > 0 after that zero */
-    bool engine_rearmed;      /* the engine-start re-ask happened in this confirmed session */
+    bool engine_rearmed;      /* the engine-start re-ask happened in this stop epoch */
+    bool epoch_open;          /* D-075 item 1: a stop epoch is running (a confirmation armed it) */
 
     uint32_t last_poll_ms;    /* the step gap check (D-053) */
     bool polled;              /* last_poll_ms is set */

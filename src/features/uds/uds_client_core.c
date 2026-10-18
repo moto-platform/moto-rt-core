@@ -191,13 +191,16 @@ static void lose_session(uds_client_core_t* c)
         count(&c->stats.session_losses);
     }
     c->rpm_run = 0u;
+    c->rpm_zero_seen = false; /* D-069: the run needs a zero seen in the confirmed session */
 }
 
 /*
- * D-068 item 2: the extended session is confirmed. Every unverified DID is due at once,
- * with its stop state, NRC 0x31 count and answered flag cleared (an ECU that serves a DID
- * only in the extended session refused it before). The verified DIDs keep their schedule.
- * D-069 item 3: the new session may re-ask once more at its first engine start.
+ * D-068 item 2 / D-075 (provisional) item 1: a stop epoch starts. Every unverified DID is
+ * due at once, with its stop state, NRC 0x31/0x7E/0x7F count and answered flag cleared (an
+ * ECU that serves a DID only in the extended session refused it before). The verified
+ * DIDs keep their schedule. D-069 item 3: the epoch may re-ask once, at its first engine
+ * start. Called only at the first confirmation after init and at the first one after the
+ * ECU was lost; a confirmation after NRC 0x7E/0x7F stays in the epoch and calls nothing.
  */
 static void arm_unverified_reads(uds_client_core_t* c)
 {
@@ -218,7 +221,7 @@ static void arm_unverified_reads(uds_client_core_t* c)
 }
 
 /*
- * D-069 item 3: the first engine start of the confirmed session. Every stopped DID is
+ * D-069 item 3: the first engine start of the stop epoch. Every stopped DID is
  * pollable again with the stop rule from zero. It keeps last_request_ms (and requested),
  * so it is due one poll_period_ms after its last request (not forced due: at once only if
  * that period has already passed), never faster than its tier: its tier rate
@@ -248,7 +251,7 @@ static void watch_engine_start(uds_client_core_t* c, float rpm)
     } else if (c->rpm_zero_seen && !c->engine_rearmed) {
         c->rpm_run++;
         if (c->rpm_run >= ENGINE_START_SAMPLES) {
-            c->engine_rearmed = true; /* once per confirmed session, not at every restart */
+            c->engine_rearmed = true; /* once per stop epoch, not at every restart */
             rearm_stopped_reads(c);
         }
     } else {
@@ -358,6 +361,7 @@ bool uds_client_core_poll(uds_client_core_t* c, uint32_t now_ms, bool rx_busy, b
         c->ecu_seen = false; /* absent: presence needs a new answer, also across a wrap */
         lose_session(c);     /* an ECU that came back is in its default session */
         forget_reads(c);
+        c->epoch_open = false; /* D-075 item 1: its next confirmation starts a new stop epoch */
     }
     if (c->failed) {
         return false; /* presence still ages out above, also while latched */
@@ -487,11 +491,15 @@ static void on_negative(uds_client_core_t* c, uint32_t now_ms, uint8_t sid, uint
     }
     if (c->pending == UDS_CLIENT_REQ_READ) {
         const uint32_t idx = c->pending_idx;
-        if ((nrc == UDS_NRC_REQUEST_OUT_OF_RANGE) && stoppable(c, idx) &&
-            !c->pending_quiet && !in_quiet_window(c, now_ms)) {
-            /* D-068 item 2: DID not supported. Two separate reads (requests go to both
-             * response IDs, and one NRC may trail an earlier answer); never in the quiet
-             * window after a timeout, where this NRC may be the earlier read's. */
+        const bool refusal = (nrc == UDS_NRC_REQUEST_OUT_OF_RANGE) ||
+                             (nrc == UDS_NRC_SUBFUNCTION_NOT_SUPPORTED_IN_ACTIVE_SESSION) ||
+                             (nrc == UDS_NRC_SERVICE_NOT_SUPPORTED_IN_ACTIVE_SESSION);
+        if (refusal && stoppable(c, idx) && !c->pending_quiet && !in_quiet_window(c, now_ms)) {
+            /* D-068 item 2: DID not supported. D-075 item 1: an NRC 0x7E/0x7F answer to a
+             * never-answered unverified DID counts the same way (the ECU fell back to the
+             * default session on it). Two separate reads (requests go to both response
+             * IDs, and one NRC may trail an earlier answer); never in the quiet window
+             * after a timeout, where this NRC may be the earlier read's. */
             c->did[idx].nrc31_count++;
             if (c->did[idx].nrc31_count >= NRC31_READS_TO_STOP) {
                 stop_did(c, idx);
@@ -598,7 +606,10 @@ bool uds_client_core_on_indication(uds_client_core_t* c, uint32_t now_ms,
         c->session_up = true;
         c->pending = UDS_CLIENT_REQ_NONE;
         count(&c->stats.session_starts);
-        arm_unverified_reads(c);
+        if (!c->epoch_open) {
+            c->epoch_open = true;
+            arm_unverified_reads(c);
+        }
         return false;
     }
     if ((c->pending == UDS_CLIENT_REQ_READ) && parse_read(c, data, len, sample)) {
