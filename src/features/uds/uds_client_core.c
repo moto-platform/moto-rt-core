@@ -2,10 +2,17 @@
 
 #include "uds_iso14229.h"
 
+#include <math.h>
 #include <stddef.h>
 
 /* ReadDataByIdentifier positive response: [SID + 0x40][DID hi][DID lo][data...]. */
 #define READ_RESPONSE_HEADER 3u
+
+/* D-068 item 2: NRC 0x31 on this many separate reads stops an unverified DID. */
+#define NRC31_READS_TO_STOP 2u
+
+/* D-069 item 3: consecutive valid ENGINE_SPEED samples > 0 (after a 0) = engine start. */
+#define ENGINE_START_SAMPLES 2u
 
 static void count(uint32_t* counter)
 {
@@ -56,6 +63,29 @@ static void start_request(uds_client_core_t* c, uds_client_req_kind_t kind, uint
     count(&c->stats.requests);
 }
 
+/*
+ * D-068 item 2: the stop rule applies to an unverified DID that has had no positive
+ * answer in this session. A verified DID, and one that has answered, keep the
+ * D-050..D-053 skip and retry whatever the ECU says.
+ */
+static bool stoppable(const uds_client_core_t* c, uint32_t idx)
+{
+    return !vehicle_cl250_dids[idx].verified && !c->did[idx].answered;
+}
+
+static void stop_did(uds_client_core_t* c, uint32_t idx)
+{
+    uds_client_did_state_t* d = &c->did[idx];
+    if (!d->stopped) {
+        d->stopped = true;
+        count(&c->stats.did_stops);
+    }
+    d->consecutive_timeouts = 0u; /* the stop rule starts again from zero when it is lifted */
+    d->nrc31_count = 0u;
+    d->slow = false;
+    d->unanswered = false;
+}
+
 static void skip_did(uds_client_core_t* c, uint32_t idx, uint32_t now_ms)
 {
     uds_client_did_state_t* d = &c->did[idx];
@@ -65,6 +95,34 @@ static void skip_did(uds_client_core_t* c, uint32_t idx, uint32_t now_ms)
     d->slow = false; /* the fresh attempt after the cooldown gets its priority back */
     d->unanswered = false;
     count(&c->stats.did_skips);
+}
+
+/* D-069 item 3: a read of ENGINE_SPEED that ends without an in-time decoded sample breaks the run. */
+static void break_rpm_run(uds_client_core_t* c, uint32_t idx)
+{
+    if (idx == (uint32_t)VEHICLE_CL250_IDX_ENGINE_SPEED) {
+        c->rpm_run = 0u;
+    }
+}
+
+/* Unverified DID that never answered in this session: stopped. Otherwise: the skip cooldown. */
+static void stop_or_skip(uds_client_core_t* c, uint32_t idx, uint32_t now_ms)
+{
+    if (stoppable(c, idx)) {
+        stop_did(c, idx);
+    } else {
+        skip_did(c, idx, now_ms);
+    }
+}
+
+/*
+ * D-068 item 2: an NRC carries no DID, so within RESPONSE_TIMEOUT_MAX_MS of a read
+ * timeout it may be the timed-out read's answer. True while that quiet window runs.
+ */
+static bool in_quiet_window(const uds_client_core_t* c, uint32_t now_ms)
+{
+    return c->timeout_seen &&
+           !expired(now_ms, c->last_timeout_ms, VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS);
 }
 
 static void end_with_timeout(uds_client_core_t* c, uint32_t now_ms)
@@ -81,8 +139,11 @@ static void end_with_timeout(uds_client_core_t* c, uint32_t now_ms)
             d->unanswered_ms = c->sent_ms; /* its answer may still come (D-051) */
         }
         d->consecutive_timeouts++;
+        c->timeout_seen = true;
+        c->last_timeout_ms = now_ms;
+        break_rpm_run(c, c->pending_idx);
         if (d->consecutive_timeouts >= VEHICLE_CL250_MAX_CONSECUTIVE_TIMEOUTS) {
-            skip_did(c, c->pending_idx, now_ms);
+            stop_or_skip(c, c->pending_idx, now_ms); /* D-068 item 2: stop, not skip, if unverified */
         }
     }
     c->pending = UDS_CLIENT_REQ_NONE;
@@ -128,6 +189,70 @@ static void lose_session(uds_client_core_t* c)
     if (c->session_up) {
         c->session_up = false;
         count(&c->stats.session_losses);
+    }
+    c->rpm_run = 0u;
+}
+
+/*
+ * D-068 item 2: the extended session is confirmed. Every unverified DID is due at once,
+ * with its stop state, NRC 0x31 count and answered flag cleared (an ECU that serves a DID
+ * only in the extended session refused it before). The verified DIDs keep their schedule.
+ * D-069 item 3: the new session may re-ask once more at its first engine start.
+ */
+static void arm_unverified_reads(uds_client_core_t* c)
+{
+    for (uint32_t idx = 0u; idx < VEHICLE_CL250_DID_COUNT; idx++) {
+        uds_client_did_state_t* d = &c->did[idx];
+        if (!vehicle_cl250_dids[idx].verified) {
+            d->requested = false;
+            d->stopped = false;
+            d->answered = false;
+            d->nrc31_count = 0u;
+            d->skipped = false;
+            d->consecutive_timeouts = 0u;
+        }
+    }
+    c->rpm_zero_seen = false;
+    c->rpm_run = 0u;
+    c->engine_rearmed = false;
+}
+
+/*
+ * D-069 item 3: the first engine start of the confirmed session. Every stopped DID is
+ * pollable again with the stop rule from zero. It keeps last_request_ms (and requested),
+ * so it is due one poll_period_ms after its last request (not forced due: at once only if
+ * that period has already passed), never faster than its tier: its tier rate
+ * and the D-068 polling budget are not exceeded.
+ */
+static void rearm_stopped_reads(uds_client_core_t* c)
+{
+    for (uint32_t idx = 0u; idx < VEHICLE_CL250_DID_COUNT; idx++) {
+        uds_client_did_state_t* d = &c->did[idx];
+        if (d->stopped) {
+            d->stopped = false;
+            d->nrc31_count = 0u;
+            d->consecutive_timeouts = 0u;
+            count(&c->stats.rearms);
+        }
+    }
+}
+
+/* A decoded, in-time ENGINE_SPEED answer to the pending read (D-069 item 3). */
+static void watch_engine_start(uds_client_core_t* c, float rpm)
+{
+    if (!isfinite(rpm)) {
+        c->rpm_run = 0u; /* a NaN is neither a running engine nor a valid 0 */
+    } else if (rpm <= 0.0f) {
+        c->rpm_zero_seen = true;
+        c->rpm_run = 0u;
+    } else if (c->rpm_zero_seen && !c->engine_rearmed) {
+        c->rpm_run++;
+        if (c->rpm_run >= ENGINE_START_SAMPLES) {
+            c->engine_rearmed = true; /* once per confirmed session, not at every restart */
+            rearm_stopped_reads(c);
+        }
+    } else {
+        /* an RPM > 0 without a zero before it, or after the re-ask: nothing to do */
     }
 }
 
@@ -191,7 +316,9 @@ static uint8_t poll_priority(const uds_client_core_t* c, uint32_t idx)
  * most ASSUMED_ROUND_TRIP_MS (ECU answer + one step): the defs codegen (v0.3.2 on)
  * and test_the_gen_table_meets_its_gap_bound bound every DID's sample gap by its
  * stale_after_ms for this order. A faulty DID holds it for up to the base timeout
- * after its first failing attempt (README, "Reads").
+ * after its first failing attempt (README, "Reads"). A stopped unverified DID (D-068 item
+ * 2) is never due; an unverified DID's read gets no NRC 0x78 extension (item 1), so one
+ * blocks the verified DIDs, which come first in the table, for at most one such read.
  */
 static bool next_read(uds_client_core_t* c, uint32_t now_ms, uint32_t* idx_out)
 {
@@ -202,7 +329,7 @@ static bool next_read(uds_client_core_t* c, uint32_t now_ms, uint32_t* idx_out)
         if (d->skipped && expired(now_ms, d->skip_start_ms, VEHICLE_CL250_DID_SKIP_COOLDOWN_MS)) {
             d->skipped = false;
         }
-        const bool due = !d->skipped &&
+        const bool due = !d->skipped && !d->stopped &&
                          (!d->requested ||
                           expired(now_ms, d->last_request_ms,
                                   (uint32_t)vehicle_cl250_dids[idx].poll_period_ms));
@@ -224,6 +351,9 @@ bool uds_client_core_poll(uds_client_core_t* c, uint32_t now_ms, bool rx_busy, b
     *len = 0u;
     c->last = UDS_CLIENT_LAST_NONE;
     check_step_gap(c, now_ms);
+    if (c->timeout_seen && !in_quiet_window(c, now_ms)) {
+        c->timeout_seen = false; /* the window is over: clear it, also across a counter wrap */
+    }
     if (c->ecu_seen && !uds_client_core_ecu_present(c, now_ms)) {
         c->ecu_seen = false; /* absent: presence needs a new answer, also across a wrap */
         lose_session(c);     /* an ECU that came back is in its default session */
@@ -295,6 +425,7 @@ bool uds_client_core_poll(uds_client_core_t* c, uint32_t now_ms, bool rx_busy, b
     c->did[idx].requested = true;
     c->did[idx].last_request_ms = now_ms;
     start_request(c, UDS_CLIENT_REQ_READ, out[0], idx, now_ms);
+    c->pending_quiet = in_quiet_window(c, now_ms);
     return true;
 }
 
@@ -341,8 +472,11 @@ static void on_negative(uds_client_core_t* c, uint32_t now_ms, uint8_t sid, uint
         return; /* e.g. an NRC for tester present: never ends another request */
     }
     if (nrc == UDS_NRC_RESPONSE_PENDING) {
-        /* D-050: a faulty DID's read still ends at the base timeout from its request. */
-        if ((c->pending != UDS_CLIENT_REQ_READ) || !faulty(c, c->pending_idx)) {
+        /* D-050: a faulty DID's read still ends at the base timeout from its request.
+         * D-068 item 1: so does an unverified DID's (its read holds the slot for at most
+         * the base timeout + one step, the premise of the verified DIDs' gap bounds). */
+        if ((c->pending != UDS_CLIENT_REQ_READ) ||
+            (!faulty(c, c->pending_idx) && vehicle_cl250_dids[c->pending_idx].verified)) {
             c->wait_ms = (c->wait_ms > (VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS / 2u))
                              ? VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS
                              : (c->wait_ms * 2u);
@@ -352,6 +486,18 @@ static void on_negative(uds_client_core_t* c, uint32_t now_ms, uint8_t sid, uint
         return;
     }
     if (c->pending == UDS_CLIENT_REQ_READ) {
+        const uint32_t idx = c->pending_idx;
+        if ((nrc == UDS_NRC_REQUEST_OUT_OF_RANGE) && stoppable(c, idx) &&
+            !c->pending_quiet && !in_quiet_window(c, now_ms)) {
+            /* D-068 item 2: DID not supported. Two separate reads (requests go to both
+             * response IDs, and one NRC may trail an earlier answer); never in the quiet
+             * window after a timeout, where this NRC may be the earlier read's. */
+            c->did[idx].nrc31_count++;
+            if (c->did[idx].nrc31_count >= NRC31_READS_TO_STOP) {
+                stop_did(c, idx);
+            }
+        }
+        break_rpm_run(c, idx); /* D-069 item 3: an NRC breaks the run */
         read_answered(c, now_ms); /* answered, not a timeout */
     }
     c->pending = UDS_CLIENT_REQ_NONE;
@@ -398,7 +544,8 @@ void uds_client_core_on_fc_withheld(uds_client_core_t* c, uint32_t now_ms)
     if (c->pending != UDS_CLIENT_REQ_NONE) {
         count(&c->stats.unavailable); /* not a timeout: the ECU answered */
         if (c->pending == UDS_CLIENT_REQ_READ) {
-            skip_did(c, c->pending_idx, now_ms);
+            break_rpm_run(c, c->pending_idx);
+            stop_or_skip(c, c->pending_idx, now_ms); /* D-068 item 2 */
         }
         c->pending = UDS_CLIENT_REQ_NONE;
     }
@@ -416,7 +563,10 @@ bool uds_client_core_on_indication(uds_client_core_t* c, uint32_t now_ms,
         /* A segmented reception failed (N_Cr, sequence): the ECU may still be sending. */
         count(&c->stats.unavailable);
         if (c->pending == UDS_CLIENT_REQ_READ) {
-            skip_did(c, c->pending_idx, now_ms);
+            break_rpm_run(c, c->pending_idx);
+            /* D-068 item 2: a First Frame whose reception then failed is a First Frame
+             * answer too: stop a never-answered unverified DID, skip any other. */
+            stop_or_skip(c, c->pending_idx, now_ms);
         }
         c->pending = UDS_CLIENT_REQ_NONE;
         hold_for(c, now_ms, c->abort_hold_ms);
@@ -437,7 +587,8 @@ bool uds_client_core_on_indication(uds_client_core_t* c, uint32_t now_ms,
         /* D-059: a table DID answers in a Single Frame. A segmented answer is "service
          * unavailable", not a timeout; the ECU has finished, so no hold. */
         count(&c->stats.unavailable);
-        skip_did(c, c->pending_idx, now_ms);
+        break_rpm_run(c, c->pending_idx);
+        stop_or_skip(c, c->pending_idx, now_ms); /* D-068 item 2: no table DID needs one */
         c->pending = UDS_CLIENT_REQ_NONE;
         return false;
     }
@@ -447,11 +598,23 @@ bool uds_client_core_on_indication(uds_client_core_t* c, uint32_t now_ms,
         c->session_up = true;
         c->pending = UDS_CLIENT_REQ_NONE;
         count(&c->stats.session_starts);
+        arm_unverified_reads(c);
         return false;
     }
     if ((c->pending == UDS_CLIENT_REQ_READ) && parse_read(c, data, len, sample)) {
         sample->stamp_ms = sample_stamp(c);
         read_answered(c, now_ms);
+        uds_client_did_state_t* d = &c->did[c->pending_idx];
+        d->answered = true; /* D-068 item 2: a positive answer undoes a stop and ends the rule */
+        d->stopped = false;
+        d->nrc31_count = 0u;
+        if (c->pending_idx == (uint32_t)VEHICLE_CL250_IDX_ENGINE_SPEED) {
+            if (d->slow) {
+                c->rpm_run = 0u; /* D-051: a slow answer is not a fresh sample */
+            } else {
+                watch_engine_start(c, sample->physical);
+            }
+        }
         c->pending = UDS_CLIENT_REQ_NONE;
         count(&c->stats.reads_ok);
         return true;
@@ -483,6 +646,11 @@ bool uds_client_core_did_skipped(const uds_client_core_t* c, uint32_t idx, uint3
     }
     const uds_client_did_state_t* d = &c->did[idx];
     return d->skipped && !expired(now_ms, d->skip_start_ms, VEHICLE_CL250_DID_SKIP_COOLDOWN_MS);
+}
+
+bool uds_client_core_did_stopped(const uds_client_core_t* c, uint32_t idx)
+{
+    return (c != NULL) && (idx < VEHICLE_CL250_DID_COUNT) && c->did[idx].stopped;
 }
 
 uds_client_req_kind_t uds_client_core_pending(const uds_client_core_t* c)

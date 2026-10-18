@@ -37,7 +37,8 @@
  *     late answer to a timed-out read can be taken for the next read of the same DID;
  *     this stamp never makes the sample look younger than it is.
  *   - Response timeout RESPONSE_TIMEOUT_BASE_MS; NRC 0x78 for the pending SID restarts
- *     it doubled (not for a D-050 faulty read), up to RESPONSE_TIMEOUT_MAX_MS; a
+ *     it doubled (not for a D-050 faulty read, nor for an unverified DID's read: D-068
+ *     item 1), up to RESPONSE_TIMEOUT_MAX_MS; a
  *     request never waits longer than RESPONSE_TIMEOUT_MAX_MS in total. The base
  *     timeout pauses while a segmented
  *     reception runs (it ends in N_Cr at the latest); the total cap does not.
@@ -56,6 +57,17 @@
  *     without a timeout (a read is "service unavailable" as above), and nothing is sent
  *     for RESPONSE_TIMEOUT_MAX_MS, while the ECU waits for the Flow Control. A running
  *     hold is never shortened.
+ *   - Unverified DIDs (D-068 item 2; vehicle_cl250_dids[idx].verified == false): each
+ *     confirmed session arms them all (due at once). Until the next confirmation, one
+ *     without a positive answer in this session is stopped (never due, no skip) after NRC
+ *     0x31 on two separate reads (not one in the quiet window after a read timeout),
+ *     MAX_CONSECUTIVE_TIMEOUTS timeouts in a row, or a First Frame answer. A decoded answer
+ *     marks it answered: from then on it, like every verified DID, keeps the skip/retry
+ *     above. Other NRCs never stop a DID. NRC 0x7E/0x7F drop the session, so the next
+ *     confirmation re-arms.
+ *   - Engine-start re-ask (D-069 item 3): once per confirmed session, at the first engine
+ *     start (two consecutive in-time ENGINE_SPEED samples > 0 after one == 0), every
+ *     stopped DID is pollable again, due one poll_period_ms after its last request.
  *   - ECU present while any response came within ECU_ABSENT_TIMEOUT_MS. Absence also
  *     ends every DID's D-050/D-051 fault state: no read from before it is answered.
  *   - No request is produced while the link cannot take one at once (tx_ready false,
@@ -113,6 +125,9 @@ typedef struct {
     bool skipped;     /* in skip cooldown since skip_start_ms */
     bool slow;        /* last answer came more than poll_period_ms after its stamp (D-051) */
     bool unanswered;  /* a timed-out read is unanswered: unanswered_ms is the stamp (D-051) */
+    uint8_t nrc31_count; /* NRC 0x31 reads since the session was confirmed (unverified, D-068) */
+    bool answered;    /* a positive answer in this session: the stop rule no longer applies */
+    bool stopped;     /* unverified DID the ECU does not seem to serve: never due (D-068 item 2) */
 } uds_client_did_state_t;
 
 /* Diagnostic counters (saturating). */
@@ -131,6 +146,8 @@ typedef struct {
     uint32_t session_losses;    /* session up -> down */
     uint32_t step_overruns;     /* poll gaps above VEHICLE_CL250_CLIENT_STEP_MAX_MS (D-053) */
     uint32_t step_gap_max_ms;   /* longest gap between two polls since init (D-029 bench) */
+    uint32_t did_stops;         /* unverified DIDs stopped (D-068 item 2) */
+    uint32_t rearms;            /* stopped DIDs made pollable again at an engine start (D-069) */
 } uds_client_stats_t;
 
 /* One decoded DID read, for the caller to store (services/vehicle_signals). */
@@ -169,6 +186,13 @@ typedef struct {
 
     bool ecu_seen;
     uint32_t last_response_ms;
+
+    bool timeout_seen;        /* a read timed out at last_timeout_ms: its quiet window (D-068) */
+    uint32_t last_timeout_ms;
+    bool pending_quiet;       /* the pending read was sent inside that quiet window */
+    bool rpm_zero_seen;       /* D-069: a valid ENGINE_SPEED == 0 since the session was confirmed */
+    uint8_t rpm_run;          /* consecutive valid ENGINE_SPEED samples > 0 after that zero */
+    bool engine_rearmed;      /* the engine-start re-ask happened in this confirmed session */
 
     uint32_t last_poll_ms;    /* the step gap check (D-053) */
     bool polled;              /* last_poll_ms is set */
@@ -222,6 +246,9 @@ bool uds_client_core_failed(const uds_client_core_t* c);
 
 /* True while DID index idx is in skip cooldown (false for an index out of range). */
 bool uds_client_core_did_skipped(const uds_client_core_t* c, uint32_t idx, uint32_t now_ms);
+
+/* True while an unverified DID is stopped (D-068 item 2; false for an index out of range). */
+bool uds_client_core_did_stopped(const uds_client_core_t* c, uint32_t idx);
 
 /* Pending request kind (UDS_CLIENT_REQ_NONE when the slot is free). */
 uds_client_req_kind_t uds_client_core_pending(const uds_client_core_t* c);
