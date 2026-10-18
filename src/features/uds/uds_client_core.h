@@ -63,9 +63,10 @@
  *     0x31 on two separate reads (not one in the quiet window after a read timeout),
  *     MAX_CONSECUTIVE_TIMEOUTS timeouts in a row, or a First Frame answer. A decoded answer
  *     marks it answered: from then on it, like every verified DID, keeps the skip/retry
- *     above. Other NRCs never stop a DID (D-075 item 1 (f): an answered unverified DID is stopped by two NRC 0x7E/0x7F reads, counted apart). NRC 0x7E/0x7F drop the session and, on a read of a
- *     never-answered unverified DID, count toward its stop like NRC 0x31 (D-075 (provisional)
- *     item 1).
+ *     above. Other NRCs never stop a DID (D-075 item 1 (f): an answered unverified
+ *     DID is stopped by two NRC 0x7E/0x7F reads, counted apart). NRC 0x7E/0x7F drop the
+ *     session and, on a read of a never-answered unverified DID, count toward its stop
+ *     like NRC 0x31 (D-075 (provisional) item 1).
  *   - Stop epoch (D-075 (provisional) item 1): the stop state and the engine-start flag
  *     belong to an epoch. It starts only at the tester's start and at the confirmation
  *     after the ECU was lost (ECU_ABSENT_TIMEOUT_MS); that confirmation arms every
@@ -78,7 +79,8 @@
  *     re-confirmation.
  *   - Engine-start re-ask (D-069 item 3): once per stop epoch, at the first engine
  *     start (two consecutive in-time ENGINE_SPEED samples > 0 after one == 0), every
- *     stopped DID is pollable again, due one poll_period_ms after its last request.
+ *     stopped DID is pollable again, due one poll_period_ms after its last request, and
+ *     the NRC counts of every unverified DID start from zero (its timeout count is kept).
  *   - ECU present while any response came within ECU_ABSENT_TIMEOUT_MS. Absence also
  *     ends every DID's D-050/D-051 fault state: no read from before it is answered.
  *   - No request is produced while the link cannot take one at once (tx_ready false,
@@ -130,7 +132,7 @@ typedef enum {
 /* Why an unverified DID is stopped (D-068 item 2, D-075), for the field and the bench. */
 typedef enum {
     UDS_CLIENT_STOP_NONE = 0,
-    UDS_CLIENT_STOP_NRC_31,      /* NRC 0x31 on two separate reads (with 0x7E/0x7F: the last) */
+    UDS_CLIENT_STOP_NRC_31,      /* NRC 0x31 on two separate reads, or a 0x31 and a 0x7E/0x7F */
     UDS_CLIENT_STOP_NRC_SESSION, /* NRC 0x7E/0x7F completed the count (D-075 item 1) */
     UDS_CLIENT_STOP_TIMEOUTS,    /* MAX_CONSECUTIVE_TIMEOUTS timeouts in a row */
     UDS_CLIENT_STOP_FIRST_FRAME  /* a First Frame answer, a withheld FC or a failed reception */
@@ -145,9 +147,11 @@ typedef struct {
     uds_client_stop_reason_t stop_reason; /* NONE: not stopped (D-068 item 2, never due) */
     uint8_t consecutive_timeouts; /* timeouts since the last answer in time: the skip count */
     uint8_t stop_nrc_count; /* NRC 0x31/0x7E/0x7F reads of a never-answered unverified DID in
-                               this epoch; a positive answer clears it (D-068, D-075) */
-    uint8_t session_nrc_count; /* NRC 0x7E/0x7F reads of an unverified DID in this epoch; a
-                                  positive answer does not clear it (D-075 item 1 (f)) */
+                               this epoch since the re-ask; a positive answer clears it
+                               (D-068, D-075) */
+    uint8_t session_nrc_count; /* NRC 0x7E/0x7F reads of an unverified DID in this epoch since
+                                  the re-ask; a positive answer does not clear it (D-075
+                                  item 1 (f)) */
     bool requested;   /* last_request_ms is set */
     bool skipped;     /* in skip cooldown since skip_start_ms */
     bool slow;        /* last answer came more than poll_period_ms after its stamp (D-051) */
