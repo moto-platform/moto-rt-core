@@ -9,7 +9,7 @@
 #define READ_RESPONSE_HEADER 3u
 
 /* D-068 item 2: NRC 0x31 on this many separate reads stops an unverified DID. */
-#define NRC31_READS_TO_STOP 2u
+#define STOP_NRC_READS 2u
 
 /* D-069 item 3: consecutive valid ENGINE_SPEED samples > 0 (after a 0) = engine start. */
 #define ENGINE_START_SAMPLES 2u
@@ -82,7 +82,7 @@ static void stop_did(uds_client_core_t* c, uint32_t idx, uds_client_stop_reason_
         count(&c->stats.did_stops);
     }
     d->consecutive_timeouts = 0u; /* the stop rule starts again from zero when it is lifted */
-    d->refusal_count = 0u;
+    d->stop_nrc_count = 0u;
     d->slow = false;
     d->unanswered = false;
 }
@@ -211,7 +211,7 @@ static void arm_unverified_reads(uds_client_core_t* c)
             d->requested = false;
             d->stopped = false;
             d->answered = false;
-            d->refusal_count = 0u;
+            d->stop_nrc_count = 0u;
             d->stop_reason = UDS_CLIENT_STOP_NONE;
             d->skipped = false;
             d->consecutive_timeouts = 0u;
@@ -236,7 +236,7 @@ static void rearm_stopped_reads(uds_client_core_t* c)
         if (d->stopped) {
             d->stopped = false;
             d->stop_reason = UDS_CLIENT_STOP_NONE;
-            d->refusal_count = 0u;
+            d->stop_nrc_count = 0u;
             d->consecutive_timeouts = 0u;
             count(&c->stats.rearms);
         }
@@ -503,8 +503,8 @@ static void on_negative(uds_client_core_t* c, uint32_t now_ms, uint8_t sid, uint
              * default session on it). Two separate reads (requests go to both response
              * IDs, and one NRC may trail an earlier answer); never in the quiet window
              * after a timeout, where this NRC may be the earlier read's. */
-            c->did[idx].refusal_count++;
-            if (c->did[idx].refusal_count >= NRC31_READS_TO_STOP) {
+            c->did[idx].stop_nrc_count++;
+            if (c->did[idx].stop_nrc_count >= STOP_NRC_READS) {
                 stop_did(c, idx,
                          (nrc == UDS_NRC_REQUEST_OUT_OF_RANGE) ? UDS_CLIENT_STOP_NRC_31
                                                               : UDS_CLIENT_STOP_NRC_SESSION);
@@ -631,7 +631,7 @@ bool uds_client_core_on_indication(uds_client_core_t* c, uint32_t now_ms,
         d->answered = true; /* D-068 item 2: a positive answer undoes a stop and ends the rule */
         d->stopped = false;
         d->stop_reason = UDS_CLIENT_STOP_NONE;
-        d->refusal_count = 0u;
+        d->stop_nrc_count = 0u;
         if (c->pending_idx == (uint32_t)VEHICLE_CL250_IDX_ENGINE_SPEED) {
             if (d->slow) {
                 c->rpm_run = 0u; /* D-051: a slow answer is not a fresh sample */

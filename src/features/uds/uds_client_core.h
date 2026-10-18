@@ -145,7 +145,7 @@ typedef struct {
     bool skipped;     /* in skip cooldown since skip_start_ms */
     bool slow;        /* last answer came more than poll_period_ms after its stamp (D-051) */
     bool unanswered;  /* a timed-out read is unanswered: unanswered_ms is the stamp (D-051) */
-    uint8_t refusal_count; /* NRC 0x31/0x7E/0x7F reads in this epoch (unverified, D-068, D-075) */
+    uint8_t stop_nrc_count; /* NRC 0x31/0x7E/0x7F reads in this epoch (unverified, D-068, D-075) */
     uds_client_stop_reason_t stop_reason; /* why the DID is stopped (NONE while it is not) */
     bool answered;    /* a positive answer in this epoch: the stop rule no longer applies */
     bool stopped;     /* unverified DID the ECU does not seem to serve: never due (D-068 item 2) */
