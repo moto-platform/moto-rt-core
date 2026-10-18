@@ -11,6 +11,7 @@ add_library(moto_rtcore_logic STATIC
     services/com_core.c
     services/alive_core.c
     services/imu_core.c
+    services/lean_health_core.c
     features/cornering/lean_core.c
     features/cornering/lean_tx_core.c
 )
@@ -51,6 +52,7 @@ add_library(moto_rtcore_fw STATIC
     services/snapshot.c
     services/alive.c
     services/imu.c
+    services/lean_health.c
     features/uds/isotp_link.c
     features/uds/uds_client.c
     features/uds/uds_server.c
