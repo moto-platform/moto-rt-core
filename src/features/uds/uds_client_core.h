@@ -58,14 +58,25 @@
  *     for RESPONSE_TIMEOUT_MAX_MS, while the ECU waits for the Flow Control. A running
  *     hold is never shortened.
  *   - Unverified DIDs (D-068 item 2; vehicle_cl250_dids[idx].verified == false): each
- *     confirmed session arms them all (due at once). Until the next confirmation, one
- *     without a positive answer in this session is stopped (never due, no skip) after NRC
+ *     stop epoch arms them all (due at once). Until the epoch ends, one
+ *     without a positive answer in this epoch is stopped (never due, no skip) after NRC
  *     0x31 on two separate reads (not one in the quiet window after a read timeout),
  *     MAX_CONSECUTIVE_TIMEOUTS timeouts in a row, or a First Frame answer. A decoded answer
  *     marks it answered: from then on it, like every verified DID, keeps the skip/retry
- *     above. Other NRCs never stop a DID. NRC 0x7E/0x7F drop the session, so the next
- *     confirmation re-arms.
- *   - Engine-start re-ask (D-069 item 3): once per confirmed session, at the first engine
+ *     above. Other NRCs never stop a DID. NRC 0x7E/0x7F drop the session and, on a read of a
+ *     never-answered unverified DID, count toward its stop like NRC 0x31 (D-075 (provisional)
+ *     item 1).
+ *   - Stop epoch (D-075 (provisional) item 1): the stop state and the engine-start flag
+ *     belong to an epoch. It starts only at the tester's start and at the confirmation
+ *     after the ECU was lost (ECU_ABSENT_TIMEOUT_MS); that confirmation arms every
+ *     unverified DID (due at once). A confirmation after NRC 0x7E/0x7F stays in the
+ *     epoch: stops, answered flags and the engine-start flag are kept, and no DID is
+ *     made due (each keeps its last request time and is due at its tier rate). A counted
+ *     NRC 0x7E/0x7F (D-075 item 1 (amended, provisional)) requests the session at the next
+ *     step; every other session loss waits SESSION_RETRY_INTERVAL_MS. The engine-start
+ *     zero belongs to the epoch; the samples above 0 must be consecutive after a
+ *     re-confirmation.
+ *   - Engine-start re-ask (D-069 item 3): once per stop epoch, at the first engine
  *     start (two consecutive in-time ENGINE_SPEED samples > 0 after one == 0), every
  *     stopped DID is pollable again, due one poll_period_ms after its last request.
  *   - ECU present while any response came within ECU_ABSENT_TIMEOUT_MS. Absence also
@@ -116,6 +127,15 @@ typedef enum {
     UDS_CLIENT_LAST_READ
 } uds_client_last_t;
 
+/* Why an unverified DID is stopped (D-068 item 2, D-075), for the field and the bench. */
+typedef enum {
+    UDS_CLIENT_STOP_NONE = 0,
+    UDS_CLIENT_STOP_NRC_31,      /* NRC 0x31 on two separate reads (with 0x7E/0x7F: the last) */
+    UDS_CLIENT_STOP_NRC_SESSION, /* NRC 0x7E/0x7F completed the count (D-075 item 1) */
+    UDS_CLIENT_STOP_TIMEOUTS,    /* MAX_CONSECUTIVE_TIMEOUTS timeouts in a row */
+    UDS_CLIENT_STOP_FIRST_FRAME  /* a First Frame answer, a withheld FC or a failed reception */
+} uds_client_stop_reason_t;
+
 typedef struct {
     uint32_t last_request_ms; /* start of the poll period: last request, or its timeout */
     uint32_t skip_start_ms;
@@ -125,8 +145,9 @@ typedef struct {
     bool skipped;     /* in skip cooldown since skip_start_ms */
     bool slow;        /* last answer came more than poll_period_ms after its stamp (D-051) */
     bool unanswered;  /* a timed-out read is unanswered: unanswered_ms is the stamp (D-051) */
-    uint8_t nrc31_count; /* NRC 0x31 reads since the session was confirmed (unverified, D-068) */
-    bool answered;    /* a positive answer in this session: the stop rule no longer applies */
+    uint8_t refusal_count; /* NRC 0x31/0x7E/0x7F reads in this epoch (unverified, D-068, D-075) */
+    uds_client_stop_reason_t stop_reason; /* why the DID is stopped (NONE while it is not) */
+    bool answered;    /* a positive answer in this epoch: the stop rule no longer applies */
     bool stopped;     /* unverified DID the ECU does not seem to serve: never due (D-068 item 2) */
 } uds_client_did_state_t;
 
@@ -190,9 +211,10 @@ typedef struct {
     bool timeout_seen;        /* a read timed out at last_timeout_ms: its quiet window (D-068) */
     uint32_t last_timeout_ms;
     bool pending_quiet;       /* the pending read was sent inside that quiet window */
-    bool rpm_zero_seen;       /* D-069: a valid ENGINE_SPEED == 0 since the session was confirmed */
+    bool rpm_zero_seen;       /* D-069: a valid ENGINE_SPEED == 0 in this epoch (kept across a 0x7E/0x7F) */
     uint8_t rpm_run;          /* consecutive valid ENGINE_SPEED samples > 0 after that zero */
-    bool engine_rearmed;      /* the engine-start re-ask happened in this confirmed session */
+    bool engine_rearmed;      /* the engine-start re-ask happened in this stop epoch */
+    bool epoch_open;          /* D-075 item 1: a stop epoch is running (a confirmation armed it) */
 
     uint32_t last_poll_ms;    /* the step gap check (D-053) */
     bool polled;              /* last_poll_ms is set */
@@ -249,6 +271,9 @@ bool uds_client_core_did_skipped(const uds_client_core_t* c, uint32_t idx, uint3
 
 /* True while an unverified DID is stopped (D-068 item 2; false for an index out of range). */
 bool uds_client_core_did_stopped(const uds_client_core_t* c, uint32_t idx);
+
+/* Why DID index idx is stopped; UDS_CLIENT_STOP_NONE when it is not (or idx is out of range). */
+uds_client_stop_reason_t uds_client_core_did_stop_reason(const uds_client_core_t* c, uint32_t idx);
 
 /* Pending request kind (UDS_CLIENT_REQ_NONE when the slot is free). */
 uds_client_req_kind_t uds_client_core_pending(const uds_client_core_t* c);
