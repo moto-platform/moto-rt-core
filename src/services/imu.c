@@ -47,6 +47,18 @@ static void drain(imu_acc_t* acc)
     }
 }
 
+// cppcheck-suppress misra-c2012-8.7 ; DEV-002: called by the EKF glue (D-067) and the tests
+imu_offset_health_t imu_offset_health(const imu_t* imu)
+{
+    imu_offset_health_t h = {false, false, 0u};
+    if (imu != NULL) {
+        h.offset_learned = imu->core.offset_learned;
+        h.offset_rejected = imu->core.offset_rejected;
+        h.reject_count = imu->core.reject_count;
+    }
+    return h;
+}
+
 // cppcheck-suppress misra-c2012-8.7 ; DEV-002: called by the EKF task (D-065 PR 3b) and the tests
 imu_sample_t imu_read(imu_t* imu, uint32_t now_ms, bool standstill)
 {

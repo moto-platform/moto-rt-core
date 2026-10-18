@@ -24,6 +24,12 @@
  *   newest output record: the record is at least as new as the count says (the EKF bumps alive only
  *   after the publish), the count never decreases, the record's fields agree with its
  *   state, and its stamp never goes backwards;
+ * - the DID 0xFD03 fields (E-17 (a), D-067) travel in the same record and are checked with
+ *   it: the offset flags agree with the state (ESTIMATED needs a learnt offset, a learnt
+ *   offset reads 0 unlearned seconds, an unlearned run reads the seconds since the first
+ *   step), nothing is rejected, and a torn record would break one of these. The comms
+ *   task also builds the DID itself every pass from lean_tx_step()'s comms-local copy
+ *   (production path; that copy never reads the snapshot) and checks its layout rules;
  * - one 0x020 frame per cycle, all E2E-clean, and no INVALID one after the first valid.
  *
  * Limits (README "Lean glue" tests): the IMU fake is fed by the EKF thread (test_imu covers
@@ -45,6 +51,7 @@
 #include "platform.h"
 #include "platform_e2e.h"
 #include "services/can_if.h"
+#include "services/lean_health.h"
 #include "services/vehicle_signals.h"
 #include "vehicle_cl250.h"
 
@@ -100,6 +107,10 @@ typedef struct {
     uint32_t record_off_grid;  /* an output stamp off the EKF cycle grid */
     uint32_t record_fault;     /* an EKF-side snapshot fault in a record */
     uint32_t record_bad;       /* fields that disagree with the record's state */
+    uint32_t record_unlearned_after_learnt; /* the offset flag went back to false */
+    uint32_t health_reads;     /* DID 0xFD03 builds in the comms task */
+    uint32_t health_fresh;     /* of them with RECORD_FRESH set */
+    uint32_t health_bad;       /* a DID that breaks its layout rules */
     uint32_t record_behind;    /* a record older than the alive count read before it */
     uint32_t alive_backwards;  /* an alive count lower than one read before */
     uint32_t estimated;
@@ -204,16 +215,38 @@ static bool frame_is_invalid(const uint8_t* data)
     return memcmp(ref, data, sizeof ref) == 0;
 }
 
+/* The first EKF step's time: the unlearned run starts there (lean_health_unlearned_s). */
+#define FIRST_STEP_MS (START_MS + CYCLE_MS)
+
+/* The EKF-side 0xFD03 fields agree with the state and the stamp (E-17 (a)). The scenario
+ * rides straight on a clean IMU: nothing is ever rejected. */
+static bool health_consistent(const lean_record_t* r)
+{
+    const lean_health_ekf_t* h = &r->health;
+    if (h->offset_rejected || (h->reject_count != 0u)) {
+        return false;
+    }
+    if (h->offset_learned) {
+        return h->unlearned_s == 0u;
+    }
+    return h->unlearned_s == (uint16_t)((r->stamp_ms - FIRST_STEP_MS) / 1000u);
+}
+
 /* The fields agree with the state (a torn record would mix two outputs). The boot record
  * (stamp 0) is the zero record. */
 static bool record_consistent(const lean_record_t* r)
 {
     if (r->stamp_ms == 0u) {
-        return r->out.state == LEAN_OUT_INVALID;
+        const lean_health_ekf_t zero = {false, false, 0u, 0u};
+        return (r->out.state == LEAN_OUT_INVALID) && (memcmp(&r->health, &zero, sizeof zero) == 0);
+    }
+    if (!health_consistent(r)) {
+        return false;
     }
     if (r->out.state == LEAN_OUT_ESTIMATED) {
-        return isfinite(r->out.roll_deg) && (fabsf(r->out.roll_deg) < STRAIGHT_ROLL_MAX_DEG) &&
-               (r->out.quality > 0u) && (r->out.quality <= 100u) && (r->out.reason == LEAN_REASON_NONE);
+        return r->health.offset_learned && isfinite(r->out.roll_deg) &&
+               (fabsf(r->out.roll_deg) < STRAIGHT_ROLL_MAX_DEG) && (r->out.quality > 0u) &&
+               (r->out.quality <= 100u) && (r->out.reason == LEAN_REASON_NONE);
     }
     return (r->out.state == LEAN_OUT_INVALID) && (r->out.roll_deg == 0.0f) && (r->out.quality == 0u) &&
            (r->out.reason != LEAN_REASON_NONE);
@@ -221,7 +254,7 @@ static bool record_consistent(const lean_record_t* r)
 
 /* Comms task, every pass from the first send: the alive count, then the newest output
  * record (a second read by the same consumer, after lean_tx_step() is done with its index). */
-static void check_record(uint32_t* last_stamp, uint32_t* last_alive)
+static void check_record(uint32_t* last_stamp, uint32_t* last_alive, bool* seen_learnt)
 {
     const uint32_t alive = alive_count(&link.alive);
     uint8_t i = 0u;
@@ -235,9 +268,42 @@ static void check_record(uint32_t* last_stamp, uint32_t* last_alive)
     cres.record_off_grid += ((r->stamp_ms % CYCLE_MS) == 0u) ? 0u : 1u;
     cres.record_fault += r->fault ? 1u : 0u;
     cres.record_bad += record_consistent(r) ? 0u : 1u;
+    cres.record_unlearned_after_learnt += (*seen_learnt && !r->health.offset_learned) ? 1u : 0u;
+    *seen_learnt = *seen_learnt || r->health.offset_learned;
     cres.estimated += (r->out.state == LEAN_OUT_ESTIMATED) ? 1u : 0u;
     *last_stamp = r->stamp_ms;
     *last_alive = alive;
+}
+
+/* DID 0xFD03 as the UDS server builds it, from lean_tx_step()'s comms-local copy and the
+ * comms flags app/comms sets (production path). The copy lags a record that check_record()
+ * took first, so only the layout rules are checked, not freshness against the clock. */
+static void check_health_did(uint32_t now)
+{
+    const lean_health_comms_t comms = {lean_tx_speed_producer_fault(&tx), lean_tx_output_consumer_fault(&tx), true};
+    lean_health_set_comms(&comms);
+    uint8_t d[PLATFORM_UDS_DID_LEAN_HEALTH_LENGTH];
+    cres.health_reads++;
+    if (!lean_health_read(now, d, sizeof d)) {
+        cres.health_bad++;
+        return;
+    }
+    const uint8_t f = d[PLATFORM_UDS_LEAN_HEALTH_RECORD_FRESH_BYTE];
+    const uint16_t rejects = (uint16_t)(((uint16_t)d[PLATFORM_UDS_LEAN_HEALTH_OFFSET_REJECTS_BYTE] << 8u) |
+                                        d[PLATFORM_UDS_LEAN_HEALTH_OFFSET_REJECTS_BYTE + 1u]);
+    const uint16_t unl = (uint16_t)(((uint16_t)d[PLATFORM_UDS_LEAN_HEALTH_UNLEARNED_S_BYTE] << 8u) |
+                                    d[PLATFORM_UDS_LEAN_HEALTH_UNLEARNED_S_BYTE + 1u]);
+    const bool fresh = (f & PLATFORM_UDS_LEAN_HEALTH_RECORD_FRESH_MASK) != 0u;
+    const bool learned = (f & PLATFORM_UDS_LEAN_HEALTH_OFFSET_LEARNED_MASK) != 0u;
+    bool ok = (f & PLATFORM_UDS_LEAN_HEALTH_RESERVED_MASK) == 0u;
+    ok = ok && ((f & (PLATFORM_UDS_LEAN_HEALTH_OFFSET_REJECTED_MASK | PLATFORM_UDS_LEAN_HEALTH_SPEED_PRODUCER_FAULT_MASK |
+                      PLATFORM_UDS_LEAN_HEALTH_OUTPUT_CONSUMER_FAULT_MASK | PLATFORM_UDS_LEAN_HEALTH_SPEED_CONSUMER_FAULT_MASK)) == 0u);
+    ok = ok && ((f & PLATFORM_UDS_LEAN_HEALTH_EKF_ALIVE_OK_MASK) != 0u) && (rejects == 0u);
+    ok = ok && (!learned || fresh);                          /* a learnt offset is reported fresh only */
+    ok = ok && (fresh || (unl == PLATFORM_UDS_LEAN_HEALTH_UNLEARNED_S_UNKNOWN));
+    ok = ok && (!(fresh && learned) || (unl == 0u));
+    cres.health_bad += ok ? 0u : 1u;
+    cres.health_fresh += fresh ? 1u : 0u;
 }
 
 static void drain(uint32_t now, moto_e2e_rx_state_t* rx)
@@ -273,6 +339,7 @@ static void* comms_thread(void* arg)
     moto_e2e_rx_init(&rx);
     uint32_t last_record_stamp = 0u;
     uint32_t last_alive = 0u;
+    bool seen_learnt = false;
     bool sending = false;
     uint32_t done = START_MS;
     while (done < END_MS) {
@@ -295,10 +362,11 @@ static void* comms_thread(void* arg)
         }
         if (sending) {
             lean_tx_step(&tx, now);
+            check_health_did(now);
         }
         drain(now, &rx);
         if (sending) {
-            check_record(&last_record_stamp, &last_alive);
+            check_record(&last_record_stamp, &last_alive, &seen_learnt);
         }
         cres.passes++;
         done = now;
@@ -339,6 +407,10 @@ static void run_phase(uint32_t k)
     TEST_ASSERT_EQUAL_UINT32(0u, cres.record_fault);
     TEST_ASSERT_EQUAL_UINT32(0u, cres.record_bad);
     TEST_ASSERT_EQUAL_UINT32(0u, cres.record_behind);
+    TEST_ASSERT_EQUAL_UINT32(0u, cres.record_unlearned_after_learnt);
+    TEST_ASSERT_EQUAL_UINT32(0u, cres.health_bad);
+    TEST_ASSERT_EQUAL_UINT32((END_MS - cres.first_send_ms) + 1u, cres.health_reads);
+    TEST_ASSERT_GREATER_THAN_UINT32(cres.health_reads / 2u, cres.health_fresh);
     TEST_ASSERT_EQUAL_UINT32(0u, cres.alive_backwards);
     TEST_ASSERT_GREATER_THAN_UINT32(0u, cres.estimated);
 

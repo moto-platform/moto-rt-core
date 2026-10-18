@@ -102,6 +102,13 @@ void lean_ekf_step(lean_ekf_t* e, uint32_t now_ms)
         link->out_slots[wi].out = out;
         link->out_slots[wi].stamp_ms = imu.stamp_ms;
         link->out_slots[wi].fault = snapshot_consumer_fault(&link->speed_snap);
+        /* the 0xFD03 fields, diagnostic only (D-067); counters saturate, never wrap */
+        const imu_offset_health_t ih = imu_offset_health(&e->imu);
+        lean_health_ekf_t* const h = &link->out_slots[wi].health;
+        h->offset_learned = ih.offset_learned;
+        h->offset_rejected = ih.offset_rejected;
+        h->reject_count = lean_health_sat16(ih.reject_count, PLATFORM_UDS_LEAN_HEALTH_OFFSET_REJECTS_MAX);
+        h->unlearned_s = lean_health_unlearned_s(&e->unlearned_run, ih.offset_learned, now_ms);
         snapshot_publish(&link->out_snap);
     }
 

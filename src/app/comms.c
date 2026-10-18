@@ -3,6 +3,7 @@
 #include "platform.h"
 #include "services/can_if.h"
 #include "services/can_sm.h"
+#include "services/lean_health.h"
 #include "services/timebase.h"
 
 #include <stddef.h>
@@ -95,7 +96,15 @@ void comms_pass(uds_client_t* client, uds_server_t* server, vehicle_republish_t*
     (void)can_if_dispatch(CAN_PORT_PLATFORM, COMMS_RX_PER_PASS);
     vehicle_republish_step(republisher);
     const bool stalled = ekf_stalled(ekf); /* sampled every pass */
-    heartbeat_step(heartbeat, stalled || (lean_open && !lean_supervised));
+    const bool hb_stalled = stalled || (lean_open && !lean_supervised);
+    heartbeat_step(heartbeat, hb_stalled);
     lean_tx_step(active, timebase_now_ms());
+    /* DID 0xFD03: the comms-side fields are comms-task state, set right before the server
+     * answers (D-067). EKF_ALIVE_OK is the heartbeat's own verdict, and clear without a
+     * registered EKF. */
+    const lean_health_comms_t health = {lean_tx_speed_producer_fault(lean),
+                                        lean_tx_output_consumer_fault(lean),
+                                        comms_ekf_registered(ekf) && !hb_stalled};
+    lean_health_set_comms(&health);
     uds_server_step(server);
 }
