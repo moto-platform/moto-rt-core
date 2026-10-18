@@ -4,7 +4,7 @@
 /*
  * rt-core heartbeat (D-005, D-026, D-042 item 3, D-064): the gen/ platform message 0x081
  * HeartbeatRtCore at its gen/ cycle time, E2E-protected, in a dedicated replace-on-new TX
- * buffer (D-054 item 6, D-056 item 6). Receivers (SAFETY, IO, CONN, LINUX) supervise
+ * buffer (D-054 item 6, D-056 item 6). Receivers (SAFETY, CONN, LINUX) supervise
  * rt-core through it: safety-node uses rt-core's lean only while this frame passes its
  * E2E check and NODE_MODE is NORMAL (D-042 item 3).
  *
