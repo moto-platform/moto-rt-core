@@ -1,6 +1,6 @@
 /*
  * L0 tests for the heartbeat glue (features/heartbeat, D-064) on the host CAN port bound
- * to the in-process bus, with a manual clock: what a platform receiver (SAFETY, IO, CONN,
+ * to the in-process bus, with a manual clock: what a platform receiver (SAFETY, CONN,
  * LINUX) gets on 0x081, when, with which NODE_MODE / ERROR_COUNT / UPTIME and which E2E
  * status. The UDS client and server are not stepped: the tests write their diag results
  * by hand, and the server's monitors never run (architecture-guard MAJOR-1).
