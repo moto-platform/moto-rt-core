@@ -1,11 +1,14 @@
 #include "features/cornering/lean_tx.h"
 
 #include "services/can_if.h"
+#include "services/lean_health.h"
 #include "services/vehicle_signals.h"
 
 #include <stddef.h>
 #include <string.h>
 
+_Static_assert(LEAN_TX_FUTURE_MAX_MS == LEAN_HEALTH_FUTURE_MAX_MS,
+               "0xFD03 RECORD_FRESH uses 0x020's future-stamp rule");
 _Static_assert(PLATFORM_EKF_LEAN_CYCLE_TIME_MS > 0u, "a zero cycle time would send every pass");
 
 // cppcheck-suppress misra-c2012-8.7 ; DEV-002: called by app/comms (comms_open_lean) and the tests
@@ -16,6 +19,7 @@ bool lean_tx_open(lean_tx_t* tx, lean_link_t* link, const alive_counter_t* regis
     }
     (void)memset(tx, 0, sizeof *tx);
     moto_e2e_tx_init(&tx->e2e);
+    lean_health_init(); /* 0xFD03: no record since boot */
     if ((link == NULL) || (registered == NULL) || (registered != lean_link_alive(link))) {
         return false; /* fail-closed: no supervised EKF behind this link */
     }
@@ -50,6 +54,16 @@ void lean_tx_publish_speed(lean_tx_t* tx, uint32_t now_ms)
     snapshot_publish(&link->speed_snap);
 }
 
+bool lean_tx_speed_producer_fault(const lean_tx_t* tx)
+{
+    return (tx != NULL) && tx->opened && snapshot_producer_fault(&tx->link->speed_snap);
+}
+
+bool lean_tx_output_consumer_fault(const lean_tx_t* tx)
+{
+    return (tx != NULL) && tx->opened && snapshot_consumer_fault(&tx->link->out_snap);
+}
+
 void lean_tx_step(lean_tx_t* tx, uint32_t now_ms)
 {
     if ((tx == NULL) || !tx->opened || !com_cycle_due(&tx->cycle, now_ms)) {
@@ -57,14 +71,28 @@ void lean_tx_step(lean_tx_t* tx, uint32_t now_ms)
     }
     lean_link_t* const link = tx->link;
     uint8_t ri = 0u;
-    (void)snapshot_read_index(&link->out_snap, &ri);
+    const bool fresh = snapshot_read_index(&link->out_snap, &ri);
+    /* DID 0xFD03 (D-067): copy the record out of the index this one read returned, now.
+     * The UDS server reads this copy and never the snapshot, and no index outlives this
+     * call, so 0x020 can never be starved of a record by the diagnostic. */
+    const lean_record_t* const rec = &link->out_slots[ri];
+    /* A record exists once one was published: the read said so, or the slot carries a
+     * stamp (only the boot record has stamp 0, so a front slot that something else
+     * consumed first still counts). */
+    tx->have_record = tx->have_record || fresh || (rec->stamp_ms != 0u);
+    lean_health_rec_t copy;
+    copy.have_record = tx->have_record;
+    copy.stamp_ms = rec->stamp_ms;
+    copy.ekf = rec->health;
+    copy.speed_consumer_fault = rec->fault;
+    lean_health_set_record(&copy);
     const bool comms_fault =
         snapshot_consumer_fault(&link->out_snap) || snapshot_producer_fault(&link->speed_snap);
 
     struct platform_ekf_lean_t msg;
     moto_e2e_tx_state_t next;
     uint8_t data[PLATFORM_EKF_LEAN_LENGTH];
-    lean_tx_msg(&link->out_slots[ri], comms_fault, now_ms, &msg);
+    lean_tx_msg(rec, comms_fault, now_ms, &msg);
     const bool built = lean_tx_frame(&msg, &tx->e2e, &next, data);
     can_port_status_t st = CAN_PORT_ERR_ARG;
     const bool finished = com_send(PLATFORM_EKF_LEAN_FRAME_ID, PLATFORM_EKF_LEAN_IS_EXTENDED != 0,

@@ -9,6 +9,7 @@
 #include "hal/hal_atomic.h"
 #include "hal/host/imu_host.h"
 #include "services/can_if.h"
+#include "services/lean_health.h"
 #include "services/vehicle_signals.h"
 #include "vehicle_cl250.h"
 
@@ -408,6 +409,153 @@ static void test_null_and_unbound_steps_do_nothing(void)
     TEST_ASSERT_EQUAL_UINT32(0u, alive_count(lean_link_alive(&link)));
 }
 
+/* ------------------------------------------------------------------ DID 0xFD03 (E-17 (a), D-067) */
+
+#define H_FLAGS PLATFORM_UDS_LEAN_HEALTH_RECORD_FRESH_BYTE
+
+static uint8_t health_did[PLATFORM_UDS_DID_LEAN_HEALTH_LENGTH];
+
+static void read_health_did(uint32_t at_ms)
+{
+    TEST_ASSERT_TRUE(lean_health_read(at_ms, health_did, sizeof health_did));
+}
+
+static uint16_t did_u16(uint32_t byte)
+{
+    return (uint16_t)(((uint16_t)health_did[byte] << 8u) | health_did[byte + 1u]);
+}
+
+static void test_REQ_FD03_the_record_carries_the_offset_health_and_the_unlearned_seconds(void)
+{
+    for (uint32_t i = 0u; i < 100u; i++) { /* 2 s riding from boot, no offset learnt */
+        (void)cycle(54.0f, 0, Z_OFFSET);
+    }
+    lean_record_t r = newest_record();
+    TEST_ASSERT_FALSE(r.health.offset_learned);
+    TEST_ASSERT_FALSE(r.health.offset_rejected);
+    TEST_ASSERT_EQUAL_UINT16(0u, r.health.reject_count);
+    TEST_ASSERT_EQUAL_UINT16(1u, r.health.unlearned_s); /* first step 1000, last 2980 */
+    TEST_ASSERT_FALSE(r.fault);
+    stand();
+    r = newest_record();
+    TEST_ASSERT_TRUE(r.health.offset_learned);
+    TEST_ASSERT_EQUAL_UINT16(0u, r.health.unlearned_s);
+}
+
+static void test_REQ_FD03_a_rejected_window_shows_the_cause_and_restarts_the_unlearned_run(void)
+{
+    stand();
+    TEST_ASSERT_EQUAL_UINT16(0u, newest_record().health.reject_count);
+    for (uint32_t i = 0u; i < 150u; i++) { /* standstill with a z offset beyond 2 deg/s */
+        (void)cycle(0.0f, 0, 100);
+    }
+    const lean_record_t r = newest_record();
+    TEST_ASSERT_TRUE(r.health.offset_rejected);
+    TEST_ASSERT_FALSE(r.health.offset_learned);
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT16(1u, r.health.reject_count);
+    /* the run began when the learnt offset was lost, not at boot */
+    TEST_ASSERT_LESS_THAN_UINT16(3u, r.health.unlearned_s);
+    TEST_ASSERT_EQUAL(IMU_REASON_OFFSET_RANGE, ekf.last_imu.reason);
+}
+
+static void test_REQ_FD03_the_ekf_side_counters_saturate_and_never_wrap(void)
+{
+    stand();
+    ekf.imu.core.reject_count = 0x10005u;
+    lean_health_run_t* const run = &ekf.unlearned_run;
+    run->learned = false; /* offset lost long ago: 70000 s ago */
+    run->started = true;
+    run->since_ms = now - (70000u * 1000u);
+    ekf.imu.core.offset_learned = false;
+    (void)cycle(0.0f, 0, Z_OFFSET);
+    const lean_record_t r = newest_record();
+    TEST_ASSERT_EQUAL_UINT16(0xFFFFu, r.health.reject_count);
+    TEST_ASSERT_EQUAL_UINT16(0xFFFFu, r.health.unlearned_s);
+}
+
+static void test_REQ_FD03_lean_tx_hands_the_comms_task_a_copy_of_the_record_it_read(void)
+{
+    stand();
+    for (uint32_t i = 0u; i < 20u; i++) {
+        (void)cycle(54.0f, 0, Z_OFFSET);
+    }
+    link.speed_snap.consumer_fault = true; /* the EKF side's latch, in the next record */
+    (void)cycle(54.0f, 0, Z_OFFSET);
+    const uint32_t stamp = now - CYCLE_MS;
+    lean_tx_step(&tx, now);
+    read_health_did(now);
+    TEST_ASSERT_EQUAL_HEX8(PLATFORM_UDS_LEAN_HEALTH_RECORD_FRESH_MASK | PLATFORM_UDS_LEAN_HEALTH_OFFSET_LEARNED_MASK |
+                               PLATFORM_UDS_LEAN_HEALTH_SPEED_CONSUMER_FAULT_MASK,
+                           health_did[H_FLAGS]);
+    TEST_ASSERT_EQUAL_UINT16(0u, did_u16(PLATFORM_UDS_LEAN_HEALTH_UNLEARNED_S_BYTE));
+    /* the record ages out 500 ms after its stamp: fresh and learned clear, the rest stays */
+    read_health_did(stamp + PLATFORM_UDS_LEAN_HEALTH_MAX_AGE_MS);
+    TEST_ASSERT_NOT_EQUAL(0u, health_did[H_FLAGS] & PLATFORM_UDS_LEAN_HEALTH_RECORD_FRESH_MASK);
+    read_health_did(stamp + PLATFORM_UDS_LEAN_HEALTH_MAX_AGE_MS + 1u);
+    TEST_ASSERT_EQUAL_HEX8(PLATFORM_UDS_LEAN_HEALTH_SPEED_CONSUMER_FAULT_MASK, health_did[H_FLAGS]);
+    TEST_ASSERT_EQUAL_UINT16(PLATFORM_UDS_LEAN_HEALTH_UNLEARNED_S_UNKNOWN,
+                             did_u16(PLATFORM_UDS_LEAN_HEALTH_UNLEARNED_S_BYTE));
+}
+
+static void test_REQ_FD03_the_boot_record_is_no_record_even_inside_the_window(void)
+{
+    /* nothing published: the zero record (stamp 0) must not read as a fresh record */
+    lean_tx_step(&tx, 100u);
+    read_health_did(100u);
+    TEST_ASSERT_EQUAL_HEX8(0u, health_did[H_FLAGS]);
+    TEST_ASSERT_EQUAL_UINT16(PLATFORM_UDS_LEAN_HEALTH_UNLEARNED_S_UNKNOWN,
+                             did_u16(PLATFORM_UDS_LEAN_HEALTH_UNLEARNED_S_BYTE));
+    TEST_ASSERT_FALSE(tx.have_record);
+}
+
+static void test_REQ_FD03_a_record_taken_by_another_reader_still_counts_as_published(void)
+{
+    stand();
+    (void)cycle(54.0f, 0, Z_OFFSET);
+    (void)newest_record(); /* something else consumed the new record first (test only) */
+    lean_tx_step(&tx, now);
+    TEST_ASSERT_TRUE(tx.have_record);
+    read_health_did(now);
+    TEST_ASSERT_NOT_EQUAL(0u, health_did[H_FLAGS] & PLATFORM_UDS_LEAN_HEALTH_RECORD_FRESH_MASK);
+}
+
+static void test_REQ_FD03_opening_the_sender_resets_the_diagnostic_state(void)
+{
+    stand();
+    lean_tx_step(&tx, now);
+    read_health_did(now);
+    TEST_ASSERT_NOT_EQUAL(0u, health_did[H_FLAGS]);
+    lean_tx_t t;
+    TEST_ASSERT_FALSE(lean_tx_open(&t, NULL, NULL));
+    read_health_did(now);
+    TEST_ASSERT_EQUAL_HEX8(0u, health_did[H_FLAGS]);
+}
+
+static void test_REQ_FD03_the_comms_side_latches_are_read_from_the_open_link(void)
+{
+    TEST_ASSERT_FALSE(lean_tx_speed_producer_fault(&tx));
+    TEST_ASSERT_FALSE(lean_tx_output_consumer_fault(&tx));
+    link.speed_snap.producer_fault = true;
+    link.out_snap.consumer_fault = true;
+    TEST_ASSERT_TRUE(lean_tx_speed_producer_fault(&tx));
+    TEST_ASSERT_TRUE(lean_tx_output_consumer_fault(&tx));
+    /* the other ends' latches are not the comms task's */
+    link.speed_snap.producer_fault = false;
+    link.out_snap.consumer_fault = false;
+    link.speed_snap.consumer_fault = true;
+    link.out_snap.producer_fault = true;
+    TEST_ASSERT_FALSE(lean_tx_speed_producer_fault(&tx));
+    TEST_ASSERT_FALSE(lean_tx_output_consumer_fault(&tx));
+    /* closed or NULL: false */
+    lean_tx_t closed;
+    TEST_ASSERT_FALSE(lean_tx_open(&closed, NULL, NULL));
+    TEST_ASSERT_FALSE(lean_tx_speed_producer_fault(&closed));
+    TEST_ASSERT_FALSE(lean_tx_output_consumer_fault(&closed));
+    TEST_ASSERT_FALSE(lean_tx_speed_producer_fault(NULL));
+    TEST_ASSERT_FALSE(lean_tx_output_consumer_fault(NULL));
+}
+
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -427,5 +575,13 @@ int main(void)
     RUN_TEST(test_the_standstill_window_starts_at_the_second_zero_sample);
     RUN_TEST(test_a_refused_dedicated_buffer_leaves_0x020_closed);
     RUN_TEST(test_null_and_unbound_steps_do_nothing);
+    RUN_TEST(test_REQ_FD03_the_record_carries_the_offset_health_and_the_unlearned_seconds);
+    RUN_TEST(test_REQ_FD03_a_rejected_window_shows_the_cause_and_restarts_the_unlearned_run);
+    RUN_TEST(test_REQ_FD03_the_ekf_side_counters_saturate_and_never_wrap);
+    RUN_TEST(test_REQ_FD03_lean_tx_hands_the_comms_task_a_copy_of_the_record_it_read);
+    RUN_TEST(test_REQ_FD03_the_boot_record_is_no_record_even_inside_the_window);
+    RUN_TEST(test_REQ_FD03_a_record_taken_by_another_reader_still_counts_as_published);
+    RUN_TEST(test_REQ_FD03_opening_the_sender_resets_the_diagnostic_state);
+    RUN_TEST(test_REQ_FD03_the_comms_side_latches_are_read_from_the_open_link);
     return UNITY_END();
 }

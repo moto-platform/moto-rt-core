@@ -19,7 +19,9 @@
  * frame never waits behind server work. The pass period therefore bounds 0x021's
  * freshness: the 20 ms EKF work must not join this task (CLAUDE.md rule 4); this task
  * only hands the EKF the speed the client wrote in the same pass and sends the EKF's
- * newest output as 0x020 (D-065 item 2: the EKF task never touches can_if).
+ * newest output as 0x020 (D-065 item 2: the EKF task never touches can_if). After
+ * lean_tx_step() the pass also sets the comms-side flags of DID 0xFD03 (services/lean_health)
+ * for the UDS server step that follows (D-067).
  * The heartbeat (0x081, D-064) follows for the same reasons; it sees the DTC results
  * the server's monitors reported in the previous pass, and reads their conditions
  * directly as well, so a server that does not step never makes it read healthy.

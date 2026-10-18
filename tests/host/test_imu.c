@@ -207,6 +207,43 @@ static void test_a_feed_thread_and_the_reader_thread_share_the_fifo(void)
     TEST_ASSERT_EQUAL_UINT32(STRESS_PERIODS - 100u, valid); /* learnt after START + 2 s */
 }
 
+static void test_REQ_FD03_the_offset_health_follows_the_learning(void)
+{
+    imu_offset_health_t h = imu_offset_health(&imu);
+    TEST_ASSERT_FALSE(h.offset_learned);
+    TEST_ASSERT_FALSE(h.offset_rejected);
+    TEST_ASSERT_EQUAL_UINT32(0u, h.reject_count);
+    learn(30);
+    h = imu_offset_health(&imu);
+    TEST_ASSERT_TRUE(h.offset_learned);
+    TEST_ASSERT_FALSE(h.offset_rejected);
+    /* a window beyond IMU_OFFSET_MAX_RPS (2 deg/s = 33 LSB): rejected, counted, dropped */
+    for (uint32_t i = 0u; i < 110u; i++) {
+        (void)read_period(N_PERIOD, 100, true);
+    }
+    h = imu_offset_health(&imu);
+    TEST_ASSERT_FALSE(h.offset_learned);
+    TEST_ASSERT_TRUE(h.offset_rejected);
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT32(1u, h.reject_count);
+    /* a good window learns again and clears the rejection, the count stays */
+    const uint32_t rejects = h.reject_count;
+    for (uint32_t i = 0u; i < 110u; i++) {
+        (void)read_period(N_PERIOD, 30, true);
+    }
+    h = imu_offset_health(&imu);
+    TEST_ASSERT_TRUE(h.offset_learned);
+    TEST_ASSERT_FALSE(h.offset_rejected);
+    TEST_ASSERT_EQUAL_UINT32(rejects, h.reject_count);
+}
+
+static void test_REQ_FD03_a_null_imu_reads_no_offset_health(void)
+{
+    const imu_offset_health_t h = imu_offset_health(NULL);
+    TEST_ASSERT_FALSE(h.offset_learned);
+    TEST_ASSERT_FALSE(h.offset_rejected);
+    TEST_ASSERT_EQUAL_UINT32(0u, h.reject_count);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -218,6 +255,8 @@ int main(void)
     RUN_TEST(test_a_bad_port_configuration_is_invalid);
     RUN_TEST(test_a_second_call_in_the_same_ms_leaves_the_fifo_alone);
     RUN_TEST(test_null_reads_arg);
+    RUN_TEST(test_REQ_FD03_the_offset_health_follows_the_learning);
+    RUN_TEST(test_REQ_FD03_a_null_imu_reads_no_offset_health);
     RUN_TEST(test_a_feed_thread_and_the_reader_thread_share_the_fifo);
     return UNITY_END();
 }

@@ -23,6 +23,9 @@
  *   0xF189 SW version   MOTO_RTCORE_VERSION from the build (CMake project VERSION)
  *   0xFD00 tester state services/diag (written by the UDS client glue)
  *   0xFD01 uptime       seconds since uds_server_open()
+ *   0xFD03 lean health  services/lean_health (the comms task's copy of the EKF's last
+ *                       lean record plus comms-side flags; the server never reads the
+ *                       lean snapshot, D-067)
  *   0xFD1x samples      services/vehicle_signals, never features/
  *   DTCs, 0x14          services/diag; a clear resets DTC records only
  *
