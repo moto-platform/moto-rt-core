@@ -141,7 +141,6 @@ static void end_with_timeout(uds_client_core_t* c, uint32_t now_ms)
         /* D-080 item 3: a late answer may still come as a First Frame, so 0x19 is off for
          * the epoch. No DID rule applies: no timeout count, no quiet window. */
         dtc_snapshot_core_on_timeout(&c->dtc);
-        c->dtc_timed_out = true;
     }
     if (c->pending == UDS_CLIENT_REQ_READ) {
         uds_client_did_state_t* d = &c->did[c->pending_idx];
@@ -389,6 +388,16 @@ bool uds_client_core_poll(uds_client_core_t* c, uint32_t now_ms, bool rx_busy, b
     if (c->timeout_seen && !in_quiet_window(c, now_ms)) {
         c->timeout_seen = false; /* the window is over: clear it, also across a counter wrap */
     }
+    if (rx_busy) {
+        /* A running segmented reception proves the ECU is sending, although no message is
+         * complete yet. Without this, a slow 0x19 answer (CFs just inside N_Cr) cancelled at
+         * the RESPONSE_TIMEOUT_MAX_MS cap plus the N_Bs hold would reach ECU_ABSENT_TIMEOUT_MS,
+         * the D-075 epoch would restart with a new key-on run and the blackout would repeat
+         * (D-080 item 3: once per epoch). A late or foreign First Frame whose reception runs
+         * counts the same: it is still the ECU's own traffic on its response ID. */
+        c->ecu_seen = true;
+        c->last_response_ms = now_ms;
+    }
     if (c->ecu_seen && !uds_client_core_ecu_present(c, now_ms)) {
         c->ecu_seen = false; /* absent: presence needs a new answer, also across a wrap */
         lose_session(c);     /* an ECU that came back is in its default session */
@@ -403,8 +412,19 @@ bool uds_client_core_poll(uds_client_core_t* c, uint32_t now_ms, bool rx_busy, b
     if (c->pending != UDS_CLIENT_REQ_NONE) {
         const bool cap = expired(now_ms, c->sent_ms, VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS);
         const bool base = !rx_busy && expired(now_ms, c->wait_start_ms, c->wait_ms);
-        if (cap || base) {
+        if (cap && rx_busy && (c->pending == UDS_CLIENT_REQ_DTC)) {
+            /* D-080: the total cap fired while the 0x19 answer is still being received
+             * (CFs each just inside N_Cr). The base timeout never fires during a reception, so
+             * the glue cancels it: a segmented failure, and the ECU gets the N_Bs to give up. */
+            count(&c->stats.unavailable);
+            dtc_snapshot_core_on_segmented_failure(&c->dtc);
+            c->pending = UDS_CLIENT_REQ_NONE;
+            c->rx_cancel_due = true;
+            hold_for(c, now_ms, c->abort_hold_ms);
+        } else if (cap || base) {
             end_with_timeout(c, now_ms);
+        } else {
+            /* the request still waits */
         }
     }
     if ((c->pending != UDS_CLIENT_REQ_NONE) || rx_busy || !tx_ready) {
@@ -635,13 +655,36 @@ static bool parse_read(const uds_client_core_t* c, const uint8_t* data, uint16_t
     return true;
 }
 
-void uds_client_core_on_fc_withheld(uds_client_core_t* c, uint32_t now_ms)
+/* The withheld First Frame is the late answer of a 0x19 (e.g. one that timed out after
+ * NRC 0x78): it is nobody's answer to a pending read. The read ends without consequence
+ * (no skip, no stop, no timeout count) and its schedule is restored like not_sent() does,
+ * so it is due again as soon as the hold ends (a shorter verified-DID gap than waiting for the
+ * base timeout, which would also count a timeout against it). */
+static void drop_read_for_late_dtc_answer(uds_client_core_t* c)
+{
+    break_rpm_run(c, c->pending_idx);
+    c->did[c->pending_idx].last_request_ms = c->prev_request_ms;
+    c->did[c->pending_idx].requested = c->prev_requested;
+}
+
+void uds_client_core_on_fc_withheld(uds_client_core_t* c, uint32_t now_ms, uint8_t first_byte)
 {
     if (c == NULL) {
         return;
     }
     count(&c->stats.fc_withheld);
-    if (c->pending != UDS_CLIENT_REQ_NONE) {
+    const bool late_dtc = (first_byte == (uint8_t)(UDS_SID_READ_DTC_INFORMATION +
+                                                    UDS_POSITIVE_RESPONSE_OFFSET)) &&
+                          (c->pending != UDS_CLIENT_REQ_DTC);
+    if (late_dtc) {
+        /* D-080 (safety-reviewer MAJOR-1): a 0x19 answer with no 0x19 pending is a late or
+         * duplicate one; 0x19 is off for the epoch (the first reason stays). */
+        if (c->pending == UDS_CLIENT_REQ_READ) {
+            drop_read_for_late_dtc_answer(c);
+        }
+        c->pending = UDS_CLIENT_REQ_NONE;
+        dtc_snapshot_core_halt_after_answer(&c->dtc, DTC_SNAPSHOT_HALT_LATE_FF);
+    } else if (c->pending != UDS_CLIENT_REQ_NONE) {
         count(&c->stats.unavailable); /* not a timeout: the ECU answered */
         if (c->pending == UDS_CLIENT_REQ_READ) {
             break_rpm_run(c, c->pending_idx);
@@ -652,12 +695,8 @@ void uds_client_core_on_fc_withheld(uds_client_core_t* c, uint32_t now_ms)
             /* a session request: nothing more to record */
         }
         c->pending = UDS_CLIENT_REQ_NONE;
-    } else if (c->dtc_timed_out) {
-        /* Nothing is pending: this First Frame may be the late answer of the 0x19 that
-         * timed out. A DID's First Frame is never attributed to 0x19. */
-        dtc_snapshot_core_halt_after_answer(&c->dtc, DTC_SNAPSHOT_HALT_LATE_FF);
     } else {
-        /* a late answer to something else: no 0x19 consequence */
+        /* nothing pending and not a 0x19 answer: no 0x19 consequence */
     }
     hold_for(c, now_ms, VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS); /* the ECU waits its N_Bs */
 }
@@ -751,7 +790,6 @@ bool uds_client_core_on_indication(uds_client_core_t* c, uint32_t now_ms,
             dtc_snapshot_core_start_epoch(&c->dtc); /* D-080: the key-on run */
             c->dtc_answer_ready = false;
             c->dtc_slow = false;
-            c->dtc_timed_out = false;
         }
         return false;
     }
@@ -786,6 +824,15 @@ bool uds_client_core_take_dtc_answer(uds_client_core_t* c, uds_client_dtc_answer
     c->dtc_answer_ready = false;
     apply_dtc_slow(c);
     return true;
+}
+
+bool uds_client_core_take_rx_cancel(uds_client_core_t* c)
+{
+    const bool due = (c != NULL) && c->rx_cancel_due;
+    if (due) {
+        c->rx_cancel_due = false;
+    }
+    return due;
 }
 
 bool uds_client_core_dtc_warm_idle(uds_client_core_t* c, uint32_t now_ms, bool holds)

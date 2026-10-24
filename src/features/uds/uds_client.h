@@ -50,8 +50,9 @@ extern "C" {
  * VEHICLE_CL250_MAX_FF_DL bytes (D-080; at most 36 CFs). A First Frame above what the
  * pending request allows gets no Flow Control (withheld). */
 #define UDS_CLIENT_RX_BUF VEHICLE_CL250_MAX_FF_DL
-/* A session or DID read gets the Flow Control only for FF_DL up to this many bytes (the
- * D-059 buffer size, unchanged for table DIDs; then "service unavailable"). */
+/* A session or DID read gets the Flow Control only for FF_DL up to this many bytes. This is
+ * the D-059 client policy for table-DID reads (the old receive buffer size; no table DID
+ * needs a segmented answer, so more is "service unavailable"), not a vehicle fact. */
 #define UDS_CLIENT_READ_MAX_FF_DL 64u
 #define UDS_CLIENT_TX_BUF 8u
 
@@ -68,8 +69,10 @@ typedef enum {
  * comms task inside uds_client_step(); it must not block, must not call back into the
  * client, and must copy the bytes (data is valid only during the call); len <=
  * VEHICLE_CL250_MAX_FF_DL. The record layouts are never decoded here.
- * TODO: replaced by the services/ logging manager when it exists. Without a sink the
- * answers are not logged.
+ * H7 port: the sink runs inside the comms pass, whose step gaps D-053 watches
+ * (stats.step_overruns), so it must be a bounded copy into a static ring that a lower-priority
+ * task drains (flash or UART writes never run here). TODO: replaced by the services/ logging
+ * manager when it exists. Without a sink the answers are not logged.
  */
 typedef void (*uds_client_dtc_sink_t)(void* ctx, const uds_client_dtc_answer_t* info,
                                       const uint8_t* data, uint16_t len);

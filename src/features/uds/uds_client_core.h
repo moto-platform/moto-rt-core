@@ -59,6 +59,9 @@
  *     without a timeout (a read is "service unavailable" as above), and nothing is sent
  *     for RESPONSE_TIMEOUT_MAX_MS, while the ECU waits for the Flow Control. A running
  *     hold is never shortened.
+ *   - D-080: if the total cap fires while a 0x19 answer is still being received, the
+ *     reception is cancelled (uds_client_core_take_rx_cancel()), 0x19 is off for the epoch
+ *     and nothing is sent for the link's N_Bs.
  *   - DTC freeze frames (D-080, features/uds/dtc_snapshot_core): a 0x19 request goes out
  *     only when the session is up, nothing is pending or held, the link is free and no
  *     DID at all is due (verified or not), so a DID is never delayed by more than one 0x19
@@ -259,7 +262,7 @@ typedef struct {
     uds_client_dtc_answer_t dtc_answer;
     bool dtc_answer_ready;    /* a positive 0x19 answer waits for take_dtc_answer() */
     bool dtc_slow;            /* ... and it came later than one slot: halt SLOW after it */
-    bool dtc_timed_out;       /* the last 0x19 of this epoch timed out (LATE_FF) */
+    bool rx_cancel_due;       /* the glue must cancel the running reception (0x19 at the cap) */
 
     bool failed;
 } uds_client_core_t;
@@ -292,8 +295,18 @@ void uds_client_core_latch(uds_client_core_t* c);
 
 /* The link withheld the Flow Control for a First Frame (isotp_link_take_fc_withheld()):
  * no answer comes. Ends the pending request without a timeout (a read: skip cooldown,
- * counted unavailable) and sends nothing for RESPONSE_TIMEOUT_MAX_MS. */
-void uds_client_core_on_fc_withheld(uds_client_core_t* c, uint32_t now_ms);
+ * counted unavailable) and sends nothing for RESPONSE_TIMEOUT_MAX_MS. first_byte is the
+ * First Frame's first data byte (isotp_link_fc_withheld_first_byte(), 0 if unknown): the
+ * positive 0x19 SID with no 0x19 pending is a late or duplicate 0x19 answer; it is nobody's
+ * answer to a pending read (no consequence for the DID) and turns 0x19 off for the epoch. */
+void uds_client_core_on_fc_withheld(uds_client_core_t* c, uint32_t now_ms, uint8_t first_byte);
+
+/*
+ * D-080: true once after the total cap fired during the reception of a 0x19 answer: the glue
+ * must cancel the link's reception (isotp_link_rx_cancel()). The core has recorded a
+ * segmented failure (0x19 off for the epoch) and holds for the link's N_Bs.
+ */
+bool uds_client_core_take_rx_cancel(uds_client_core_t* c);
 
 /*
  * N_USData.indication of the link. data/len are the message for ISOTP_N_OK (ignored

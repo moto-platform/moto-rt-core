@@ -208,7 +208,8 @@ void uds_client_step(uds_client_t* client)
     }
     take_indication(client, now);
     if (isotp_link_take_fc_withheld(&client->link)) {
-        uds_client_core_on_fc_withheld(&client->core, now);
+        uds_client_core_on_fc_withheld(&client->core, now,
+                                       isotp_link_fc_withheld_first_byte(&client->link));
     }
     isotp_n_result_t conf = ISOTP_N_OK;
     (void)isotp_link_take_tx_confirm(&client->link, &conf); /* a Single Frame cannot fail */
@@ -232,6 +233,9 @@ void uds_client_step(uds_client_t* client)
     }
     if (uds_client_core_pending(&client->core) == UDS_CLIENT_REQ_NONE) {
         isotp_link_close_response(&client->link); /* answered, timed out or latched */
+    }
+    if (uds_client_core_take_rx_cancel(&client->core)) {
+        isotp_link_rx_cancel(&client->link); /* D-080: the cap fired during a 0x19 reception */
     }
     isotp_link_step(&client->link);
 

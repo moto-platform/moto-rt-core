@@ -54,6 +54,7 @@ static isotp_status_t open_link(isotp_can_link_t* link, const isotp_link_addr_t*
     link->tx_timeouts = 0u;
     link->fc_withheld_count = 0u;
     link->fc_withheld = false;
+    link->fc_withheld_first = 0u;
     link->response_open = false;
     link->response_prefix_len = 0u;
     link->response_max_ff_dl = 0u;
@@ -150,6 +151,7 @@ static bool prefix_matches(const isotp_can_link_t* link)
  * ends now, without an indication; the ECU gives up after its N_Bs. */
 static void withhold_fc(isotp_can_link_t* link)
 {
+    link->fc_withheld_first = (isotp_rx_pending_len(&link->iso) > 0u) ? link->rx_buf[0] : 0u;
     isotp_rx_cancel(&link->iso);
     link->fc_withheld = true;
     link_count(&link->fc_withheld_count);
@@ -268,10 +270,15 @@ void isotp_link_expect_response_prefix(isotp_can_link_t* link, const uint8_t* pr
     }
 }
 
-void isotp_link_expect_response(isotp_can_link_t* link, uint8_t positive_sid)
+uint8_t isotp_link_fc_withheld_first_byte(const isotp_can_link_t* link)
 {
-    if (link != NULL) {
-        isotp_link_expect_response_prefix(link, &positive_sid, 1u, link->iso.rx_cap);
+    return (link != NULL) ? link->fc_withheld_first : 0u;
+}
+
+void isotp_link_rx_cancel(isotp_can_link_t* link)
+{
+    if ((link != NULL) && link->open) {
+        isotp_rx_cancel(&link->iso);
     }
 }
 

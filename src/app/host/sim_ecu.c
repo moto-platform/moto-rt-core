@@ -20,7 +20,6 @@
 #define SIM_DTC_LO_BASE 0x40u
 #define SIM_ECU_DTC_STATUS 0x2Fu
 #define SIM_DTC_AVAILABILITY 0xFFu /* StatusAvailabilityMask: every bit supported */
-#define SIM_DTC_FORMAT_ISO14229 0x01u /* DTCFormatIdentifier: ISO 14229-1 DTC format */
 #define ECU_IDS_EXTENDED (VEHICLE_CL250_REQUEST_ID > CAN_PORT_STD_ID_MAX)
 
 _Static_assert(ISOTP_CAN_DL == CAN_PORT_MAX_DLC, "ISO-TP and CAN frame sizes differ");
@@ -211,7 +210,7 @@ static uint16_t answer_dtc(sim_ecu_t* ecu, const uint8_t* req, uint16_t len, uin
     out[n++] = sub;
     if (sub == UDS_READ_DTC_REPORT_NUMBER_OF_DTC_BY_STATUS_MASK) {
         out[n++] = SIM_DTC_AVAILABILITY;
-        out[n++] = SIM_DTC_FORMAT_ISO14229;
+        out[n++] = UDS_DTC_FORMAT_ISO_14229_1;
         out[n++] = 0u;
         out[n++] = ecu->dtc_count;
     } else if (sub == UDS_READ_DTC_REPORT_DTC_BY_STATUS_MASK) {

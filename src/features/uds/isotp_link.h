@@ -21,7 +21,7 @@
  * Segmented responses (D-059): requests stay Single Frame. The only other frame the
  * generated gate passes is the one FC.CTS vehicle_cl250_fc_cts[] (BS, STmin and padding
  * from gen/). The gate is stateless; this link sends that FC only while a response is
- * expected (isotp_link_expect_response(), armed by the client after its allowed
+ * expected (isotp_link_expect_response_prefix(), armed by the client after its allowed
  * request went out), once per request, for a First Frame with FF_DL <= rx_cap <=
  * VEHICLE_CL250_MAX_FF_DL that starts with the expected positive response SID. Every other Flow Control the core queues is withheld: the
  * reception is cancelled at once (no indication, no N_Cr wait) and
@@ -74,6 +74,7 @@ typedef struct {
     uint32_t abort_seen;  /* can_if_tx_abort_count() last acted on */
     uint32_t tx_timeouts; /* messages ended with ISOTP_N_TIMEOUT_A */
     uint32_t fc_withheld_count; /* Flow Controls the vehicle link did not send */
+    uint8_t fc_withheld_first; /* first data byte of that First Frame, 0 if none was received */
     bool fc_withheld; /* one was withheld since isotp_link_take_fc_withheld() */
     bool response_open; /* vehicle link: one FC.CTS may answer the next First Frame */
     uint8_t response_prefix[ISOTP_LINK_PREFIX_MAX]; /* ... whose first data bytes are these */
@@ -131,14 +132,11 @@ uint32_t isotp_link_tx_timeout_count(const isotp_can_link_t* link);
  * withheld Flow Control is not counted here (see isotp_link_fc_withheld_count()). */
 uint32_t isotp_link_tx_refused_count(const isotp_can_link_t* link);
 
-/* Vehicle link (D-059): the client's allowed request went out and it waits for the
- * answer, whose first byte is positive_sid; the next First Frame starting with it may
- * get the one FC.CTS (FF_DL up to the link's receive capacity). Fail-closed: only the
- * expect calls arm it, never isotp_link_send(). Ignored on other links. */
-void isotp_link_expect_response(isotp_can_link_t* link, uint8_t positive_sid);
-
 /*
- * Same, with a longer match (D-080): the next First Frame gets the one FC.CTS only if its
+ * Vehicle link (D-059, D-080): the client's allowed request went out and it waits for the
+ * answer. Fail-closed: only this call arms the FC, never isotp_link_send(). There is no
+ * SID-only variant on purpose: every caller states the FF_DL cap of its request, so none can
+ * silently widen the D-059 read cap (64 B). The next First Frame gets the one FC.CTS only if its
  * first prefix_len data bytes (1..ISOTP_LINK_PREFIX_MAX, already in the receive buffer at
  * that time) equal prefix and its FF_DL is at most max_ff_dl (<= the link's receive
  * capacity). Arguments outside that range leave nothing armed. The FC sent is still only the one
@@ -148,8 +146,19 @@ void isotp_link_expect_response_prefix(isotp_can_link_t* link, const uint8_t* pr
                                        uint8_t prefix_len, uint16_t max_ff_dl);
 
 /* Vehicle link: no answer is expected any more (answered, timed out, latched); no FC
- * goes out until the next isotp_link_expect_response(). */
+ * goes out until the next isotp_link_expect_response_prefix(). */
 void isotp_link_close_response(isotp_can_link_t* link);
+
+/* Vehicle link: the first data byte of the First Frame whose Flow Control was withheld
+ * last (valid after isotp_link_take_fc_withheld() returned true), or 0 if no reception ran
+ * (e.g. FF_DL above the buffer). The client uses it to tell a late 0x19 answer (0x59) from a
+ * DID's. */
+uint8_t isotp_link_fc_withheld_first_byte(const isotp_can_link_t* link);
+
+/* Vehicle link: ends a running reception at once, without an indication and without
+ * counting a withheld FC (the client's total cap fired during a segmented 0x19 answer,
+ * D-080). No-op when none runs. */
+void isotp_link_rx_cancel(isotp_can_link_t* link);
 
 /* Vehicle link: true once after the link withheld a Flow Control (a First Frame it did
  * not answer; its reception was cancelled). */

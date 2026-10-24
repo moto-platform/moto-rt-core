@@ -168,7 +168,8 @@ static void request_and_expect(void)
     const uint8_t req[3] = {0x22u, (uint8_t)(VEHICLE_CL250_DID_ENGINE_SPEED >> 8u),
                             (uint8_t)(VEHICLE_CL250_DID_ENGINE_SPEED & 0xFFu)};
     TEST_ASSERT_EQUAL(ISOTP_OK, isotp_link_send(&dut, req, 3u));
-    isotp_link_expect_response(&dut, 0x62u); /* ReadDataByIdentifier positive response */
+    const uint8_t sid = 0x62u; /* ReadDataByIdentifier positive response */
+    isotp_link_expect_response_prefix(&dut, &sid, 1u, 64u); /* the D-059 read cap */
     run_ms(1u);
     sniff_count = 0u;
 }
@@ -288,6 +289,8 @@ static void test_cl250_first_frame_with_another_response_sid_gets_no_fc(void)
 static void test_cl250_first_frame_at_the_cap_gets_the_fc(void)
 {
     request_and_expect();
+    const uint8_t sid = 0x62u;
+    isotp_link_expect_response_prefix(&dut, &sid, 1u, (uint16_t)VEHICLE_CL250_MAX_FF_DL);
     uint8_t ff[8];
     memcpy(ff, ff10, sizeof ff);
     ff[0] = (uint8_t)(0x10u | ((uint16_t)VEHICLE_CL250_MAX_FF_DL >> 8u));
@@ -463,6 +466,40 @@ static void test_D080_item3_the_prefix_variant_is_ignored_on_other_links_and_clo
  * run of 16 lost CFs shows no wrong SN, but the bytes stay short of FF_DL, so the
  * reception ends in N_Cr: a failed reception, never an indication with wrong data.
  */
+static void test_D080_major1_a_withheld_first_frame_reports_its_first_data_byte(void)
+{
+    request_and_expect_prefix(5u, VEHICLE_CL250_MAX_FF_DL);
+    uint8_t other[6];
+    memcpy(other, dtc_ff_data, sizeof other);
+    other[1] = 0x01u; /* 59 01: not the expected 59 04 <DTC> */
+    inject_ff(40u, other);
+    run_ms(2u);
+    TEST_ASSERT_TRUE(isotp_link_take_fc_withheld(&dut));
+    TEST_ASSERT_EQUAL_HEX8(0x59u, isotp_link_fc_withheld_first_byte(&dut));
+    /* a First Frame above the buffer starts no reception: no byte */
+    inject_ff((uint16_t)(VEHICLE_CL250_MAX_FF_DL + 1u), dtc_ff_data);
+    run_ms(2u);
+    TEST_ASSERT_TRUE(isotp_link_take_fc_withheld(&dut));
+    TEST_ASSERT_EQUAL_HEX8(0u, isotp_link_fc_withheld_first_byte(&dut));
+    TEST_ASSERT_EQUAL_HEX8(0u, isotp_link_fc_withheld_first_byte(NULL));
+}
+
+static void test_D080_minor1_rx_cancel_ends_a_reception_without_an_indication_or_a_withheld_fc(void)
+{
+    request_and_expect_prefix(5u, VEHICLE_CL250_MAX_FF_DL);
+    inject_ff(40u, dtc_ff_data);
+    run_ms(2u);
+    TEST_ASSERT_TRUE(isotp_link_rx_busy(&dut));
+    isotp_link_rx_cancel(&dut);
+    TEST_ASSERT_FALSE(isotp_link_rx_busy(&dut));
+    run_ms(VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS + 5u);
+    isotp_n_result_t res;
+    uint16_t len;
+    TEST_ASSERT_FALSE(isotp_link_take_rx(&dut, &res, &len));
+    TEST_ASSERT_EQUAL_UINT32(0u, isotp_link_fc_withheld_count(&dut));
+    isotp_link_rx_cancel(NULL);
+}
+
 static void test_D080_item4_sixteen_lost_cfs_end_in_n_cr_and_never_in_an_indication(void)
 {
     request_and_expect_prefix(5u, VEHICLE_CL250_MAX_FF_DL);
@@ -988,6 +1025,8 @@ int main(void)
     RUN_TEST(test_D080_item3_nothing_expected_means_no_fc);
     RUN_TEST(test_D080_item3_bad_expect_arguments_leave_nothing_armed);
     RUN_TEST(test_D080_item3_the_prefix_variant_is_ignored_on_other_links_and_closed_links);
+    RUN_TEST(test_D080_major1_a_withheld_first_frame_reports_its_first_data_byte);
+    RUN_TEST(test_D080_minor1_rx_cancel_ends_a_reception_without_an_indication_or_a_withheld_fc);
     RUN_TEST(test_D080_item4_sixteen_lost_cfs_end_in_n_cr_and_never_in_an_indication);
     RUN_TEST(test_cl250_link_takes_ids_and_padding_from_gen);
     RUN_TEST(test_cl250_request_is_a_padded_single_frame_on_the_request_id);

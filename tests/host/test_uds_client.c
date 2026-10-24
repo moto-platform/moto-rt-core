@@ -1607,6 +1607,97 @@ static void test_D080_item4_a_refused_first_frame_costs_one_hold_and_no_more(voi
     }
 }
 
+/* An ECU Single Frame NRC for the pending 0x19. */
+static void ecu_dtc_nrc(uint8_t code)
+{
+    const uint8_t nrc[8] = {0x03u, UDS_SID_NEGATIVE_RESPONSE, UDS_SID_READ_DTC_INFORMATION, code,
+                            0xAAu, 0xAAu, 0xAAu, 0xAAu};
+    ecu_frame(nrc);
+}
+
+/*
+ * safety-reviewer MAJOR-1: 0x19 -> 7F 19 78 -> timeout at the base -> a DID read is pending ->
+ * the ECU's late 59 04 <DTC> First Frame gets no FC. That DID is neither skipped nor stopped,
+ * 0x19 stays off, and the verified DIDs go STALE only for the one hold.
+ */
+static void test_D080_major1_a_late_0x19_first_frame_during_a_read_costs_that_did_nothing(void)
+{
+    memset(max_age, 0, sizeof max_age);
+    open_dtc(2u);
+    ecu.dtc_silent = true;
+    run_until_last_request(UDS_SID_READ_DTC_INFORMATION, UDS_CLIENT_REQ_DTC);
+    ecu_dtc_nrc(UDS_NRC_RESPONSE_PENDING);
+    run(1u, false);
+    run_until_last_request(UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_CLIENT_REQ_READ);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_NO_ANSWER, dtc_snapshot_core_halt(dtc_core()));
+    ecu.silent = true; /* the sim must not answer the read ahead of the First Frame */
+    const uint32_t idx = client.core.pending_idx;
+    const uint32_t ff_t = timebase_now_ms();
+    const uint8_t ff[8] = {0x10u, 0x20u, 0x59u, 0x04u, 0x12u, 0x34u, 0x56u, 0x2Fu};
+    ecu_frame(ff);
+    run_measuring_ages(3u, false);
+    ecu.silent = false; /* the ECU is alive again; the read it ignored is gone */
+    TEST_ASSERT_EQUAL_UINT32(1u, isotp_link_fc_withheld_count(&client.link));
+    run_measuring_ages(6000u, false);
+    TEST_ASSERT_FALSE(uds_client_core_did_skipped(&client.core, idx, timebase_now_ms()));
+    TEST_ASSERT_FALSE(uds_client_core_did_stopped(&client.core, idx));
+    TEST_ASSERT_EQUAL_UINT32(0u, uds_client_stats(&client)->did_skips);
+    TEST_ASSERT_EQUAL_UINT32(0u, uds_client_stats(&client)->did_stops);
+    TEST_ASSERT_EQUAL_UINT32(1u, uds_client_stats(&client)->timeouts); /* only the 0x19 */
+    TEST_ASSERT_EQUAL_UINT32(1u, dtc_requests_after(0u));
+    TEST_ASSERT_GREATER_THAN_UINT32(ff_t, timebase_now_ms());
+    assert_ages_within(VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS + VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS);
+    TEST_ASSERT_FALSE(uds_client_failed(&client));
+}
+
+/*
+ * safety-reviewer MINOR-1: an ECU that sends a First Frame and then a CF every 99 ms (just
+ * inside N_Cr) would keep the tester silent for the whole answer. The total cap cancels
+ * the reception: 0x19 off for the epoch, then the link's N_Bs, once.
+ */
+static void test_D080_minor1_a_slow_0x19_reception_is_cancelled_at_the_total_cap(void)
+{
+    memset(max_age, 0, sizeof max_age);
+    open_dtc(0u);
+    ecu.dtc_silent = true;
+    run_until_last_request(UDS_SID_READ_DTC_INFORMATION, UDS_CLIENT_REQ_DTC);
+    const uint32_t t_req = client.core.sent_ms;
+    const uint8_t ff[8] = {0x10u, 0xFFu, 0x59u, 0x01u, 0xFFu, 0x01u, 0x00u, 0x02u};
+    run_to(t_req + 50u);
+    ecu_frame(ff);
+    uint32_t k = 1u;
+    while (isotp_link_rx_busy(&client.link) || (k == 1u)) {
+        run_to(t_req + 50u + (99u * k));
+        if (!isotp_link_rx_busy(&client.link)) {
+            break;
+        }
+        const uint8_t cf[8] = {(uint8_t)(0x20u | (k & 0x0Fu)), 1u, 2u, 3u, 4u, 5u, 6u, 7u};
+        ecu_frame(cf);
+        run_measuring_ages(1u, false);
+        k++;
+        TEST_ASSERT_LESS_THAN_UINT32(40u, k);
+    }
+    const uint32_t cancelled_at = timebase_now_ms();
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT32(t_req + VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS, cancelled_at);
+    TEST_ASSERT_LESS_THAN_UINT32(t_req + VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS + 150u, cancelled_at);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_SEGMENTED, dtc_snapshot_core_halt(dtc_core()));
+    TEST_ASSERT_EQUAL_UINT32(0u, isotp_link_fc_withheld_count(&client.link)); /* a cancel, not a withheld FC */
+    const uint32_t mark = sniff_count;
+    run_measuring_ages(isotp_link_n_bs_ms(&client.link) - 150u, false);
+    TEST_ASSERT_EQUAL_UINT32(0u, tester_frames_since(mark)); /* silent for the N_Bs */
+    run_measuring_ages(30000u, false);
+    /* the reception proved the ECU alive: no new epoch, no second key-on run */
+    TEST_ASSERT_EQUAL_UINT32(1u, uds_client_stats(&client)->session_starts);
+    TEST_ASSERT_EQUAL_UINT32(0u, uds_client_stats(&client)->session_losses);
+    TEST_ASSERT_EQUAL_UINT8(1u, dtc_snapshot_core_runs_started(dtc_core()));
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_SEGMENTED, dtc_snapshot_core_halt(dtc_core()));
+    /* Nothing else was sent for the N_Bs, and 0x19 never came back in 30 s. */
+    TEST_ASSERT_EQUAL_UINT32(1u, dtc_requests_after(0u));
+    assert_ages_within(VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS + isotp_link_n_bs_ms(&client.link) +
+                       VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS);
+    TEST_ASSERT_FALSE(uds_client_failed(&client));
+}
+
 static void test_D080_item1_the_warm_idle_run_starts_after_the_gen_hold_of_the_gen_conditions(void)
 {
     open_dtc(0u);
@@ -1685,6 +1776,8 @@ int main(void)
     RUN_TEST(test_D080_item4_verified_dids_stay_within_stale_after_during_a_full_18_request_run);
     RUN_TEST(test_D080_item4_verified_dids_stay_within_stale_after_with_a_0x19_timeout_mid_run);
     RUN_TEST(test_D080_item4_a_refused_first_frame_costs_one_hold_and_no_more);
+    RUN_TEST(test_D080_major1_a_late_0x19_first_frame_during_a_read_costs_that_did_nothing);
+    RUN_TEST(test_D080_minor1_a_slow_0x19_reception_is_cancelled_at_the_total_cap);
     RUN_TEST(test_D080_item1_the_warm_idle_run_starts_after_the_gen_hold_of_the_gen_conditions);
     RUN_TEST(test_D080_item1_a_sweeping_ecu_never_holds_the_warm_idle_conditions);
     return UNITY_END();
