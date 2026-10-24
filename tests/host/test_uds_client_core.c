@@ -19,7 +19,7 @@
 #define HOLD_MS ISOTP_DEFAULT_N_BS_MS  /* the vehicle link's N_Bs (ISO default) */
 #define LOG_MAX 4096u
 
-typedef enum { K_NONE = 0, K_SESSION, K_TP, K_READ } kind_t;
+typedef enum { K_NONE = 0, K_SESSION, K_TP, K_READ, K_DTC } kind_t;
 
 static uds_client_core_t c;
 static uint8_t req[UDS_CLIENT_REQ_MAX];
@@ -56,6 +56,17 @@ static uint32_t rpm_raw; /* the raw ENGINE_SPEED the fake ECU answers */
 static uint32_t rpm_script[8];
 static uint32_t rpm_script_len;
 static uint32_t rpm_script_n;
+/* D-080: the tests written before the DTC reader keep it off (the epoch's 0x19 halted as
+ * "not served" at each session confirmation) so they see only session, TP and DID reads.
+ * The D-080 tests clear this in their own setup. */
+static bool legacy_dtc_off;
+#define DTC_LOG_MAX 64u
+static uint8_t dtc_n;            /* stored DTCs the fake ECU reports */
+static uint8_t dtc_nrc_code;     /* non-zero: every 0x19 is answered with this NRC */
+static bool dtc_silent;          /* 0x19 requests are not answered */
+static bool check_dtc_slot;      /* assert "no DID due" at every 0x19 request (D-080 item 4) */
+static uds_client_dtc_answer_t dtc_log[DTC_LOG_MAX];
+static uint32_t dtc_log_n;
 static bool late_valid; /* a delayed answer (RPM_SLOW) is due at late_t */
 static uint32_t late_t;
 static uint32_t late_idx;
@@ -79,6 +90,12 @@ void setUp(void)
     rpm_script_len = 0u;
     rpm_script_n = 0u;
     late_valid = false;
+    legacy_dtc_off = true;
+    dtc_n = 0u;
+    dtc_nrc_code = 0u;
+    dtc_silent = false;
+    check_dtc_slot = false;
+    dtc_log_n = 0u;
 }
 
 void tearDown(void) {}
@@ -113,7 +130,15 @@ static kind_t classify(void)
         (void)did_index((uint16_t)(((uint16_t)req[1] << 8u) | req[2]));
         return K_READ;
     }
-    TEST_FAIL_MESSAGE("the core produced a request that is not session, TP or a gen/ DID read");
+    if ((req[0] == UDS_SID_READ_DTC_INFORMATION) &&
+        (((req_len == 3u) && ((req[1] == UDS_READ_DTC_REPORT_NUMBER_OF_DTC_BY_STATUS_MASK) ||
+                              (req[1] == UDS_READ_DTC_REPORT_DTC_BY_STATUS_MASK)) &&
+          (req[2] == VEHICLE_CL250_DTC_STATUS_MASK)) ||
+         ((req_len == 6u) && ((req[1] == UDS_READ_DTC_REPORT_DTC_SNAPSHOT_RECORD_BY_DTC_NUMBER) ||
+                              (req[1] == UDS_READ_DTC_REPORT_DTC_EXT_DATA_RECORD_BY_DTC_NUMBER))))) {
+        return K_DTC;
+    }
+    TEST_FAIL_MESSAGE("the core produced a request that is not session, TP, a gen/ DID read or a gen/ 0x19");
     return K_NONE;
 }
 
@@ -153,6 +178,9 @@ static void answer_session(uint32_t t)
     const uint8_t d[6] = {VEHICLE_CL250_SESSION_POSITIVE_SID, VEHICLE_CL250_SESSION_SUBFUNCTION,
                           0x00u, 0x32u, 0x01u, 0xF4u};
     TEST_ASSERT_FALSE(indicate(t, d, 6u));
+    if (legacy_dtc_off) {
+        dtc_snapshot_core_halt_after_answer(&c.dtc, DTC_SNAPSHOT_HALT_NOT_SERVED);
+    }
 }
 
 static bool answer_read(uint32_t t, uint32_t idx, uint32_t raw)
@@ -238,6 +266,73 @@ static void ecu_reacts(uint32_t t, uint32_t idx)
     }
 }
 
+/* ---- D-080 fake ECU for 0x19: dtc_n stored DTCs (synthetic test data) ---- */
+static const uint8_t DTC_STATUS = 0x2Fu; /* synthetic: pending + confirmed + ... */
+
+static void dtc_number(uint8_t i, uint8_t* out)
+{
+    out[0] = 0xABu;
+    out[1] = 0xCDu;
+    out[2] = (uint8_t)(0x10u + i);
+}
+
+/* indicate() followed by the glue's take_dtc_answer(), logging what it hands out. */
+static void indicate_dtc(uint32_t t, const uint8_t* d, uint16_t n)
+{
+    TEST_ASSERT_FALSE(indicate(t, d, n));
+    uds_client_dtc_answer_t a;
+    if (uds_client_core_take_dtc_answer(&c, &a) && (dtc_log_n < DTC_LOG_MAX)) {
+        dtc_log[dtc_log_n] = a;
+        dtc_log_n++;
+    }
+}
+
+/* The fake ECU's answer to the 0x19 request in req/req_len. */
+static void dtc_ecu_reacts(uint32_t t)
+{
+    uint8_t d[3u + (4u * 12u)] = {0};
+    uint16_t n = 0u;
+    if (dtc_silent) {
+        return;
+    }
+    if (dtc_nrc_code != 0u) {
+        nrc(t, UDS_SID_READ_DTC_INFORMATION, dtc_nrc_code);
+        return;
+    }
+    d[n++] = (uint8_t)(UDS_SID_READ_DTC_INFORMATION + POS_OFFSET);
+    d[n++] = req[1];
+    if (req[1] == UDS_READ_DTC_REPORT_NUMBER_OF_DTC_BY_STATUS_MASK) {
+        d[n++] = 0xFFu;
+        d[n++] = 0x01u;
+        d[n++] = 0x00u;
+        d[n++] = dtc_n;
+    } else if (req[1] == UDS_READ_DTC_REPORT_DTC_BY_STATUS_MASK) {
+        d[n++] = 0xFFu;
+        for (uint8_t i = 0u; i < dtc_n; i++) {
+            dtc_number(i, &d[n]);
+            n = (uint16_t)(n + 3u);
+            d[n++] = DTC_STATUS;
+        }
+    } else {
+        d[n++] = req[2];
+        d[n++] = req[3];
+        d[n++] = req[4];
+        d[n++] = DTC_STATUS;
+        d[n++] = 0x01u; /* a record byte */
+    }
+    indicate_dtc(t, d, n);
+}
+
+static bool did_due(uint32_t idx, uint32_t t)
+{
+    const uds_client_did_state_t* ds = &c.did[idx];
+    if (uds_client_core_did_skipped(&c, idx, t) || uds_client_core_did_stopped(&c, idx)) {
+        return false;
+    }
+    return !ds->requested ||
+           ((uint32_t)(t - ds->last_request_ms) >= (uint32_t)vehicle_cl250_dids[idx].poll_period_ms);
+}
+
 /* Polls every ms in [from, to) and plays a fake ECU that answers at once, unless it is
  * silent (all, or for the DIDs in silent_mask) or did_mode says otherwise. Every request
  * is logged. */
@@ -256,6 +351,17 @@ static void drive(uint32_t from, uint32_t to)
                 log_buf[log_n].k = k;
                 log_buf[log_n].idx = idx;
                 log_n++;
+            }
+            if (k == K_DTC) {
+                if (check_dtc_slot) {
+                    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+                        TEST_ASSERT_FALSE_MESSAGE(did_due(i, t), "a 0x19 went out while a DID was due");
+                    }
+                }
+                if (!ecu_silent) {
+                    dtc_ecu_reacts(t);
+                }
+                continue;
             }
             if (ecu_silent) {
                 continue;
@@ -4188,6 +4294,470 @@ static void test_d075_the_f_stop_works_across_the_millis_wrap(void)
     TEST_ASSERT_EQUAL_UINT32(2u, stats()->session_losses);
 }
 
+/* ------------------------------------------------------------------------- */
+/* D-080: DTC freeze frames in the poller                                     */
+/* ------------------------------------------------------------------------- */
+
+#define DTC_T0 1000u
+#define BASE_MS VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS
+
+static void bring_up_dtc(uint32_t t)
+{
+    legacy_dtc_off = false;
+    bring_up(t);
+}
+
+/* Plays the ECU for everything but 0x19 until the core produces a 0x19; leaves it
+ * pending, unanswered. Returns its send time. */
+static uint32_t wait_for_dtc_request(uint32_t from)
+{
+    for (uint32_t t = from; t < (from + 20000u); t++) {
+        kind_t k;
+        while ((k = poll_at(t)) != K_NONE) {
+            if (k == K_DTC) {
+                return t;
+            }
+            if (k == K_SESSION) {
+                answer_session(t);
+            } else if (k == K_READ) {
+                ecu_reacts(t, req_idx());
+            } else {
+                /* tester present */
+            }
+        }
+    }
+    TEST_FAIL_MESSAGE("no 0x19 request");
+    return 0u;
+}
+
+static const dtc_snapshot_core_t* dtc(void)
+{
+    return uds_client_core_dtc(&c);
+}
+
+static void test_D080_item4_a_0x19_never_goes_out_while_any_did_is_due(void)
+{
+    bring_up_dtc(DTC_T0);
+    dtc_n = 3u;
+    check_dtc_slot = true;
+    drive(DTC_T0, DTC_T0 + 4000u);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_END_DONE, dtc_snapshot_core_last_end(dtc()));
+    TEST_ASSERT_EQUAL_UINT32(2u + (2u * 3u), count_kind(K_DTC, 0u, UINT32_MAX));
+    TEST_ASSERT_EQUAL_UINT32(8u, dtc_log_n);
+    TEST_ASSERT_EQUAL_UINT32(8u, dtc_snapshot_core_stats(dtc())->answers);
+}
+
+static void test_D080_item4_a_verified_did_due_at_the_same_step_always_wins(void)
+{
+    bring_up_dtc(DTC_T0);
+    dtc_n = 2u;
+    const uint32_t tc = wait_for_dtc_request(DTC_T0);
+    const uint32_t speed = VEHICLE_CL250_IDX_VEHICLE_SPEED;
+    TEST_ASSERT_TRUE(vehicle_cl250_dids[speed].verified);
+    const uint32_t due_at = tc + 20u;
+    c.did[speed].requested = true;
+    c.did[speed].last_request_ms = due_at - vehicle_cl250_dids[speed].poll_period_ms;
+    dtc_ecu_reacts(due_at); /* the count answer arrives in the same step ... */
+    TEST_ASSERT_EQUAL(K_READ, poll_at(due_at)); /* ... as the speed read is due */
+    TEST_ASSERT_EQUAL_UINT32(speed, req_idx());
+    ecu_reacts(due_at, speed);
+    drive(due_at + 1u, due_at + 500u);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_END_DONE, dtc_snapshot_core_last_end(dtc()));
+}
+
+static void test_D080_item4_nrc_0x78_does_not_extend_the_wait_of_a_0x19(void)
+{
+    bring_up_dtc(DTC_T0);
+    const uint32_t tc = wait_for_dtc_request(DTC_T0);
+    TEST_ASSERT_EQUAL_HEX8(UDS_SID_READ_DTC_INFORMATION + POS_OFFSET,
+                           uds_client_core_pending_response_sid(&c));
+    const uint32_t pending = stats()->response_pending;
+    nrc(tc + 50u, UDS_SID_READ_DTC_INFORMATION, UDS_NRC_RESPONSE_PENDING);
+    TEST_ASSERT_EQUAL_UINT32(pending + 1u, stats()->response_pending);
+    TEST_ASSERT_EQUAL(K_NONE, poll_at(tc + BASE_MS - 1u));
+    TEST_ASSERT_EQUAL(UDS_CLIENT_REQ_DTC, uds_client_core_pending(&c));
+    nrc(tc + BASE_MS - 1u, UDS_SID_READ_DTC_INFORMATION, UDS_NRC_RESPONSE_PENDING);
+    (void)poll_at(tc + BASE_MS); /* the base timeout from the request, not from the 0x78 */
+    TEST_ASSERT_EQUAL(UDS_CLIENT_REQ_NONE, uds_client_core_pending(&c));
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_NO_ANSWER, dtc_snapshot_core_halt(dtc()));
+}
+
+static void test_D080_item3_a_timeout_halts_0x19_and_touches_no_did_rule(void)
+{
+    bring_up_dtc(DTC_T0);
+    dtc_silent = true;
+    drive(DTC_T0, DTC_T0 + 3000u);
+    TEST_ASSERT_EQUAL_UINT32(1u, count_kind(K_DTC, 0u, UINT32_MAX));
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_NO_ANSWER, dtc_snapshot_core_halt(dtc()));
+    TEST_ASSERT_EQUAL_UINT32(1u, stats()->timeouts);
+    TEST_ASSERT_FALSE(c.timeout_seen); /* no DID quiet window */
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        TEST_ASSERT_EQUAL_UINT8(0u, c.did[i].consecutive_timeouts);
+        TEST_ASSERT_FALSE(c.did[i].unanswered);
+        TEST_ASSERT_FALSE(uds_client_core_did_stopped(&c, i));
+    }
+    TEST_ASSERT_TRUE(c.dtc_timed_out);
+}
+
+static void test_D080_item2_nrc_0x7e_0x7f_ask_for_the_session_at_the_next_step_at_most_twice_per_epoch(void)
+{
+    bring_up_dtc(DTC_T0);
+    dtc_n = 1u;
+    dtc_nrc_code = UDS_NRC_SERVICE_NOT_SUPPORTED_IN_ACTIVE_SESSION;
+    drive(DTC_T0, DTC_T0 + 3000u);
+    TEST_ASSERT_EQUAL_UINT32(2u, count_kind(K_DTC, 0u, UINT32_MAX));
+    TEST_ASSERT_EQUAL_UINT32(2u, count_kind(K_SESSION, 0u, UINT32_MAX)); /* init session is not logged */
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_SESSION_REFUSED, dtc_snapshot_core_halt(dtc()));
+    TEST_ASSERT_TRUE(uds_client_core_session_up(&c));
+    /* each session request came at the step right after the refused 0x19 */
+    uint32_t last_dtc = 0u;
+    uint32_t checked = 0u;
+    for (uint32_t i = 0u; i < log_n; i++) {
+        if (log_buf[i].k == K_DTC) {
+            last_dtc = log_buf[i].t;
+        } else if (log_buf[i].k == K_SESSION) {
+            TEST_ASSERT_LESS_OR_EQUAL_UINT32(1u, log_buf[i].t - last_dtc); /* the next poll */
+            checked++;
+        } else {
+            /* reads and tester present */
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(2u, checked);
+    /* the confirmations stay in the epoch: no new run */
+    TEST_ASSERT_EQUAL_UINT8(1u, dtc_snapshot_core_runs_started(dtc()));
+    TEST_ASSERT_EQUAL_UINT32(1u, dtc_snapshot_core_stats(dtc())->runs);
+    TEST_ASSERT_EQUAL_UINT32(2u, dtc_snapshot_core_stats(dtc())->requests);
+    TEST_ASSERT_EQUAL_UINT32(0u, count_kind(K_DTC, last_dtc + 1u, UINT32_MAX));
+}
+
+static void test_D080_item2_one_session_refusal_resends_the_same_request_in_the_same_run(void)
+{
+    bring_up_dtc(DTC_T0);
+    dtc_n = 1u;
+    const uint32_t tc = wait_for_dtc_request(DTC_T0);
+    const uint8_t first[3] = {req[0], req[1], req[2]};
+    nrc(tc + 1u, UDS_SID_READ_DTC_INFORMATION, UDS_NRC_SUBFUNCTION_NOT_SUPPORTED_IN_ACTIVE_SESSION);
+    TEST_ASSERT_FALSE(uds_client_core_session_up(&c));
+    TEST_ASSERT_EQUAL(K_SESSION, poll_at(tc + 2u));
+    answer_session(tc + 2u);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_NONE, dtc_snapshot_core_halt(dtc()));
+    const uint32_t t2 = wait_for_dtc_request(tc + 3u);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(first, req, 3u);
+    TEST_ASSERT_EQUAL_UINT8(1u, dtc_snapshot_core_runs_started(dtc()));
+    TEST_ASSERT_EQUAL_UINT8(2u, dtc_snapshot_core_requests_in_run(dtc()));
+    dtc_ecu_reacts(t2);
+    drive(t2 + 1u, t2 + 500u);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_END_DONE, dtc_snapshot_core_last_end(dtc()));
+}
+
+static void test_D080_item2_nrc_0x11_0x12_0x31_halt_the_epoch_and_touch_no_did(void)
+{
+    const uint8_t codes[3] = {UDS_NRC_SERVICE_NOT_SUPPORTED, UDS_NRC_SUBFUNCTION_NOT_SUPPORTED,
+                              UDS_NRC_REQUEST_OUT_OF_RANGE};
+    for (uint32_t i = 0u; i < 3u; i++) {
+        setUp();
+        bring_up_dtc(DTC_T0);
+        dtc_nrc_code = codes[i];
+        drive(DTC_T0, DTC_T0 + 2000u);
+        TEST_ASSERT_EQUAL_UINT32(1u, count_kind(K_DTC, 0u, UINT32_MAX));
+        TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_NOT_SERVED, dtc_snapshot_core_halt(dtc()));
+        TEST_ASSERT_EQUAL_UINT32(0u, stats()->did_stops); /* an NRC 0x31 for 0x19 is no DID stop */
+        TEST_ASSERT_TRUE(uds_client_core_session_up(&c));
+    }
+}
+
+static void test_D080_item2_another_nrc_ends_only_the_run_and_the_warm_idle_run_follows(void)
+{
+    bring_up_dtc(DTC_T0);
+    dtc_nrc_code = UDS_NRC_CONDITIONS_NOT_CORRECT;
+    drive(DTC_T0, DTC_T0 + 1000u);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_END_REFUSED, dtc_snapshot_core_last_end(dtc()));
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_NONE, dtc_snapshot_core_halt(dtc()));
+    TEST_ASSERT_FALSE(uds_client_core_dtc_warm_idle(&c, DTC_T0 + 1000u, true));
+    TEST_ASSERT_TRUE(uds_client_core_dtc_warm_idle(
+        &c, DTC_T0 + 1000u + VEHICLE_CL250_DTC_WARM_IDLE_MIN_DURATION_MS, true));
+    dtc_nrc_code = 0u;
+    dtc_n = 0u;
+    drive(DTC_T0 + 1000u, DTC_T0 + 1500u); /* the clock only needs to move on */
+    TEST_ASSERT_EQUAL_UINT8(2u, dtc_snapshot_core_runs_started(dtc()));
+}
+
+static void test_D080_item3_a_failed_reception_halts_0x19_and_holds_for_n_bs(void)
+{
+    bring_up_dtc(DTC_T0);
+    const uint32_t tc = wait_for_dtc_request(DTC_T0);
+    const uint32_t unavailable = stats()->unavailable;
+    TEST_ASSERT_FALSE(uds_client_core_on_indication(&c, tc + 30u, ISOTP_N_TIMEOUT_CR, NULL, 0u, &smp));
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_SEGMENTED, dtc_snapshot_core_halt(dtc()));
+    TEST_ASSERT_EQUAL_UINT32(unavailable + 1u, stats()->unavailable);
+    TEST_ASSERT_EQUAL(UDS_CLIENT_REQ_NONE, uds_client_core_pending(&c));
+    TEST_ASSERT_EQUAL(K_NONE, poll_at(tc + 30u + HOLD_MS - 1u));
+    const kind_t k = poll_at(tc + 30u + HOLD_MS); /* tester present or a read, never 0x19 */
+    TEST_ASSERT_TRUE((k == K_TP) || (k == K_READ));
+    TEST_ASSERT_EQUAL_UINT32(0u, stats()->did_skips);
+}
+
+static void test_D080_item3_a_withheld_fc_for_a_0x19_halts_it_and_holds_for_the_max_timeout(void)
+{
+    bring_up_dtc(DTC_T0);
+    const uint32_t tc = wait_for_dtc_request(DTC_T0);
+    uds_client_core_on_fc_withheld(&c, tc + 5u);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_SEGMENTED, dtc_snapshot_core_halt(dtc()));
+    TEST_ASSERT_EQUAL(UDS_CLIENT_REQ_NONE, uds_client_core_pending(&c));
+    TEST_ASSERT_EQUAL(K_NONE, poll_at(tc + 5u + VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS - 1u));
+    const kind_t k = poll_at(tc + 5u + VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS);
+    TEST_ASSERT_TRUE((k == K_TP) || (k == K_READ));
+}
+
+static void test_D080_item3_a_withheld_fc_with_nothing_pending_halts_0x19_only_after_its_timeout(void)
+{
+    /* No 0x19 timed out: a withheld FC is not attributed to 0x19 (a DID's First Frame, a
+     * late answer to tester present, ...). */
+    bring_up_dtc(DTC_T0);
+    TEST_ASSERT_EQUAL(UDS_CLIENT_REQ_NONE, uds_client_core_pending(&c));
+    uds_client_core_on_fc_withheld(&c, DTC_T0);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_NONE, dtc_snapshot_core_halt(dtc()));
+    TEST_ASSERT_TRUE(dtc_snapshot_core_run_active(dtc()));
+
+    /* a DID's First Frame while a read is pending */
+    setUp();
+    bring_up_dtc(DTC_T0);
+    TEST_ASSERT_EQUAL(K_READ, poll_at(DTC_T0));
+    uds_client_core_on_fc_withheld(&c, DTC_T0);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_NONE, dtc_snapshot_core_halt(dtc()));
+
+    /* after a 0x19 timeout the 0x19 path is off anyway; the late First Frame changes nothing */
+    setUp();
+    bring_up_dtc(DTC_T0);
+    dtc_silent = true;
+    drive(DTC_T0, DTC_T0 + 500u);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_NO_ANSWER, dtc_snapshot_core_halt(dtc()));
+    uds_client_core_on_fc_withheld(&c, DTC_T0 + 500u);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_NO_ANSWER, dtc_snapshot_core_halt(dtc()));
+    TEST_ASSERT_EQUAL_UINT32(1u, dtc_snapshot_core_stats(dtc())->halts);
+
+    /* the LATE_FF reason itself (white box: a timeout flag without the timeout halt) */
+    setUp();
+    bring_up_dtc(DTC_T0);
+    c.dtc_timed_out = true;
+    uds_client_core_on_fc_withheld(&c, DTC_T0);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_LATE_FF, dtc_snapshot_core_halt(dtc()));
+    TEST_ASSERT_FALSE(dtc_snapshot_core_run_active(dtc()));
+}
+
+/* A reception of a long answer runs with rx_busy, which pauses the base timeout. */
+static uint32_t slow_answer_halts(uint32_t answer_after_ms, bool* halted_before_take,
+                                  bool* halted_after_take)
+{
+    bring_up_dtc(DTC_T0);
+    dtc_n = 1u;
+    const uint32_t tc = wait_for_dtc_request(DTC_T0);
+    for (uint32_t t = tc + 1u; t < (tc + answer_after_ms); t++) {
+        TEST_ASSERT_EQUAL(K_NONE, poll_busy(t, true));
+    }
+    dtc_silent = false;
+    const uint32_t ta = tc + answer_after_ms;
+    const uint8_t d[6] = {UDS_SID_READ_DTC_INFORMATION + POS_OFFSET,
+                          UDS_READ_DTC_REPORT_NUMBER_OF_DTC_BY_STATUS_MASK, 0xFFu, 0x01u, 0x00u, 0x01u};
+    TEST_ASSERT_FALSE(indicate(ta, d, sizeof d));
+    *halted_before_take = (dtc_snapshot_core_halt(dtc()) != DTC_SNAPSHOT_HALT_NONE);
+    uds_client_dtc_answer_t a;
+    TEST_ASSERT_TRUE(uds_client_core_take_dtc_answer(&c, &a)); /* the sink would be called first */
+    *halted_after_take = (dtc_snapshot_core_halt(dtc()) == DTC_SNAPSHOT_HALT_SLOW);
+    return ta;
+}
+
+static void test_D080_item3_an_answer_later_than_one_slot_halts_0x19_after_it_was_handed_out(void)
+{
+    bool before = true;
+    bool after = false;
+    const uint32_t ta = slow_answer_halts(BASE_MS + VEHICLE_CL250_CLIENT_STEP_MAX_MS + 1u, &before, &after);
+    TEST_ASSERT_FALSE(before); /* the answer is out first ... */
+    TEST_ASSERT_TRUE(after);   /* ... then 0x19 is off */
+    TEST_ASSERT_FALSE(dtc_snapshot_core_run_active(dtc()));
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_END_HALTED, dtc_snapshot_core_last_end(dtc()));
+    TEST_ASSERT_NOT_EQUAL(K_DTC, poll_at(ta + 1u)); /* and no more 0x19 */
+}
+
+static void test_D080_item3_an_answer_at_exactly_one_slot_is_not_slow(void)
+{
+    setUp();
+    bool before = true;
+    bool after = true;
+    (void)slow_answer_halts(BASE_MS + VEHICLE_CL250_CLIENT_STEP_MAX_MS, &before, &after);
+    TEST_ASSERT_FALSE(before);
+    TEST_ASSERT_FALSE(after);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_STEP_LIST, dtc_snapshot_core_step(dtc()));
+}
+
+static void test_D080_item3_a_slow_answer_nobody_took_still_halts_at_the_next_poll(void)
+{
+    bring_up_dtc(DTC_T0);
+    const uint32_t tc = wait_for_dtc_request(DTC_T0);
+    const uint8_t d[6] = {UDS_SID_READ_DTC_INFORMATION + POS_OFFSET,
+                          UDS_READ_DTC_REPORT_NUMBER_OF_DTC_BY_STATUS_MASK, 0xFFu, 0x01u, 0x00u, 0x01u};
+    const uint32_t ta = tc + BASE_MS + VEHICLE_CL250_CLIENT_STEP_MAX_MS + 1u;
+    for (uint32_t t = tc + 1u; t < ta; t++) {
+        TEST_ASSERT_EQUAL(K_NONE, poll_busy(t, true));
+    }
+    TEST_ASSERT_FALSE(indicate(ta, d, sizeof d));
+    TEST_ASSERT_NOT_EQUAL(K_DTC, poll_at(ta));
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_SLOW, dtc_snapshot_core_halt(dtc()));
+    uds_client_dtc_answer_t a;
+    TEST_ASSERT_TRUE(uds_client_core_take_dtc_answer(&c, &a)); /* still there */
+}
+
+static void test_D080_item5_the_answer_info_names_step_sub_function_dtc_trigger_and_run_once(void)
+{
+    bring_up_dtc(DTC_T0);
+    dtc_n = 2u;
+    drive(DTC_T0, DTC_T0 + 1000u);
+    TEST_ASSERT_EQUAL_UINT32(2u + (2u * 2u), dtc_log_n);
+    const uint8_t subs[8] = {UDS_READ_DTC_REPORT_NUMBER_OF_DTC_BY_STATUS_MASK,
+                             UDS_READ_DTC_REPORT_DTC_BY_STATUS_MASK,
+                             UDS_READ_DTC_REPORT_DTC_SNAPSHOT_RECORD_BY_DTC_NUMBER,
+                             UDS_READ_DTC_REPORT_DTC_EXT_DATA_RECORD_BY_DTC_NUMBER,
+                             UDS_READ_DTC_REPORT_DTC_SNAPSHOT_RECORD_BY_DTC_NUMBER,
+                             UDS_READ_DTC_REPORT_DTC_EXT_DATA_RECORD_BY_DTC_NUMBER, 0u, 0u};
+    const dtc_snapshot_step_t steps[6] = {
+        DTC_SNAPSHOT_STEP_COUNT,    DTC_SNAPSHOT_STEP_LIST,    DTC_SNAPSHOT_STEP_SNAPSHOT,
+        DTC_SNAPSHOT_STEP_EXT_DATA, DTC_SNAPSHOT_STEP_SNAPSHOT, DTC_SNAPSHOT_STEP_EXT_DATA};
+    for (uint32_t i = 0u; i < 6u; i++) {
+        TEST_ASSERT_EQUAL(steps[i], dtc_log[i].step);
+        TEST_ASSERT_EQUAL_HEX8(subs[i], dtc_log[i].sub_function);
+        TEST_ASSERT_EQUAL(DTC_SNAPSHOT_TRIGGER_KEY_ON, dtc_log[i].trigger);
+        TEST_ASSERT_EQUAL_UINT8(1u, dtc_log[i].run);
+        uint8_t e[3] = {0u, 0u, 0u};
+        if (i >= 2u) {
+            dtc_number((uint8_t)((i - 2u) / 2u), e);
+        }
+        TEST_ASSERT_EQUAL_HEX8_ARRAY(e, dtc_log[i].dtc, 3u);
+    }
+    uds_client_dtc_answer_t a;
+    TEST_ASSERT_FALSE(uds_client_core_take_dtc_answer(&c, &a));
+    TEST_ASSERT_FALSE(uds_client_core_take_dtc_answer(NULL, &a));
+    TEST_ASSERT_FALSE(uds_client_core_take_dtc_answer(&c, NULL));
+}
+
+static void test_D080_item1_the_warm_idle_run_is_marked_in_its_answers(void)
+{
+    bring_up_dtc(DTC_T0);
+    drive(DTC_T0, DTC_T0 + 500u); /* key-on run: count 0 */
+    TEST_ASSERT_EQUAL_UINT32(1u, dtc_log_n);
+    TEST_ASSERT_FALSE(uds_client_core_dtc_warm_idle(&c, DTC_T0 + 500u, true));
+    TEST_ASSERT_TRUE(uds_client_core_dtc_warm_idle(
+        &c, DTC_T0 + 500u + VEHICLE_CL250_DTC_WARM_IDLE_MIN_DURATION_MS, true));
+    drive(DTC_T0 + 500u, DTC_T0 + 1500u);
+    TEST_ASSERT_EQUAL_UINT32(2u, dtc_log_n);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_TRIGGER_WARM_IDLE, dtc_log[1].trigger);
+    TEST_ASSERT_EQUAL_UINT8(2u, dtc_log[1].run);
+    TEST_ASSERT_FALSE(uds_client_core_dtc_warm_idle(NULL, 0u, true));
+}
+
+static void test_D080_item1_ecu_absence_starts_a_new_epoch_with_a_new_key_on_run(void)
+{
+    bring_up_dtc(DTC_T0);
+    dtc_nrc_code = UDS_NRC_SERVICE_NOT_SUPPORTED; /* halted for this epoch */
+    drive(DTC_T0, DTC_T0 + 500u);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_NOT_SERVED, dtc_snapshot_core_halt(dtc()));
+    ecu_silent = true;
+    const uint32_t t1 = DTC_T0 + 500u;
+    drive(t1, t1 + VEHICLE_CL250_ECU_ABSENT_TIMEOUT_MS + 500u);
+    TEST_ASSERT_FALSE(uds_client_core_session_up(&c));
+    ecu_silent = false;
+    dtc_nrc_code = 0u;
+    dtc_n = 1u;
+    const uint32_t t2 = t1 + VEHICLE_CL250_ECU_ABSENT_TIMEOUT_MS + 500u;
+    drive(t2, t2 + 2500u);
+    TEST_ASSERT_TRUE(uds_client_core_session_up(&c));
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_NONE, dtc_snapshot_core_halt(dtc()));
+    TEST_ASSERT_EQUAL_UINT32(2u, dtc_snapshot_core_stats(dtc())->runs);
+    TEST_ASSERT_EQUAL_UINT8(1u, dtc_snapshot_core_runs_started(dtc()));
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_END_DONE, dtc_snapshot_core_last_end(dtc()));
+    TEST_ASSERT_EQUAL_UINT32(2u + (2u * 1u), dtc_snapshot_core_stats(dtc())->answers);
+}
+
+static void test_D080_not_sent_of_a_0x19_restores_it_and_it_goes_out_again_at_once(void)
+{
+    bring_up_dtc(DTC_T0);
+    uint32_t before = 0u;
+    uint32_t t = DTC_T0;
+    kind_t k = K_NONE;
+    for (; t < (DTC_T0 + 5000u); t++) {
+        before = stats()->requests;
+        k = poll_at(t);
+        if (k == K_DTC) {
+            break;
+        }
+        if (k == K_READ) {
+            ecu_reacts(t, req_idx());
+        } else if (k == K_SESSION) {
+            answer_session(t);
+        } else {
+            /* tester present */
+        }
+    }
+    TEST_ASSERT_EQUAL(K_DTC, k);
+    const uint8_t first[3] = {req[0], req[1], req[2]};
+    TEST_ASSERT_EQUAL_UINT32(before + 1u, stats()->requests);
+    uds_client_core_not_sent(&c);
+    TEST_ASSERT_EQUAL(UDS_CLIENT_REQ_NONE, uds_client_core_pending(&c));
+    TEST_ASSERT_EQUAL_UINT32(before, stats()->requests);
+    TEST_ASSERT_EQUAL_UINT8(0u, dtc_snapshot_core_requests_in_run(dtc()));
+    TEST_ASSERT_EQUAL_UINT8(0u, dtc_snapshot_core_requests_in_epoch(dtc()));
+    TEST_ASSERT_EQUAL(K_DTC, poll_at(t));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(first, req, 3u);
+    TEST_ASSERT_EQUAL_UINT8(1u, dtc_snapshot_core_requests_in_run(dtc()));
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_NONE, dtc_snapshot_core_halt(dtc()));
+}
+
+static void test_D080_a_positive_0x19_answer_that_does_not_match_is_ignored_and_counted(void)
+{
+    bring_up_dtc(DTC_T0);
+    uds_client_dtc_answer_t a;
+    /* nothing pending: a late 0x19 answer */
+    const uint8_t late[6] = {UDS_SID_READ_DTC_INFORMATION + POS_OFFSET,
+                             UDS_READ_DTC_REPORT_NUMBER_OF_DTC_BY_STATUS_MASK, 0xFFu, 0x01u, 0x00u, 0x01u};
+    uint32_t unexpected = stats()->unexpected;
+    TEST_ASSERT_FALSE(indicate(DTC_T0, late, sizeof late));
+    TEST_ASSERT_EQUAL_UINT32(unexpected + 1u, stats()->unexpected);
+    TEST_ASSERT_FALSE(uds_client_core_take_dtc_answer(&c, &a));
+
+    const uint32_t tc = wait_for_dtc_request(DTC_T0);
+    unexpected = stats()->unexpected;
+    const uint8_t wrong_sub[6] = {UDS_SID_READ_DTC_INFORMATION + POS_OFFSET,
+                                  UDS_READ_DTC_REPORT_DTC_BY_STATUS_MASK, 0xFFu, 0u, 0u, 0u};
+    TEST_ASSERT_FALSE(indicate(tc + 1u, wrong_sub, sizeof wrong_sub));
+    const uint8_t read_answer[5] = {UDS_SID_READ_DATA_BY_IDENTIFIER + POS_OFFSET, 0xF4u, 0x0Cu, 0u, 0u};
+    TEST_ASSERT_FALSE(indicate(tc + 2u, read_answer, sizeof read_answer));
+    TEST_ASSERT_EQUAL_UINT32(unexpected + 2u, stats()->unexpected);
+    TEST_ASSERT_EQUAL(UDS_CLIENT_REQ_DTC, uds_client_core_pending(&c));
+    TEST_ASSERT_FALSE(uds_client_core_take_dtc_answer(&c, &a));
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_STEP_COUNT, dtc_snapshot_core_step(dtc()));
+    dtc_ecu_reacts(tc + 3u); /* the right answer still completes it */
+    TEST_ASSERT_EQUAL(UDS_CLIENT_REQ_NONE, uds_client_core_pending(&c));
+}
+
+static void test_D080_a_latched_core_sends_no_0x19_and_the_getters_tolerate_null(void)
+{
+    bring_up_dtc(DTC_T0);
+    uds_client_core_latch(&c);
+    drive(DTC_T0, DTC_T0 + 500u);
+    TEST_ASSERT_EQUAL_UINT32(0u, count_kind(K_DTC, 0u, UINT32_MAX));
+    TEST_ASSERT_NULL(uds_client_core_dtc(NULL));
+}
+
+static void test_D080_a_0x19_request_fits_the_request_buffer(void)
+{
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT32(DTC_SNAPSHOT_REQ_MAX, UDS_CLIENT_REQ_MAX);
+    bring_up_dtc(DTC_T0);
+    dtc_n = 1u;
+    check_dtc_slot = true;
+    drive(DTC_T0, DTC_T0 + 1000u);
+    TEST_ASSERT_EQUAL_UINT32(4u, count_kind(K_DTC, 0u, UINT32_MAX));
+}
+
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -4326,5 +4896,26 @@ int main(void)
     RUN_TEST(test_d075_session_requests_per_epoch_stay_within_four_per_unverified_did);
     RUN_TEST(test_d075_the_f_stop_works_across_the_millis_wrap);
     RUN_TEST(test_d075_a_0x7f_did_in_the_quiet_window_is_not_counted_until_the_window_closes);
+    RUN_TEST(test_D080_item4_a_0x19_never_goes_out_while_any_did_is_due);
+    RUN_TEST(test_D080_item4_a_verified_did_due_at_the_same_step_always_wins);
+    RUN_TEST(test_D080_item4_nrc_0x78_does_not_extend_the_wait_of_a_0x19);
+    RUN_TEST(test_D080_item3_a_timeout_halts_0x19_and_touches_no_did_rule);
+    RUN_TEST(test_D080_item2_nrc_0x7e_0x7f_ask_for_the_session_at_the_next_step_at_most_twice_per_epoch);
+    RUN_TEST(test_D080_item2_one_session_refusal_resends_the_same_request_in_the_same_run);
+    RUN_TEST(test_D080_item2_nrc_0x11_0x12_0x31_halt_the_epoch_and_touch_no_did);
+    RUN_TEST(test_D080_item2_another_nrc_ends_only_the_run_and_the_warm_idle_run_follows);
+    RUN_TEST(test_D080_item3_a_failed_reception_halts_0x19_and_holds_for_n_bs);
+    RUN_TEST(test_D080_item3_a_withheld_fc_for_a_0x19_halts_it_and_holds_for_the_max_timeout);
+    RUN_TEST(test_D080_item3_a_withheld_fc_with_nothing_pending_halts_0x19_only_after_its_timeout);
+    RUN_TEST(test_D080_item3_an_answer_later_than_one_slot_halts_0x19_after_it_was_handed_out);
+    RUN_TEST(test_D080_item3_an_answer_at_exactly_one_slot_is_not_slow);
+    RUN_TEST(test_D080_item3_a_slow_answer_nobody_took_still_halts_at_the_next_poll);
+    RUN_TEST(test_D080_item5_the_answer_info_names_step_sub_function_dtc_trigger_and_run_once);
+    RUN_TEST(test_D080_item1_the_warm_idle_run_is_marked_in_its_answers);
+    RUN_TEST(test_D080_item1_ecu_absence_starts_a_new_epoch_with_a_new_key_on_run);
+    RUN_TEST(test_D080_not_sent_of_a_0x19_restores_it_and_it_goes_out_again_at_once);
+    RUN_TEST(test_D080_a_positive_0x19_answer_that_does_not_match_is_ignored_and_counted);
+    RUN_TEST(test_D080_a_latched_core_sends_no_0x19_and_the_getters_tolerate_null);
+    RUN_TEST(test_D080_a_0x19_request_fits_the_request_buffer);
     return UNITY_END();
 }

@@ -1,5 +1,6 @@
 #include "app/host/sim_ecu.h"
 
+#include "features/uds/dtc_snapshot_core.h"
 #include "uds_iso14229.h"
 #include "vehicle_cl250.h"
 
@@ -12,6 +13,14 @@
 #define SIM_P2STAR_LO 0xF4u
 #define SWEEP_PERIOD_MS 10000u
 #define RX_PER_STEP 32u
+/* Synthetic test data (D-080 SIL): not vehicle DTCs. The status 0x2F has the pending and
+ * confirmed bits set (ISO 14229-1 Annex D), so it matches the gen/ status mask. */
+#define SIM_DTC_HI 0x01u
+#define SIM_DTC_MID 0x23u
+#define SIM_DTC_LO_BASE 0x40u
+#define SIM_ECU_DTC_STATUS 0x2Fu
+#define SIM_DTC_AVAILABILITY 0xFFu /* StatusAvailabilityMask: every bit supported */
+#define SIM_DTC_FORMAT_ISO14229 0x01u /* DTCFormatIdentifier: ISO 14229-1 DTC format */
 #define ECU_IDS_EXTENDED (VEHICLE_CL250_REQUEST_ID > CAN_PORT_STD_ID_MAX)
 
 _Static_assert(ISOTP_CAN_DL == CAN_PORT_MAX_DLC, "ISO-TP and CAN frame sizes differ");
@@ -32,8 +41,18 @@ bool sim_ecu_init(sim_ecu_t* ecu, vbus_t* bus)
     isotp_default_config(&cfg);
     cfg.padding_enabled = (VEHICLE_CL250_FRAME_DLC == ISOTP_CAN_DL);
     cfg.padding_byte = VEHICLE_CL250_PADDING_BYTE;
+    ecu->dtc_status = SIM_ECU_DTC_STATUS;
+    ecu->dtc_record_len = SIM_ECU_DTC_RECORD_LEN;
+    ecu->dtc_ext_len = SIM_ECU_DTC_EXT_LEN;
     return isotp_init(&ecu->iso, &cfg, ecu->rx_buf, SIM_ECU_BUF, ecu->tx_buf, SIM_ECU_BUF) ==
            ISOTP_OK;
+}
+
+void sim_ecu_dtc_number(uint8_t i, uint8_t* out)
+{
+    out[0] = SIM_DTC_HI;
+    out[1] = SIM_DTC_MID;
+    out[2] = (uint8_t)(SIM_DTC_LO_BASE + i);
 }
 
 void sim_ecu_drop_session(sim_ecu_t* ecu)
@@ -67,11 +86,52 @@ static uint16_t negative(uint8_t* out, uint8_t sid, uint8_t nrc)
     return 3u;
 }
 
+/* A physical value that satisfies every warm-idle condition of DID index idx; false if the
+ * DID is not in the table. Candidates: each condition's own threshold and one step beyond. */
+static bool warm_idle_value(uint32_t idx, float* phys)
+{
+    bool listed = false;
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DTC_WARM_IDLE_CONDITION_COUNT; i++) {
+        if (vehicle_cl250_dtc_warm_idle[i].did_index != idx) {
+            continue;
+        }
+        listed = true;
+        const float t = vehicle_cl250_dtc_warm_idle[i].value;
+        const float cand[3] = {t, t + 1.0f, t - 1.0f};
+        for (uint32_t k = 0u; k < 3u; k++) {
+            bool ok = true;
+            for (uint32_t j = 0u; j < VEHICLE_CL250_DTC_WARM_IDLE_CONDITION_COUNT; j++) {
+                if (vehicle_cl250_dtc_warm_idle[j].did_index == idx) {
+                    ok = ok && dtc_snapshot_core_condition_met(vehicle_cl250_dtc_warm_idle[j].op,
+                                                               cand[k],
+                                                               vehicle_cl250_dtc_warm_idle[j].value);
+                }
+            }
+            if (ok) {
+                *phys = cand[k];
+                return true;
+            }
+        }
+    }
+    (void)listed;
+    return false;
+}
+
+static uint32_t raw_from_physical(const vehicle_cl250_did_t* e, float phys)
+{
+    float raw = ((phys - (float)e->offset) * (float)e->factor_den) / (float)e->factor_num;
+    return (raw <= 0.0f) ? 0u : (uint32_t)(raw + 0.5f);
+}
+
 static uint16_t read_answer(const sim_ecu_t* ecu, const vehicle_cl250_did_t* e,
                             const uint8_t* req, uint32_t now_ms, uint8_t* out)
 {
     uint32_t raw = (ecu->fixed_enabled && (e->did == ecu->fixed_did)) ? ecu->fixed_raw
                                                                        : synthetic_raw(e, now_ms);
+    float idle_phys = 0.0f;
+    if (ecu->warm_idle && warm_idle_value((uint32_t)(e - vehicle_cl250_dids), &idle_phys)) {
+        raw = raw_from_physical(e, idle_phys);
+    }
     out[0] = (uint8_t)(UDS_SID_READ_DATA_BY_IDENTIFIER + UDS_POSITIVE_RESPONSE_OFFSET);
     out[1] = req[1];
     out[2] = req[2];
@@ -119,6 +179,73 @@ static uint16_t answer_read(sim_ecu_t* ecu, const uint8_t* req, uint16_t len, ui
     return read_answer(ecu, e, req, now_ms, out);
 }
 
+static bool dtc_known(const sim_ecu_t* ecu, const uint8_t* dtc, uint8_t* index)
+{
+    for (uint8_t i = 0u; i < ecu->dtc_count; i++) {
+        uint8_t n[3];
+        sim_ecu_dtc_number(i, n);
+        if ((n[0] == dtc[0]) && (n[1] == dtc[1]) && (n[2] == dtc[2])) {
+            *index = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* 0x19 sub-functions 0x01, 0x02, 0x04, 0x06 (ISO 14229-1 clause 12.3). */
+static uint16_t answer_dtc(sim_ecu_t* ecu, const uint8_t* req, uint16_t len, uint8_t* out)
+{
+    const uint8_t sid = req[0];
+    if (ecu->dtc_nrc_enabled) {
+        return negative(out, sid, ecu->dtc_nrc);
+    }
+    if (len < 2u) {
+        return negative(out, sid, UDS_NRC_INCORRECT_MESSAGE_LENGTH_OR_INVALID_FORMAT);
+    }
+    if (ecu->require_session && !ecu->extended) {
+        return negative(out, sid, UDS_NRC_SERVICE_NOT_SUPPORTED_IN_ACTIVE_SESSION);
+    }
+    const uint8_t sub = req[1];
+    uint16_t n = 0u;
+    out[n++] = (uint8_t)(sid + UDS_POSITIVE_RESPONSE_OFFSET);
+    out[n++] = sub;
+    if (sub == UDS_READ_DTC_REPORT_NUMBER_OF_DTC_BY_STATUS_MASK) {
+        out[n++] = SIM_DTC_AVAILABILITY;
+        out[n++] = SIM_DTC_FORMAT_ISO14229;
+        out[n++] = 0u;
+        out[n++] = ecu->dtc_count;
+    } else if (sub == UDS_READ_DTC_REPORT_DTC_BY_STATUS_MASK) {
+        out[n++] = SIM_DTC_AVAILABILITY;
+        for (uint8_t i = 0u; i < ecu->dtc_count; i++) {
+            sim_ecu_dtc_number(i, &out[n]);
+            n = (uint16_t)(n + 3u);
+            out[n++] = ecu->dtc_status;
+        }
+    } else if ((sub == UDS_READ_DTC_REPORT_DTC_SNAPSHOT_RECORD_BY_DTC_NUMBER) ||
+               (sub == UDS_READ_DTC_REPORT_DTC_EXT_DATA_RECORD_BY_DTC_NUMBER)) {
+        uint8_t index = 0u;
+        if (len != 6u) {
+            return negative(out, sid, UDS_NRC_INCORRECT_MESSAGE_LENGTH_OR_INVALID_FORMAT);
+        }
+        if (!dtc_known(ecu, &req[2], &index)) {
+            return negative(out, sid, UDS_NRC_REQUEST_OUT_OF_RANGE);
+        }
+        out[n++] = ecu->dtc_bad_echo ? (uint8_t)(req[2] ^ 0xFFu) : req[2];
+        out[n++] = req[3];
+        out[n++] = req[4];
+        out[n++] = ecu->dtc_status;
+        const uint16_t total = (sub == UDS_READ_DTC_REPORT_DTC_SNAPSHOT_RECORD_BY_DTC_NUMBER)
+                                   ? ecu->dtc_record_len
+                                   : ecu->dtc_ext_len;
+        for (; (n < total) && (n < SIM_ECU_BUF); n++) {
+            out[n] = (uint8_t)(index + n); /* synthetic record bytes */
+        }
+    } else {
+        return negative(out, sid, UDS_NRC_SUBFUNCTION_NOT_SUPPORTED);
+    }
+    return n;
+}
+
 /* Returns the answer length; 0 = no answer (suppressed). */
 static uint16_t answer(sim_ecu_t* ecu, const uint8_t* req, uint16_t len, uint32_t now_ms,
                        uint8_t* out)
@@ -163,6 +290,17 @@ static uint16_t answer(sim_ecu_t* ecu, const uint8_t* req, uint16_t len, uint32_
         out[0] = (uint8_t)(sid + UDS_POSITIVE_RESPONSE_OFFSET);
         out[1] = sub;
         return 2u;
+    }
+    if (sid == UDS_SID_READ_DTC_INFORMATION) {
+        ecu->dtc_requests++;
+        if (ecu->dtc_silent) {
+            return 0u;
+        }
+        if (ecu->dtc_pending_once) {
+            ecu->dtc_pending_once = false;
+            return negative(out, sid, UDS_NRC_RESPONSE_PENDING);
+        }
+        return answer_dtc(ecu, req, len, out);
     }
     return negative(out, sid, UDS_NRC_SERVICE_NOT_SUPPORTED);
 }

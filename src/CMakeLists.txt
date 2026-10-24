@@ -2,6 +2,7 @@
 # and cross-compiled for the Cortex-M7. Nothing here may include HAL/RTOS headers.
 add_library(moto_rtcore_logic STATIC
     features/uds/isotp_core.c
+    features/uds/dtc_snapshot_core.c
     features/uds/uds_client_core.c
     features/uds/uds_server_core.c
     features/vehicle_republish/vehicle_republish_core.c

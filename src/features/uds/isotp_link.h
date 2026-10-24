@@ -54,6 +54,9 @@ extern "C" {
  * has 3 TX mailboxes, the host bus has no limit of its own). */
 #define ISOTP_LINK_MAX_TX_PER_STEP 16u
 
+/* Longest response prefix the FC check compares: the data bytes of a First Frame. */
+#define ISOTP_LINK_PREFIX_MAX 6u
+
 typedef struct {
     can_port_id_t port;
     uint32_t tx_id;   /* ID of the frames we send (request ID for a client) */
@@ -73,7 +76,9 @@ typedef struct {
     uint32_t fc_withheld_count; /* Flow Controls the vehicle link did not send */
     bool fc_withheld; /* one was withheld since isotp_link_take_fc_withheld() */
     bool response_open; /* vehicle link: one FC.CTS may answer the next First Frame */
-    uint8_t response_sid; /* ... whose first data byte is this positive response SID */
+    uint8_t response_prefix[ISOTP_LINK_PREFIX_MAX]; /* ... whose first data bytes are these */
+    uint8_t response_prefix_len;
+    uint16_t response_max_ff_dl; /* ... and whose FF_DL is at most this */
     bool vehicle;     /* CL250 tester link: D-020 checks apply */
     bool open;
 } isotp_can_link_t;
@@ -128,9 +133,19 @@ uint32_t isotp_link_tx_refused_count(const isotp_can_link_t* link);
 
 /* Vehicle link (D-059): the client's allowed request went out and it waits for the
  * answer, whose first byte is positive_sid; the next First Frame starting with it may
- * get the one FC.CTS. Fail-closed: only this call arms it, never isotp_link_send().
- * Ignored on other links. */
+ * get the one FC.CTS (FF_DL up to the link's receive capacity). Fail-closed: only the
+ * expect calls arm it, never isotp_link_send(). Ignored on other links. */
 void isotp_link_expect_response(isotp_can_link_t* link, uint8_t positive_sid);
+
+/*
+ * Same, with a longer match (D-080): the next First Frame gets the one FC.CTS only if its
+ * first prefix_len data bytes (1..ISOTP_LINK_PREFIX_MAX, already in the receive buffer at
+ * that time) equal prefix and its FF_DL is at most max_ff_dl (<= the link's receive
+ * capacity). Arguments outside that range leave nothing armed. The FC sent is still only the one
+ * generated vehicle_cl250_fc_cts[], through the frame gate.
+ */
+void isotp_link_expect_response_prefix(isotp_can_link_t* link, const uint8_t* prefix,
+                                       uint8_t prefix_len, uint16_t max_ff_dl);
 
 /* Vehicle link: no answer is expected any more (answered, timed out, latched); no FC
  * goes out until the next isotp_link_expect_response(). */

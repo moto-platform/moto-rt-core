@@ -19,6 +19,9 @@
  *     OBD functional request IDs (gen/ functional watch, Q-021/D-040): our own frames
  *     are never received back, so it is a second tester (D-021)
  *                                                             -> UDS_CLIENT_FAULT_FOREIGN_TESTER
+ * D-080: after the DID reads, a 0x19 ReadDTCInformation run (count, list, 0x04/0x06 per
+ * DTC) when a DTC is present, at key-on and at warm idle; the warm-idle condition is
+ * evaluated here from services/vehicle_signals every step.
  * Not a fault: a request the link cannot take because it is busy (dropped, retried on
  * schedule; the client waits for isotp_link_tx_ready() anyway), and a Flow Control the
  * link withholds (a First Frame it may not answer, D-059).
@@ -43,9 +46,13 @@ extern "C" {
 #endif
 
 /* Link buffers. Requests are at most UDS_CLIENT_REQ_MAX bytes. The receive buffer takes
- * a segmented answer of up to 64 bytes (D-059; <= VEHICLE_CL250_MAX_FF_DL, at most 9
- * CFs); a longer First Frame gets no Flow Control (withheld). */
-#define UDS_CLIENT_RX_BUF 64u
+ * the longest answer the tester ever asks for: a 0x19 answer of up to
+ * VEHICLE_CL250_MAX_FF_DL bytes (D-080; at most 36 CFs). A First Frame above what the
+ * pending request allows gets no Flow Control (withheld). */
+#define UDS_CLIENT_RX_BUF VEHICLE_CL250_MAX_FF_DL
+/* A session or DID read gets the Flow Control only for FF_DL up to this many bytes (the
+ * D-059 buffer size, unchanged for table DIDs; then "service unavailable"). */
+#define UDS_CLIENT_READ_MAX_FF_DL 64u
 #define UDS_CLIENT_TX_BUF 8u
 
 typedef enum {
@@ -54,6 +61,18 @@ typedef enum {
     UDS_CLIENT_FAULT_GUARD,          /* the can_if vehicle guard refused a frame */
     UDS_CLIENT_FAULT_FOREIGN_TESTER  /* a frame on the ECU request IDs: second tester */
 } uds_client_fault_t;
+
+/*
+ * D-080 item 5 / D-069 item 6: every positive 0x19 answer goes to the sink raw, with what
+ * it answers, before the link's receive buffer is released. Contract: called from the
+ * comms task inside uds_client_step(); it must not block, must not call back into the
+ * client, and must copy the bytes (data is valid only during the call); len <=
+ * VEHICLE_CL250_MAX_FF_DL. The record layouts are never decoded here.
+ * TODO: replaced by the services/ logging manager when it exists. Without a sink the
+ * answers are not logged.
+ */
+typedef void (*uds_client_dtc_sink_t)(void* ctx, const uds_client_dtc_answer_t* info,
+                                      const uint8_t* data, uint16_t len);
 
 /* Treat as opaque. Must have static storage duration (the link is a can_if receiver). */
 typedef struct {
@@ -64,6 +83,8 @@ typedef struct {
     uint32_t guard_refused_seen;
     uint32_t foreign_seen;
     uds_client_fault_t fault;
+    uds_client_dtc_sink_t dtc_sink;
+    void* dtc_sink_ctx;
     uint32_t open_ms;
     bool absence_armed; /* ECU_ABSENT_TIMEOUT_MS since open: absence is a DTC */
     bool open;
@@ -74,6 +95,9 @@ typedef struct {
  * Returns the link's status, or ISOTP_ERR_ARG if the watch cannot be registered (the
  * client then stays closed: it never polls without the watch). */
 isotp_status_t uds_client_open(uds_client_t* client);
+
+/* Sets (or, with NULL, removes) the D-080 sink; see uds_client_dtc_sink_t. */
+void uds_client_set_dtc_sink(uds_client_t* client, uds_client_dtc_sink_t sink, void* ctx);
 
 void uds_client_step(uds_client_t* client);
 

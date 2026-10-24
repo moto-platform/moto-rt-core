@@ -34,6 +34,7 @@ void uds_client_core_init(uds_client_core_t* c, uint32_t abort_hold_ms)
         return;
     }
     *c = zero_core;
+    dtc_snapshot_core_init(&c->dtc);
     c->abort_hold_ms = abort_hold_ms;
 }
 
@@ -136,6 +137,12 @@ static bool in_quiet_window(const uds_client_core_t* c, uint32_t now_ms)
 static void end_with_timeout(uds_client_core_t* c, uint32_t now_ms)
 {
     count(&c->stats.timeouts);
+    if (c->pending == UDS_CLIENT_REQ_DTC) {
+        /* D-080 item 3: a late answer may still come as a First Frame, so 0x19 is off for
+         * the epoch. No DID rule applies: no timeout count, no quiet window. */
+        dtc_snapshot_core_on_timeout(&c->dtc);
+        c->dtc_timed_out = true;
+    }
     if (c->pending == UDS_CLIENT_REQ_READ) {
         uds_client_did_state_t* d = &c->did[c->pending_idx];
         /* The period restarts now: a silent DID whose period is not longer than the
@@ -319,6 +326,16 @@ static void read_answered(uds_client_core_t* c, uint32_t now_ms)
     }
 }
 
+/* D-080 item 3: a transaction longer than one unverified-read slot turns 0x19 off, after
+ * its answer was handed out. */
+static void apply_dtc_slow(uds_client_core_t* c)
+{
+    if (c->dtc_slow) {
+        c->dtc_slow = false;
+        dtc_snapshot_core_halt_after_answer(&c->dtc, DTC_SNAPSHOT_HALT_SLOW);
+    }
+}
+
 static uint8_t poll_priority(const uds_client_core_t* c, uint32_t idx)
 {
     const uint8_t prio = vehicle_cl250_dids[idx].priority;
@@ -381,6 +398,7 @@ bool uds_client_core_poll(uds_client_core_t* c, uint32_t now_ms, bool rx_busy, b
     if (c->failed) {
         return false; /* presence still ages out above, also while latched */
     }
+    apply_dtc_slow(c); /* the glue took the answer before this poll; if not, it is halted anyway */
 
     if (c->pending != UDS_CLIENT_REQ_NONE) {
         const bool cap = expired(now_ms, c->sent_ms, VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS);
@@ -431,6 +449,13 @@ bool uds_client_core_poll(uds_client_core_t* c, uint32_t now_ms, bool rx_busy, b
 
     uint32_t idx = 0u;
     if (!next_read(c, now_ms, &idx)) {
+        /* D-080 item 4 (decided, as conn): the only slot of a 0x19 is a step in which no
+         * DID at all is due. */
+        if (dtc_snapshot_core_build_request(&c->dtc, out, len)) {
+            c->last = UDS_CLIENT_LAST_DTC;
+            start_request(c, UDS_CLIENT_REQ_DTC, out[0], 0u, now_ms);
+            return true;
+        }
         return false;
     }
     const uint16_t did = vehicle_cl250_dids[idx].did;
@@ -458,6 +483,8 @@ void uds_client_core_not_sent(uds_client_core_t* c)
         } else if (c->last == UDS_CLIENT_LAST_TESTER_PRESENT) {
             c->tp_sent_ms = c->prev_request_ms;
             c->tp_sent = c->prev_requested;
+        } else if (c->last == UDS_CLIENT_LAST_DTC) {
+            dtc_snapshot_core_unsend(&c->dtc); /* due again at once, budgets restored */
         } else {
             c->did[c->pending_idx].last_request_ms = c->prev_request_ms;
             c->did[c->pending_idx].requested = c->prev_requested;
@@ -480,6 +507,23 @@ void uds_client_core_latch(uds_client_core_t* c)
     }
 }
 
+/* D-080: an NRC for the pending 0x19. 0x78 is no extension (item 4): the base timeout
+ * runs on from the request. */
+static void on_negative_dtc(uds_client_core_t* c, uint8_t nrc)
+{
+    if (nrc == UDS_NRC_RESPONSE_PENDING) {
+        count(&c->stats.response_pending);
+        return;
+    }
+    if (dtc_snapshot_core_on_nrc(&c->dtc, nrc) == DTC_SNAPSHOT_NRC_SESSION_LOST) {
+        /* on_negative() dropped the session. Ask for it again at the next step, as for
+         * a counted D-075 refusal. Bounded: the second NRC 0x7E/0x7F in the epoch halts
+         * 0x19 (SESSION_REFUSED), so at most 2 such requests per epoch. */
+        c->session_tried = false;
+    }
+    c->pending = UDS_CLIENT_REQ_NONE;
+}
+
 static void on_negative(uds_client_core_t* c, uint32_t now_ms, uint8_t sid, uint8_t nrc)
 {
     count(&c->stats.nrc);
@@ -489,6 +533,10 @@ static void on_negative(uds_client_core_t* c, uint32_t now_ms, uint8_t sid, uint
     }
     if ((c->pending == UDS_CLIENT_REQ_NONE) || (sid != c->pending_sid)) {
         return; /* e.g. an NRC for tester present: never ends another request */
+    }
+    if (c->pending == UDS_CLIENT_REQ_DTC) {
+        on_negative_dtc(c, nrc);
+        return;
     }
     if (nrc == UDS_NRC_RESPONSE_PENDING) {
         /* D-050: a faulty DID's read still ends at the base timeout from its request.
@@ -598,10 +646,49 @@ void uds_client_core_on_fc_withheld(uds_client_core_t* c, uint32_t now_ms)
         if (c->pending == UDS_CLIENT_REQ_READ) {
             break_rpm_run(c, c->pending_idx);
             stop_or_skip(c, c->pending_idx, now_ms, UDS_CLIENT_STOP_FIRST_FRAME); /* D-068 item 2 */
+        } else if (c->pending == UDS_CLIENT_REQ_DTC) {
+            dtc_snapshot_core_on_segmented_failure(&c->dtc); /* D-080 item 3 */
+        } else {
+            /* a session request: nothing more to record */
         }
         c->pending = UDS_CLIENT_REQ_NONE;
+    } else if (c->dtc_timed_out) {
+        /* Nothing is pending: this First Frame may be the late answer of the 0x19 that
+         * timed out. A DID's First Frame is never attributed to 0x19. */
+        dtc_snapshot_core_halt_after_answer(&c->dtc, DTC_SNAPSHOT_HALT_LATE_FF);
+    } else {
+        /* a late answer to something else: no 0x19 consequence */
     }
     hold_for(c, now_ms, VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS); /* the ECU waits its N_Bs */
+}
+
+/* D-080: the message while a 0x19 is pending (not an NRC). Only the positive answer of the
+ * request in flight counts; anything else leaves it to time out. */
+static void on_indication_dtc(uds_client_core_t* c, uint32_t now_ms, const uint8_t* data,
+                              uint16_t len)
+{
+    if (!dtc_snapshot_core_match_positive(&c->dtc, data, len)) {
+        count(&c->stats.unexpected);
+        return;
+    }
+    uds_client_dtc_answer_t* a = &c->dtc_answer;
+    const dtc_snapshot_step_t step = dtc_snapshot_core_step(&c->dtc);
+    a->step = step;
+    a->sub_function = dtc_snapshot_core_sub_function(step);
+    for (uint8_t k = 0u; k < DTC_SNAPSHOT_DTC_BYTES; k++) {
+        a->dtc[k] = ((step == DTC_SNAPSHOT_STEP_SNAPSHOT) || (step == DTC_SNAPSHOT_STEP_EXT_DATA))
+                        ? data[2u + k]
+                        : 0u;
+    }
+    a->trigger = dtc_snapshot_core_trigger(&c->dtc);
+    a->run = dtc_snapshot_core_runs_started(&c->dtc);
+    c->dtc_answer_ready = true;
+    /* D-080 item 3: longer than one unverified-read slot; halted once the answer is out. */
+    c->dtc_slow = expired(now_ms, c->sent_ms,
+                          VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS +
+                              VEHICLE_CL250_CLIENT_STEP_MAX_MS + 1u);
+    (void)dtc_snapshot_core_on_positive(&c->dtc, data, len);
+    c->pending = UDS_CLIENT_REQ_NONE;
 }
 
 bool uds_client_core_on_indication(uds_client_core_t* c, uint32_t now_ms,
@@ -619,6 +706,10 @@ bool uds_client_core_on_indication(uds_client_core_t* c, uint32_t now_ms,
             /* D-068 item 2: a First Frame whose reception then failed is a First Frame
              * answer too: stop a never-answered unverified DID, skip any other. */
             stop_or_skip(c, c->pending_idx, now_ms, UDS_CLIENT_STOP_FIRST_FRAME);
+        } else if (c->pending == UDS_CLIENT_REQ_DTC) {
+            dtc_snapshot_core_on_segmented_failure(&c->dtc); /* D-080 item 3: N_Bs hold below */
+        } else {
+            /* a session request or nothing pending */
         }
         c->pending = UDS_CLIENT_REQ_NONE;
         hold_for(c, now_ms, c->abort_hold_ms);
@@ -633,6 +724,10 @@ bool uds_client_core_on_indication(uds_client_core_t* c, uint32_t now_ms,
 
     if ((len >= UDS_NEGATIVE_RESPONSE_LEN) && (data[0] == UDS_SID_NEGATIVE_RESPONSE)) {
         on_negative(c, now_ms, data[1], data[2]);
+        return false;
+    }
+    if (c->pending == UDS_CLIENT_REQ_DTC) {
+        on_indication_dtc(c, now_ms, data, len);
         return false;
     }
     if ((c->pending == UDS_CLIENT_REQ_READ) && (len > ISOTP_SF_MAX_LEN)) {
@@ -653,6 +748,10 @@ bool uds_client_core_on_indication(uds_client_core_t* c, uint32_t now_ms,
         if (!c->epoch_open) {
             c->epoch_open = true;
             arm_unverified_reads(c);
+            dtc_snapshot_core_start_epoch(&c->dtc); /* D-080: the key-on run */
+            c->dtc_answer_ready = false;
+            c->dtc_slow = false;
+            c->dtc_timed_out = false;
         }
         return false;
     }
@@ -676,6 +775,27 @@ bool uds_client_core_on_indication(uds_client_core_t* c, uint32_t now_ms,
     }
     count(&c->stats.unexpected); /* late, other DID, out of range: the request times out */
     return false;
+}
+
+bool uds_client_core_take_dtc_answer(uds_client_core_t* c, uds_client_dtc_answer_t* info)
+{
+    if ((c == NULL) || (info == NULL) || !c->dtc_answer_ready) {
+        return false;
+    }
+    *info = c->dtc_answer;
+    c->dtc_answer_ready = false;
+    apply_dtc_slow(c);
+    return true;
+}
+
+bool uds_client_core_dtc_warm_idle(uds_client_core_t* c, uint32_t now_ms, bool holds)
+{
+    return (c != NULL) && dtc_snapshot_core_warm_idle_step(&c->dtc, now_ms, holds);
+}
+
+const dtc_snapshot_core_t* uds_client_core_dtc(const uds_client_core_t* c)
+{
+    return (c == NULL) ? NULL : &c->dtc;
 }
 
 bool uds_client_core_session_up(const uds_client_core_t* c)

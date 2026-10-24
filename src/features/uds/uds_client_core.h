@@ -5,10 +5,12 @@
  * UDS client core (thesis deliverable Ç3): the CL250 vehicle poller as a pure state
  * machine. rt-core is the single vehicle-bus tester and only reads (D-021, D-037).
  *
- * It only ever produces three requests, all built from gen/vehicle_cl250.h:
+ * It only ever produces four requests, all built from gen/vehicle_cl250.h or gen/
+ * uds_iso14229.h:
  *   - DiagnosticSessionControl, extended session (VEHICLE_CL250_SESSION_SID/_SUBFUNCTION)
  *   - TesterPresent, response suppressed (VEHICLE_CL250_TESTER_PRESENT_SID/_SUBFUNCTION)
  *   - ReadDataByIdentifier for a DID of vehicle_cl250_dids[]
+ *   - ReadDTCInformation 0x19, only the four gen/ sub-functions (D-080, dtc_snapshot_core)
  * Every one must still pass vehicle_cl250_request_allowed() (D-020) in the link and the
  * can_if guard; this module adds no path around them.
  *
@@ -57,6 +59,16 @@
  *     without a timeout (a read is "service unavailable" as above), and nothing is sent
  *     for RESPONSE_TIMEOUT_MAX_MS, while the ECU waits for the Flow Control. A running
  *     hold is never shortened.
+ *   - DTC freeze frames (D-080, features/uds/dtc_snapshot_core): a 0x19 request goes out
+ *     only when the session is up, nothing is pending or held, the link is free and no
+ *     DID at all is due (verified or not), so a DID is never delayed by more than one 0x19
+ *     slot. The wait is RESPONSE_TIMEOUT_BASE_MS, never extended by NRC 0x78. The run
+ *     starts with the stop epoch (the confirmation that arms the unverified DIDs); a
+ *     confirmation after NRC 0x7E/0x7F stays in the epoch. Its raw positive answers are
+ *     handed out once by uds_client_core_take_dtc_answer() (D-069 item 6). A timeout, a
+ *     failed, refused or withheld segmented reception and a transaction longer than
+ *     RESPONSE_TIMEOUT_BASE_MS + CLIENT_STEP_MAX_MS turn 0x19 off for the epoch; no DID
+ *     rule (timeout count, skip, quiet window) applies to it.
  *   - Unverified DIDs (D-068 item 2; vehicle_cl250_dids[idx].verified == false): each
  *     stop epoch arms them all (due at once). Until the epoch ends, one
  *     without a positive answer in this epoch is stopped (never due, no skip) after NRC
@@ -102,6 +114,7 @@
  * storage, no heap, bounded loops.
  */
 
+#include "features/uds/dtc_snapshot_core.h"
 #include "features/uds/isotp_core.h"
 #include "vehicle_cl250.h"
 
@@ -112,13 +125,15 @@
 extern "C" {
 #endif
 
-/* Longest request the core produces: ReadDataByIdentifier, SID + 16-bit DID. */
-#define UDS_CLIENT_REQ_MAX 3u
+/* Longest request the core produces: ReadDTCInformation 0x04/0x06, SID + sub-function +
+ * 3 DTC bytes + record (D-080). A ReadDataByIdentifier is SID + 16-bit DID. */
+#define UDS_CLIENT_REQ_MAX DTC_SNAPSHOT_REQ_MAX
 
 typedef enum {
     UDS_CLIENT_REQ_NONE = 0,
     UDS_CLIENT_REQ_SESSION,
-    UDS_CLIENT_REQ_READ
+    UDS_CLIENT_REQ_READ,
+    UDS_CLIENT_REQ_DTC
 } uds_client_req_kind_t;
 
 /* The request the last poll produced, for uds_client_core_not_sent() (internal). */
@@ -126,7 +141,8 @@ typedef enum {
     UDS_CLIENT_LAST_NONE = 0,
     UDS_CLIENT_LAST_SESSION,
     UDS_CLIENT_LAST_TESTER_PRESENT,
-    UDS_CLIENT_LAST_READ
+    UDS_CLIENT_LAST_READ,
+    UDS_CLIENT_LAST_DTC
 } uds_client_last_t;
 
 /* Why an unverified DID is stopped (D-068 item 2, D-075), for the field and the bench. */
@@ -190,6 +206,15 @@ typedef struct {
     uint32_t stamp_ms;  /* the ECU took the sample no earlier than this ("Sample stamp") */
 } uds_client_sample_t;
 
+/* What a positive 0x19 answer was an answer to (D-080 item 5), for the log header. */
+typedef struct {
+    dtc_snapshot_step_t step;
+    uint8_t sub_function;  /* gen/ UDS_READ_DTC_REPORT_* */
+    uint8_t dtc[DTC_SNAPSHOT_DTC_BYTES]; /* 0x04/0x06: the DTC of the request, else zeros */
+    dtc_snapshot_trigger_t trigger;
+    uint8_t run;           /* run number in the epoch, from 1 */
+} uds_client_dtc_answer_t;
+
 /* State. Treat as opaque: use the functions below. */
 typedef struct {
     uds_client_did_state_t did[VEHICLE_CL250_DID_COUNT];
@@ -229,6 +254,12 @@ typedef struct {
 
     uint32_t last_poll_ms;    /* the step gap check (D-053) */
     bool polled;              /* last_poll_ms is set */
+
+    dtc_snapshot_core_t dtc;  /* D-080 */
+    uds_client_dtc_answer_t dtc_answer;
+    bool dtc_answer_ready;    /* a positive 0x19 answer waits for take_dtc_answer() */
+    bool dtc_slow;            /* ... and it came later than one slot: halt SLOW after it */
+    bool dtc_timed_out;       /* the last 0x19 of this epoch timed out (LATE_FF) */
 
     bool failed;
 } uds_client_core_t;
@@ -272,6 +303,25 @@ void uds_client_core_on_fc_withheld(uds_client_core_t* c, uint32_t now_ms);
 bool uds_client_core_on_indication(uds_client_core_t* c, uint32_t now_ms,
                                    isotp_n_result_t result, const uint8_t* data, uint16_t len,
                                    uds_client_sample_t* sample);
+
+/*
+ * D-080: the positive 0x19 answer the last indication completed, once (false when none).
+ * Call it right after uds_client_core_on_indication(), before the link's buffer is
+ * released: the caller logs the raw bytes. A slow answer (longer than RESPONSE_TIMEOUT_BASE_MS
+ * + CLIENT_STEP_MAX_MS) turns 0x19 off for the epoch when it is taken (or at the next
+ * poll), so the answer is always handed out first.
+ */
+bool uds_client_core_take_dtc_answer(uds_client_core_t* c, uds_client_dtc_answer_t* info);
+
+/*
+ * D-080 item 1, once per step: holds = every warm-idle condition is met by a valid
+ * sample (the caller evaluates vehicle_cl250_dtc_warm_idle[]). See
+ * dtc_snapshot_core_warm_idle_step().
+ */
+bool uds_client_core_dtc_warm_idle(uds_client_core_t* c, uint32_t now_ms, bool holds);
+
+/* The DTC run state, for the glue's Flow Control check and for diagnostics. */
+const dtc_snapshot_core_t* uds_client_core_dtc(const uds_client_core_t* c);
 
 bool uds_client_core_session_up(const uds_client_core_t* c);
 bool uds_client_core_ecu_present(const uds_client_core_t* c, uint32_t now_ms);

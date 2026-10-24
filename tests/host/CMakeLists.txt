@@ -23,6 +23,7 @@ moto_host_test(test_can_if moto_rtcore_fw moto_rtcore_hal_host)
 moto_host_test(test_can_sm moto_rtcore_fw moto_rtcore_sim moto_rtcore_hal_host)
 moto_host_test(test_isotp_link moto_rtcore_fw moto_rtcore_sim moto_rtcore_hal_host)
 moto_host_test(test_uds_client_core)
+moto_host_test(test_dtc_snapshot_core)
 moto_host_test(test_vehicle_signals moto_rtcore_fw)
 moto_host_test(test_uds_client moto_rtcore_fw moto_rtcore_sim moto_rtcore_hal_host)
 moto_host_test(test_uds_server_core)
@@ -77,6 +78,11 @@ endif()
 # SIL smoke: the host program against the simulated ECU, real time, 2 s.
 add_test(NAME sil_moto_rtcore_host_demo
          COMMAND moto_rtcore_host --duration-ms 2000 --min-responses 20 --quiet)
+
+# SIL (D-080): two synthetic stored DTCs: the key-on run completes (count, list, 0x04 and
+# 0x06 per DTC) and every raw answer is printed by the sink.
+add_test(NAME sil_moto_rtcore_host_dtc_run
+         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/sil_dtc_check.sh $<TARGET_FILE:moto_rtcore_host> 2)
 
 # SIL: the UDS server on the platform bus, driven end to end by the scripted tester
 # (session, multi-frame reads, DTCs, functional requests, P2 check, S3 expiry; ~6 s).
