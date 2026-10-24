@@ -155,6 +155,9 @@ void isotp_link_close_response(isotp_can_link_t* link);
  * DID's. */
 uint8_t isotp_link_fc_withheld_first_byte(const isotp_can_link_t* link);
 
+/* Bytes of the running segmented reception still to come (0 if none). */
+uint16_t isotp_link_rx_remaining(const isotp_can_link_t* link);
+
 /* Vehicle link: ends a running reception at once, without an indication and without
  * counting a withheld FC (the client's total cap fired during a segmented 0x19 answer,
  * D-080). No-op when none runs. */

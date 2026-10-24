@@ -151,7 +151,11 @@ static bool prefix_matches(const isotp_can_link_t* link)
  * ends now, without an indication; the ECU gives up after its N_Bs. */
 static void withhold_fc(isotp_can_link_t* link)
 {
-    link->fc_withheld_first = (isotp_rx_pending_len(&link->iso) > 0u) ? link->rx_buf[0] : 0u;
+    /* a running reception: the First Frame is in rx_buf; a refused one (FF_DL above the
+     * buffer, FC.OVFLW): the core kept its first byte */
+    link->fc_withheld_first = (isotp_rx_pending_len(&link->iso) > 0u)
+                                  ? link->rx_buf[0]
+                                  : isotp_rx_refused_first_byte(&link->iso);
     isotp_rx_cancel(&link->iso);
     link->fc_withheld = true;
     link_count(&link->fc_withheld_count);
@@ -273,6 +277,11 @@ void isotp_link_expect_response_prefix(isotp_can_link_t* link, const uint8_t* pr
 uint8_t isotp_link_fc_withheld_first_byte(const isotp_can_link_t* link)
 {
     return (link != NULL) ? link->fc_withheld_first : 0u;
+}
+
+uint16_t isotp_link_rx_remaining(const isotp_can_link_t* link)
+{
+    return ((link != NULL) && link->open) ? isotp_rx_remaining_len(&link->iso) : 0u;
 }
 
 void isotp_link_rx_cancel(isotp_can_link_t* link)

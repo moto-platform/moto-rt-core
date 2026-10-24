@@ -1665,26 +1665,32 @@ static void test_D080_minor1_a_slow_0x19_reception_is_cancelled_at_the_total_cap
     const uint8_t ff[8] = {0x10u, 0xFFu, 0x59u, 0x01u, 0xFFu, 0x01u, 0x00u, 0x02u};
     run_to(t_req + 50u);
     ecu_frame(ff);
-    uint32_t k = 1u;
-    while (isotp_link_rx_busy(&client.link) || (k == 1u)) {
+    /* The ECU (BS 0) sends all 36 CFs, 99 ms apart, whatever the tester does. */
+    uint32_t cancelled_at = 0u;
+    uint32_t mark = 0u;
+    for (uint32_t k = 1u; k <= 36u; k++) {
         run_to(t_req + 50u + (99u * k));
-        if (!isotp_link_rx_busy(&client.link)) {
-            break;
+        if ((cancelled_at == 0u) && !isotp_link_rx_busy(&client.link)) {
+            cancelled_at = timebase_now_ms();
+            mark = sniff_count;
+        }
+        if (cancelled_at != 0u) {
+            /* CFs of the cancelled answer neither start a reception nor refresh presence */
+            TEST_ASSERT_FALSE(isotp_link_rx_busy(&client.link));
         }
         const uint8_t cf[8] = {(uint8_t)(0x20u | (k & 0x0Fu)), 1u, 2u, 3u, 4u, 5u, 6u, 7u};
         ecu_frame(cf);
         run_measuring_ages(1u, false);
-        k++;
-        TEST_ASSERT_LESS_THAN_UINT32(40u, k);
     }
-    const uint32_t cancelled_at = timebase_now_ms();
+    TEST_ASSERT_NOT_EQUAL_UINT32(0u, cancelled_at);
     TEST_ASSERT_GREATER_OR_EQUAL_UINT32(t_req + VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS, cancelled_at);
     TEST_ASSERT_LESS_THAN_UINT32(t_req + VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS + 150u, cancelled_at);
     TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_SEGMENTED, dtc_snapshot_core_halt(dtc_core()));
     TEST_ASSERT_EQUAL_UINT32(0u, isotp_link_fc_withheld_count(&client.link)); /* a cancel, not a withheld FC */
-    const uint32_t mark = sniff_count;
-    run_measuring_ages(isotp_link_n_bs_ms(&client.link) - 150u, false);
-    TEST_ASSERT_EQUAL_UINT32(0u, tester_frames_since(mark)); /* silent for the N_Bs */
+    /* the tester stayed silent until the ECU's last CF (the hold is longer than the N_Bs) */
+    TEST_ASSERT_EQUAL_UINT32(0u, tester_frames_since(mark));
+    TEST_ASSERT_GREATER_THAN_UINT32(isotp_link_n_bs_ms(&client.link),
+                                    timebase_now_ms() - cancelled_at);
     run_measuring_ages(30000u, false);
     /* the reception proved the ECU alive: no new epoch, no second key-on run */
     TEST_ASSERT_EQUAL_UINT32(1u, uds_client_stats(&client)->session_starts);
@@ -1693,9 +1699,35 @@ static void test_D080_minor1_a_slow_0x19_reception_is_cancelled_at_the_total_cap
     TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_SEGMENTED, dtc_snapshot_core_halt(dtc_core()));
     /* Nothing else was sent for the N_Bs, and 0x19 never came back in 30 s. */
     TEST_ASSERT_EQUAL_UINT32(1u, dtc_requests_after(0u));
-    assert_ages_within(VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS + isotp_link_n_bs_ms(&client.link) +
-                       VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS);
+    TEST_ASSERT_EQUAL_UINT32(0u, uds_client_stats(&client)->timeouts); /* no read ran into the CFs */
+    /* cap, then the remaining CFs (up to 36 x N_Cr from the FF) */
+    assert_ages_within((36u * VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS) + VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS);
     TEST_ASSERT_FALSE(uds_client_failed(&client));
+}
+
+/* safety-reviewer round 2 MINOR-B: an oversize (FF_DL > 255) late 0x19 First Frame during a
+ * read goes through the OVFLW path; the read still pays nothing and 0x19 halts. */
+static void test_D080_minorB_an_oversize_late_0x19_first_frame_costs_the_read_nothing(void)
+{
+    open_dtc(2u);
+    ecu.dtc_silent = true;
+    run_until_last_request(UDS_SID_READ_DTC_INFORMATION, UDS_CLIENT_REQ_DTC);
+    ecu_dtc_nrc(UDS_NRC_RESPONSE_PENDING);
+    run(1u, false);
+    run_until_last_request(UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_CLIENT_REQ_READ);
+    ecu.silent = true;
+    const uint32_t idx = client.core.pending_idx;
+    const uint8_t ff[8] = {0x11u, 0x00u, 0x59u, 0x04u, 0x12u, 0x34u, 0x56u, 0x2Fu}; /* FF_DL 256 */
+    ecu_frame(ff);
+    run(3u, false);
+    ecu.silent = false;
+    TEST_ASSERT_EQUAL_UINT32(1u, isotp_link_fc_withheld_count(&client.link));
+    run(6000u, false);
+    TEST_ASSERT_FALSE(uds_client_core_did_skipped(&client.core, idx, timebase_now_ms()));
+    TEST_ASSERT_FALSE(uds_client_core_did_stopped(&client.core, idx));
+    TEST_ASSERT_EQUAL_UINT32(0u, uds_client_stats(&client)->did_skips);
+    TEST_ASSERT_EQUAL_UINT32(0u, uds_client_stats(&client)->did_stops);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_NO_ANSWER, dtc_snapshot_core_halt(dtc_core())); /* the earlier reason stays */
 }
 
 static void test_D080_item1_the_warm_idle_run_starts_after_the_gen_hold_of_the_gen_conditions(void)
@@ -1778,6 +1810,7 @@ int main(void)
     RUN_TEST(test_D080_item4_a_refused_first_frame_costs_one_hold_and_no_more);
     RUN_TEST(test_D080_major1_a_late_0x19_first_frame_during_a_read_costs_that_did_nothing);
     RUN_TEST(test_D080_minor1_a_slow_0x19_reception_is_cancelled_at_the_total_cap);
+    RUN_TEST(test_D080_minorB_an_oversize_late_0x19_first_frame_costs_the_read_nothing);
     RUN_TEST(test_D080_item1_the_warm_idle_run_starts_after_the_gen_hold_of_the_gen_conditions);
     RUN_TEST(test_D080_item1_a_sweeping_ecu_never_holds_the_warm_idle_conditions);
     return UNITY_END();

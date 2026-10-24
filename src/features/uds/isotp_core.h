@@ -100,6 +100,7 @@ typedef struct {
     isotp_rx_state_t rx_state;
     uint16_t rx_len;        /* FF_DL / SF_DL of the message being received */
     uint16_t rx_pos;
+    uint8_t rx_refused_first; /* first data byte of the last First Frame refused with OVFLW */
     uint8_t rx_next_sn;
     uint8_t rx_block_left;  /* CFs until the next FC (0 = BS was 0: none) */
     uint32_t rx_timer_ms;   /* start of the running N_Cr period */
@@ -181,6 +182,14 @@ void isotp_rx_cancel(isotp_link_t* link);
 
 /* FF_DL of the segmented reception under way; 0 while none runs. */
 uint16_t isotp_rx_pending_len(const isotp_link_t* link);
+
+/* Bytes of the segmented reception under way that have not arrived yet (FF_DL minus the
+ * bytes received); 0 while none runs. */
+uint16_t isotp_rx_remaining_len(const isotp_link_t* link);
+
+/* The first data byte of the last First Frame refused with FC.OVFLW (FF_DL above the
+ * buffer; nothing was stored), 0 if none was. */
+uint8_t isotp_rx_refused_first_byte(const isotp_link_t* link);
 
 /* True when no message is being sent: isotp_send() would accept a new one. */
 bool isotp_tx_idle(const isotp_link_t* link);

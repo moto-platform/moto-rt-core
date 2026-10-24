@@ -476,12 +476,13 @@ static void test_D080_major1_a_withheld_first_frame_reports_its_first_data_byte(
     run_ms(2u);
     TEST_ASSERT_TRUE(isotp_link_take_fc_withheld(&dut));
     TEST_ASSERT_EQUAL_HEX8(0x59u, isotp_link_fc_withheld_first_byte(&dut));
-    /* a First Frame above the buffer starts no reception: no byte */
+    /* a First Frame above the buffer starts no reception, but its first byte is kept */
     inject_ff((uint16_t)(VEHICLE_CL250_MAX_FF_DL + 1u), dtc_ff_data);
     run_ms(2u);
     TEST_ASSERT_TRUE(isotp_link_take_fc_withheld(&dut));
-    TEST_ASSERT_EQUAL_HEX8(0u, isotp_link_fc_withheld_first_byte(&dut));
+    TEST_ASSERT_EQUAL_HEX8(0x59u, isotp_link_fc_withheld_first_byte(&dut)); /* kept from the refused FF */
     TEST_ASSERT_EQUAL_HEX8(0u, isotp_link_fc_withheld_first_byte(NULL));
+    TEST_ASSERT_EQUAL_UINT16(0u, isotp_link_rx_remaining(NULL));
 }
 
 static void test_D080_minor1_rx_cancel_ends_a_reception_without_an_indication_or_a_withheld_fc(void)
@@ -490,7 +491,9 @@ static void test_D080_minor1_rx_cancel_ends_a_reception_without_an_indication_or
     inject_ff(40u, dtc_ff_data);
     run_ms(2u);
     TEST_ASSERT_TRUE(isotp_link_rx_busy(&dut));
+    TEST_ASSERT_EQUAL_UINT16(40u - 6u, isotp_link_rx_remaining(&dut));
     isotp_link_rx_cancel(&dut);
+    TEST_ASSERT_EQUAL_UINT16(0u, isotp_link_rx_remaining(&dut));
     TEST_ASSERT_FALSE(isotp_link_rx_busy(&dut));
     run_ms(VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS + 5u);
     isotp_n_result_t res;

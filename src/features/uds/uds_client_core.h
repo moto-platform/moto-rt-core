@@ -262,6 +262,7 @@ typedef struct {
     uds_client_dtc_answer_t dtc_answer;
     bool dtc_answer_ready;    /* a positive 0x19 answer waits for take_dtc_answer() */
     bool dtc_slow;            /* ... and it came later than one slot: halt SLOW after it */
+    uint32_t rx_cancel_ms;    /* when that cancel happened: the hold starts there */
     bool rx_cancel_due;       /* the glue must cancel the running reception (0x19 at the cap) */
 
     bool failed;
@@ -307,6 +308,13 @@ void uds_client_core_on_fc_withheld(uds_client_core_t* c, uint32_t now_ms, uint8
  * segmented failure (0x19 off for the epoch) and holds for the link's N_Bs.
  */
 bool uds_client_core_take_rx_cancel(uds_client_core_t* c);
+
+/*
+ * After take_rx_cancel(): lengthens the hold that started at the cancel to ms (a longer hold
+ * is kept, a shorter never replaces it). The ECU does not stop at the cancel: with BS 0 it
+ * sends its remaining CFs, each up to N_Cr apart, so the glue passes the time they need.
+ */
+void uds_client_core_extend_hold(uds_client_core_t* c, uint32_t ms);
 
 /*
  * N_USData.indication of the link. data/len are the message for ISOTP_N_OK (ignored

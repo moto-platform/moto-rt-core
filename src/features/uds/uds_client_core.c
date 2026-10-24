@@ -415,11 +415,13 @@ bool uds_client_core_poll(uds_client_core_t* c, uint32_t now_ms, bool rx_busy, b
         if (cap && rx_busy && (c->pending == UDS_CLIENT_REQ_DTC)) {
             /* D-080: the total cap fired while the 0x19 answer is still being received
              * (CFs each just inside N_Cr). The base timeout never fires during a reception, so
-             * the glue cancels it: a segmented failure, and the ECU gets the N_Bs to give up. */
+             * the glue cancels it: a segmented failure, and a hold of at least the link's N_Bs; the glue lengthens it to the
+             * time the ECU's remaining CFs need (BS 0: it does not stop at the cancel). */
             count(&c->stats.unavailable);
             dtc_snapshot_core_on_segmented_failure(&c->dtc);
             c->pending = UDS_CLIENT_REQ_NONE;
             c->rx_cancel_due = true;
+            c->rx_cancel_ms = now_ms;
             hold_for(c, now_ms, c->abort_hold_ms);
         } else if (cap || base) {
             end_with_timeout(c, now_ms);
@@ -682,6 +684,8 @@ void uds_client_core_on_fc_withheld(uds_client_core_t* c, uint32_t now_ms, uint8
         if (c->pending == UDS_CLIENT_REQ_READ) {
             drop_read_for_late_dtc_answer(c);
         }
+        /* A pending session request is dropped as well: it is retried after
+         * SESSION_RETRY_INTERVAL_MS, inside the RESPONSE_TIMEOUT_MAX_MS hold below anyway. */
         c->pending = UDS_CLIENT_REQ_NONE;
         dtc_snapshot_core_halt_after_answer(&c->dtc, DTC_SNAPSHOT_HALT_LATE_FF);
     } else if (c->pending != UDS_CLIENT_REQ_NONE) {
@@ -833,6 +837,13 @@ bool uds_client_core_take_rx_cancel(uds_client_core_t* c)
         c->rx_cancel_due = false;
     }
     return due;
+}
+
+void uds_client_core_extend_hold(uds_client_core_t* c, uint32_t ms)
+{
+    if (c != NULL) {
+        hold_for(c, c->rx_cancel_ms, ms);
+    }
 }
 
 bool uds_client_core_dtc_warm_idle(uds_client_core_t* c, uint32_t now_ms, bool holds)

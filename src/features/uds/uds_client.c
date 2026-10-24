@@ -235,7 +235,14 @@ void uds_client_step(uds_client_t* client)
         isotp_link_close_response(&client->link); /* answered, timed out or latched */
     }
     if (uds_client_core_take_rx_cancel(&client->core)) {
-        isotp_link_rx_cancel(&client->link); /* D-080: the cap fired during a 0x19 reception */
+        /* D-080: the cap fired during a 0x19 reception. The ECU (BS 0) keeps sending its
+         * remaining CFs, up to N_Cr apart; nothing is sent until they should be over
+         * (at least the link's N_Bs). N_Cr is the one configured by the link (gen/ base). */
+        const uint32_t cfs = ((uint32_t)isotp_link_rx_remaining(&client->link) +
+                              (ISOTP_CAN_DL - 1u)) / (ISOTP_CAN_DL - 1u);
+        uds_client_core_extend_hold(&client->core,
+                                    cfs * (uint32_t)VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS);
+        isotp_link_rx_cancel(&client->link);
     }
     isotp_link_step(&client->link);
 
