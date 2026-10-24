@@ -125,6 +125,7 @@ static void rx_first_frame(isotp_link_t* link, const isotp_frame_t* frame, uint3
         queue_fc(link, FS_OVFLW); /* §9.6.5.2: refuse, no reception starts */
         return;
     }
+    link->rx_refused_first = 0u; /* a reception starts: no older refusal is reported */
     copy_bytes(link->rx_buf, &frame->data[2], FF_DATA_BYTES);
     link->rx_len = ff_dl;
     link->rx_pos = FF_DATA_BYTES;
