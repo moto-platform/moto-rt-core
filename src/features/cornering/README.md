@@ -121,7 +121,9 @@ The H7 port must static-assert `configTICK_RATE_HZ == 1000` and a 32-bit `TickTy
 6. `comms_apply_filters()` (seals the filters and the dedicated buffers);
 7. start the scheduler.
 
-If step 4 or 5 fails, 0x020 stays closed and never reaches the bus: receivers see its timeout (D-042 fallback, D-065 amendment). The host program treats a `lean_tx_open()` failure as fatal and aborts the boot (`app/host/main.c`); **the H7 boot must do the same.** If it were ignored while a registered EKF runs, 0xFD03 would read `RECORD_FRESH` clear (no record ever reaches the copy) with `EKF_ALIVE_OK` set, which looks like the output-snapshot producer fault case (safety-reviewer MINOR-1; host test `test_REQ_FD03_a_failed_lean_tx_open_...` pins what the code gives).
+`lean_tx_t` and `comms_ekf_t` must have static storage in zero-initialised `.bss` (or be reset by `comms_ekf_init()` / a refused `lean_tx_open()` before step 4): a garbage `opened` flag would make the comms pass follow a garbage `link` pointer (safety-reviewer N-5 on E-22).
+
+If step 4 or 5 fails, 0x020 stays closed and never reaches the bus: receivers see its timeout (D-042 fallback, D-065 amendment). The host program treats a `lean_tx_open()` failure as fatal and aborts the boot (`app/host/main.c`); the H7 boot should abort too, but it no longer has to for safety (D-086, ISSUES E-22 (1)): `comms_pass()` treats a registered EKF whose lean sender is not open (a failed `lean_tx_open()`, or no sender) as a stalled EKF, so the heartbeat reads DEGRADED and 0xFD03 has `EKF_ALIVE_OK` clear (and `RECORD_FRESH` clear, as no record ever reaches the copy), whatever the boot did (safety-reviewer MINOR-1; host test `test_REQ_FD03_a_failed_lean_tx_open_...` pins it).
 
 ### WCET budget (MINOR-7; user, 2026-10-14; measured on the board with DWT CYCCNT, Q-019)
 
@@ -136,7 +138,7 @@ Diagnostic only (QM): no safety decision reads it, and `lean_tx_msg()` ignores e
 | `OFFSET_LEARNED`, `OFFSET_REJECTED`, `OFFSET_REJECTS`, `UNLEARNED_S`, `SPEED_CONSUMER_FAULT` | the EKF's lean record (`lean_record_t.health` + the existing `fault`), written each step by `lean_ekf_step()` before the publish | EKF (producer), copied by the comms task |
 | `RECORD_FRESH` | the record's stamp against the request time, `lean_tx_core`'s age rule with the DID window | comms, at request time |
 | `SPEED_PRODUCER_FAULT`, `OUTPUT_CONSUMER_FAULT` | `lean_tx_speed_producer_fault()`, `lean_tx_output_consumer_fault()` | comms, set by `comms_pass()` right before `uds_server_step()` |
-| `EKF_ALIVE_OK` | `comms_ekf_registered()` AND NOT the value `comms_pass()` hands `heartbeat_step()` (`ekf_stalled` or an open lean with a foreign counter) | comms |
+| `EKF_ALIVE_OK` | `comms_ekf_registered()` AND NOT the value `comms_pass()` hands `heartbeat_step()` (`ekf_stalled`, an open lean with a foreign counter, or a registered EKF with no open lean sender, D-086) | comms |
 
 **Race freedom.** No new shared state exists and no second reader of the output snapshot:
 1. The EKF fills the health fields of the slot it already owns (`snapshot_write_index()`) before the one `snapshot_publish()`, never after (a mutant that writes them after the publish is killed by TSan in `test_lean_link_stress`, 3 of 3 runs).
@@ -144,7 +146,7 @@ Diagnostic only (QM): no safety decision reads it, and `lean_tx_msg()` ignores e
 3. The UDS server builds the DID from that comms-local copy plus comms-task flags. It never calls `snapshot_read_index()` and keeps no index, so it cannot take a record from 0x020.
 4. The copy is refreshed only when `lean_tx_step()` is due (every 20 ms), which is far inside the 500 ms window.
 
-**Deviation, kept on purpose (safety-reviewer MINOR-2).** `UNLEARNED_S` is anchored at the EKF's **first published step**, one EKF cycle or more after boot, while `uds/dids.yaml` says "since boot". Not changed silently; follow-up for the next defs change (user/defs choice): align the wording to "since the EKF's first step" and mention in the 0xFD03 description the closed-link case (0x020 never opened, so `RECORD_FRESH` stays clear while `EKF_ALIVE_OK` can be set). The saturation of `UNLEARNED_S` is latched per run (a run longer than the 2^32 ms timer wrap stays 0xFFFF).
+**Deviation, kept on purpose (safety-reviewer MINOR-2).** `UNLEARNED_S` is anchored at the EKF's **first published step**, one EKF cycle or more after boot, while `uds/dids.yaml` says "since boot". Not changed silently; follow-up for the next defs change (user/defs choice): align the wording to "since the EKF's first step" and mention in the 0xFD03 description the closed-link case (0x020 never opened: `RECORD_FRESH` and, since D-086, `EKF_ALIVE_OK` both clear). The saturation of `UNLEARNED_S` is latched per run (a run longer than the 2^32 ms timer wrap stays 0xFFFF).
 
 **EKF side.** `imu_offset_health()` gives learned / rejected / `reject_count`; `reject_count` saturates at the gen/ maximum 0xFFFF (never wraps). `lean_health_unlearned_s()` counts whole seconds of the current run without a learnt offset: it starts at the first published step (boot) and again whenever a learnt offset is lost (a rejected window drops it), is 0 while one is learnt and saturates at 0xFFFF. Everything is computed from `now_ms` in the step, with no extra clock.
 
@@ -207,6 +209,8 @@ The rules apply in order. The first that fails sends INVALID with LEAN 0 and QUA
   - comms-side snapshot faults → INVALID;
   - a corrupted output word → INVALID once the last record is older than its budget; a corrupted speed word → INVALID at once (MINOR-1);
   - a comms task given another (zeroed) `comms_ekf_t` → no 0x020 and NODE_MODE DEGRADED (MINOR-2);
+  - a registered EKF with a failed `lean_tx_open()` or no lean sender at all → no 0x020, every heartbeat after INIT DEGRADED and `EKF_ALIVE_OK` clear (D-086);
+  - real 0x22 FD03 requests through the platform UDS server every 5 ms for 10 s → the 0x020 trace is identical to a run without polling and never INVALID (E-22 (2));
   - a real 62° turn both ways → 0x020 CLAMPED ±5500 with the sign kept, while the EKF itself reads above 55°.
 - `test_lean_link_stress` (two threads on one `lean_link_t`, under ASan + UBSan and ThreadSanitizer; E-17 (b), D-067):
   - the real `lean_ekf_step()` in one thread; the real `lean_tx_publish_speed()` + `lean_tx_step()` on an in-process platform bus in the other, one pass per ms;
