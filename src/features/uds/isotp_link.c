@@ -54,8 +54,10 @@ static isotp_status_t open_link(isotp_can_link_t* link, const isotp_link_addr_t*
     link->tx_timeouts = 0u;
     link->fc_withheld_count = 0u;
     link->fc_withheld = false;
+    link->fc_withheld_first = 0u;
     link->response_open = false;
-    link->response_sid = 0u;
+    link->response_prefix_len = 0u;
+    link->response_max_ff_dl = 0u;
     link->vehicle = vehicle;
     if (can_if_register_rx(addr->port, addr->rx_id, addr->extended, on_rx, link) != CAN_IF_OK) {
         return ISOTP_ERR_ARG;
@@ -135,10 +137,25 @@ isotp_status_t isotp_link_send(isotp_can_link_t* link, const uint8_t* data, uint
     return isotp_send(&link->iso, data, len);
 }
 
+/* The First Frame in the receive buffer starts with the expected response prefix. */
+static bool prefix_matches(const isotp_can_link_t* link)
+{
+    bool same = link->response_prefix_len > 0u;
+    for (uint8_t i = 0u; same && (i < link->response_prefix_len); i++) {
+        same = link->rx_buf[i] == link->response_prefix[i];
+    }
+    return same;
+}
+
 /* A First Frame the vehicle link does not answer: no CF will come, so the reception
  * ends now, without an indication; the ECU gives up after its N_Bs. */
 static void withhold_fc(isotp_can_link_t* link)
 {
+    /* a running reception: the First Frame is in rx_buf; a refused one (FF_DL above the
+     * buffer, FC.OVFLW): the core kept its first byte */
+    link->fc_withheld_first = (isotp_rx_pending_len(&link->iso) > 0u)
+                                  ? link->rx_buf[0]
+                                  : isotp_rx_refused_first_byte(&link->iso);
     isotp_rx_cancel(&link->iso);
     link->fc_withheld = true;
     link_count(&link->fc_withheld_count);
@@ -149,11 +166,13 @@ static void transmit(isotp_can_link_t* link, const isotp_frame_t* f)
 {
     if (link->vehicle && (f->dlc > 0u) && ((f->data[0] >> 4) == PCI_TYPE_FC)) {
         /* D-059: the FC.CTS for the First Frame of our own expected answer, once; the
-         * reception runs, so FF_DL <= rx_cap <= MAX_FF_DL (an OVFLW starts none), and
-         * its first data byte (already in rx_buf) is the expected response SID, so a
-         * late answer to an earlier request gets none. */
-        const bool may = link->response_open && (isotp_rx_pending_len(&link->iso) > 0u) &&
-                         (link->rx_buf[0] == link->response_sid) &&
+         * reception runs, so FF_DL <= rx_cap <= MAX_FF_DL (an OVFLW starts none), FF_DL
+         * is within what the request allows, and its first data bytes (already in rx_buf)
+         * are the expected response prefix (D-080: SID, sub-function, DTC), so a late
+         * answer to an earlier request gets none. */
+        const uint16_t ff_dl = isotp_rx_pending_len(&link->iso);
+        const bool may = link->response_open && (ff_dl > 0u) &&
+                         (ff_dl <= link->response_max_ff_dl) && prefix_matches(link) &&
                          vehicle_cl250_frame_allowed(f->data, (size_t)f->dlc);
         if (!may) {
             withhold_fc(link);
@@ -237,11 +256,38 @@ uint32_t isotp_link_tx_refused_count(const isotp_can_link_t* link)
     return (link != NULL) ? link->tx_refused_count : 0u;
 }
 
-void isotp_link_expect_response(isotp_can_link_t* link, uint8_t positive_sid)
+void isotp_link_expect_response_prefix(isotp_can_link_t* link, const uint8_t* prefix,
+                                       uint8_t prefix_len, uint16_t max_ff_dl)
 {
-    if ((link != NULL) && link->open && link->vehicle) {
+    if ((link == NULL) || !link->open || !link->vehicle) {
+        return;
+    }
+    link->response_open = false; /* fail-closed: bad arguments leave nothing armed */
+    if ((prefix != NULL) && (prefix_len >= 1u) && (prefix_len <= ISOTP_LINK_PREFIX_MAX) &&
+        (max_ff_dl <= link->iso.rx_cap)) {
+        for (uint8_t i = 0u; i < prefix_len; i++) {
+            link->response_prefix[i] = prefix[i];
+        }
+        link->response_prefix_len = prefix_len;
+        link->response_max_ff_dl = max_ff_dl;
         link->response_open = true;
-        link->response_sid = positive_sid;
+    }
+}
+
+uint8_t isotp_link_fc_withheld_first_byte(const isotp_can_link_t* link)
+{
+    return (link != NULL) ? link->fc_withheld_first : 0u;
+}
+
+uint16_t isotp_link_rx_remaining(const isotp_can_link_t* link)
+{
+    return ((link != NULL) && link->open) ? isotp_rx_remaining_len(&link->iso) : 0u;
+}
+
+void isotp_link_rx_cancel(isotp_can_link_t* link)
+{
+    if ((link != NULL) && link->open) {
+        isotp_rx_cancel(&link->iso);
     }
 }
 

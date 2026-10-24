@@ -2,6 +2,8 @@
  * moto_rtcore_host: rt-core as a host program (SIL, D-034). The same services/ and
  * features/ code as on the H7 runs against the host HAL:
  *   (default)      in-process virtual bus with a simulated CL250 ECU (app/host/sim_ecu)
+ *   --dtcs N       the simulated ECU stores N synthetic DTCs (0..SIM_ECU_MAX_DTCS, default 0):
+ *                  the tester's D-080 run reads their freeze frames and the sink prints them
  *   --vcan IF      vehicle port on a Linux SocketCAN interface (e.g. vcan0); the peer
  *                  is external (moto-hil-bench live model, can-utils isotpsend, ...).
  *                  Interfaces not named vcan* need --allow-real-bus: a second tester
@@ -71,13 +73,14 @@ typedef struct {
     int quiet;
     int allow_real_bus;
     int uds_scenario;
+    uint32_t dtcs;
 } options_t;
 
 static void usage(void)
 {
     fprintf(stderr,
             "usage: moto_rtcore_host [--vcan IF] [--duration-ms N] [--min-responses N]\n"
-            "                        [--quiet] [--allow-real-bus] [--uds-scenario]\n");
+            "                        [--quiet] [--allow-real-bus] [--uds-scenario] [--dtcs N]\n");
 }
 
 static int parse_u32(const char* s, uint32_t* out)
@@ -99,6 +102,7 @@ static int parse_args(int argc, char** argv, options_t* o)
     o->quiet = 0;
     o->allow_real_bus = 0;
     o->uds_scenario = 0;
+    o->dtcs = 0u;
     for (int i = 1; i < argc; i++) {
         const char* a = argv[i];
         const char* v = (i + 1 < argc) ? argv[i + 1] : NULL;
@@ -116,6 +120,9 @@ static int parse_args(int argc, char** argv, options_t* o)
             o->allow_real_bus = 1;
         } else if (strcmp(a, "--uds-scenario") == 0) {
             o->uds_scenario = 1;
+        } else if ((strcmp(a, "--dtcs") == 0) && (v != NULL) && parse_u32(v, &o->dtcs) &&
+                   (o->dtcs <= SIM_ECU_MAX_DTCS)) {
+            i++;
         } else {
             return 0;
         }
@@ -137,6 +144,38 @@ static lean_ekf_t lean_ekf;
 static lean_tx_t lean_tx;
 static uint32_t imu_pushed; /* SIL IMU feed: samples pushed since start */
 static sim_listener_t listener;
+
+/* D-080 sink: prints the raw 0x19 answers (D-069 item 6). TODO: the services/ logging manager. */
+static void print_dtc_answer(void* ctx, const uds_client_dtc_answer_t* info, const uint8_t* data,
+                             uint16_t len)
+{
+    (void)ctx;
+    printf("[DTC] run %u %s 0x19 0x%02X DTC %02X%02X%02X, %u bytes\n", (unsigned)info->run,
+           (info->trigger == DTC_SNAPSHOT_TRIGGER_KEY_ON) ? "key-on" : "warm-idle",
+           (unsigned)info->sub_function, (unsigned)info->dtc[0], (unsigned)info->dtc[1],
+           (unsigned)info->dtc[2], (unsigned)len);
+    for (uint16_t pos = 0u; pos < len; pos = (uint16_t)(pos + 32u)) {
+        printf("[DTC]   +%03u:", (unsigned)pos);
+        for (uint16_t k = pos; (k < len) && (k < (uint16_t)(pos + 32u)); k++) {
+            printf(" %02X", (unsigned)data[k]);
+        }
+        printf("\n");
+    }
+}
+
+static const char* dtc_end_name(dtc_snapshot_end_t e)
+{
+    switch (e) {
+    case DTC_SNAPSHOT_END_DONE:
+        return "done";
+    case DTC_SNAPSHOT_END_NO_DTC:
+        return "no DTC";
+    case DTC_SNAPSHOT_END_NONE:
+        return "running";
+    default:
+        return "other";
+    }
+}
 
 static const char* state_name(vehicle_signal_state_t st)
 {
@@ -199,6 +238,7 @@ int main(int argc, char** argv)
             return 1;
         }
         ecu.require_session = true; /* reads need the extended session, like the CL250 */
+        ecu.dtc_count = (uint8_t)opt.dtcs;
     } else if ((strncmp(opt.vcan, VIRTUAL_IF_PREFIX, strlen(VIRTUAL_IF_PREFIX)) != 0) &&
                !opt.allow_real_bus) {
         fprintf(stderr, "%s is not a virtual CAN interface; pass --allow-real-bus if this is intended "
@@ -232,6 +272,7 @@ int main(int argc, char** argv)
         fprintf(stderr, "vehicle ISO-TP link setup failed\n");
         return 1;
     }
+    uds_client_set_dtc_sink(&client, print_dtc_answer, NULL);
     if (uds_server_open(&server) != ISOTP_OK) {
         fprintf(stderr, "platform UDS server setup failed\n");
         return 1;
@@ -311,6 +352,12 @@ int main(int argc, char** argv)
            (unsigned)isotp_link_tx_error_count(&client.link),
            (unsigned)can_if_tx_refused_count(CAN_PORT_VEHICLE), (int)uds_client_fault(&client),
            uds_client_failed(&client) ? ", CLIENT FAILED" : "");
+    const dtc_snapshot_core_t* dtc = uds_client_core_dtc(&client.core);
+    printf("moto_rtcore_host: DTC run %u (%s): %s, %u requests, halt %d\n",
+           (unsigned)dtc_snapshot_core_runs_started(dtc),
+           (dtc_snapshot_core_trigger(dtc) == DTC_SNAPSHOT_TRIGGER_KEY_ON) ? "key-on" : "warm-idle",
+           dtc_end_name(dtc_snapshot_core_last_end(dtc)),
+           (unsigned)dtc_snapshot_core_requests_in_epoch(dtc), (int)dtc_snapshot_core_halt(dtc));
     printf("moto_rtcore_host: %u step gaps above %u ms, longest %u ms (D-053)\n",
            (unsigned)st->step_overruns, (unsigned)VEHICLE_CL250_CLIENT_STEP_MAX_MS,
            (unsigned)st->step_gap_max_ms);

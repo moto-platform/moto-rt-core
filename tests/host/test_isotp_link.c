@@ -168,7 +168,8 @@ static void request_and_expect(void)
     const uint8_t req[3] = {0x22u, (uint8_t)(VEHICLE_CL250_DID_ENGINE_SPEED >> 8u),
                             (uint8_t)(VEHICLE_CL250_DID_ENGINE_SPEED & 0xFFu)};
     TEST_ASSERT_EQUAL(ISOTP_OK, isotp_link_send(&dut, req, 3u));
-    isotp_link_expect_response(&dut, 0x62u); /* ReadDataByIdentifier positive response */
+    const uint8_t sid = 0x62u; /* ReadDataByIdentifier positive response */
+    isotp_link_expect_response_prefix(&dut, &sid, 1u, 64u); /* the D-059 read cap */
     run_ms(1u);
     sniff_count = 0u;
 }
@@ -288,6 +289,8 @@ static void test_cl250_first_frame_with_another_response_sid_gets_no_fc(void)
 static void test_cl250_first_frame_at_the_cap_gets_the_fc(void)
 {
     request_and_expect();
+    const uint8_t sid = 0x62u;
+    isotp_link_expect_response_prefix(&dut, &sid, 1u, (uint16_t)VEHICLE_CL250_MAX_FF_DL);
     uint8_t ff[8];
     memcpy(ff, ff10, sizeof ff);
     ff[0] = (uint8_t)(0x10u | ((uint16_t)VEHICLE_CL250_MAX_FF_DL >> 8u));
@@ -317,6 +320,216 @@ static void test_cl250_closed_or_unarmed_response_gets_no_fc(void)
     run_ms(2u);
     TEST_ASSERT_EQUAL_UINT32(0u, dut_frames());
     TEST_ASSERT_EQUAL_UINT32(2u, isotp_link_fc_withheld_count(&dut));
+}
+
+/* ---- D-080: the prefix variant (0x19 answers: 59 <sub-function> <DTC 3 bytes>) ---- */
+
+/* An allowed 0x19 0x01 goes out and the link expects 59 04 <DTC> with FF_DL up to max_ff_dl. */
+static const uint8_t dtc_prefix[5] = {0x59u, 0x04u, 0x12u, 0x34u, 0x50u};
+
+static void request_and_expect_prefix(uint8_t prefix_len, uint16_t max_ff_dl)
+{
+    open_cl250();
+    const uint8_t req[3] = {0x19u, 0x01u, (uint8_t)VEHICLE_CL250_DTC_STATUS_MASK};
+    TEST_ASSERT_EQUAL(ISOTP_OK, isotp_link_send(&dut, req, 3u));
+    isotp_link_expect_response_prefix(&dut, dtc_prefix, prefix_len, max_ff_dl);
+    run_ms(1u);
+    sniff_count = 0u;
+}
+
+/* An ECU First Frame: FF_DL, then the first six data bytes. */
+static void inject_ff(uint16_t ff_dl, const uint8_t* six)
+{
+    uint8_t ff[8];
+    ff[0] = (uint8_t)(0x10u | (ff_dl >> 8u));
+    ff[1] = (uint8_t)(ff_dl & 0xFFu);
+    memcpy(&ff[2], six, 6u);
+    inject(VEHICLE_CL250_RESPONSE_ID, true, ff, 8u);
+}
+
+static const uint8_t dtc_ff_data[6] = {0x59u, 0x04u, 0x12u, 0x34u, 0x50u, 0x2Fu};
+
+static void test_D080_item3_a_matching_first_frame_gets_exactly_one_gen_fc(void)
+{
+    request_and_expect_prefix(5u, VEHICLE_CL250_MAX_FF_DL);
+    inject_ff(40u, dtc_ff_data);
+    run_ms(2u);
+    TEST_ASSERT_EQUAL_UINT32(1u, dut_frames());
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(vehicle_cl250_fc_cts, sniffed[1].f.data, VEHICLE_CL250_FRAME_DLC);
+    TEST_ASSERT_EQUAL_HEX32(VEHICLE_CL250_REQUEST_ID, sniffed[1].f.id);
+    TEST_ASSERT_FALSE(dut.response_open);
+    /* a second First Frame (the answer restarted) gets none */
+    inject_ff(40u, dtc_ff_data);
+    run_ms(2u);
+    TEST_ASSERT_EQUAL_UINT32(1u, dut_frames());
+    TEST_ASSERT_EQUAL_UINT32(1u, isotp_link_fc_withheld_count(&dut));
+}
+
+static void test_D080_item3_every_prefix_byte_is_compared(void)
+{
+    for (uint8_t k = 0u; k < 5u; k++) {
+        setUp();
+        request_and_expect_prefix(5u, VEHICLE_CL250_MAX_FF_DL);
+        uint8_t wrong[6];
+        memcpy(wrong, dtc_ff_data, sizeof wrong);
+        wrong[k] ^= 0x01u;
+        inject_ff(40u, wrong);
+        run_ms(2u);
+        TEST_ASSERT_EQUAL_UINT32(0u, dut_frames());
+        TEST_ASSERT_EQUAL_UINT32(1u, isotp_link_fc_withheld_count(&dut));
+        TEST_ASSERT_TRUE(isotp_link_take_fc_withheld(&dut));
+        TEST_ASSERT_FALSE(isotp_link_rx_busy(&dut));
+        TEST_ASSERT_TRUE(dut.response_open); /* the expected answer may still come */
+    }
+}
+
+static void test_D080_item3_a_shorter_prefix_compares_only_its_bytes(void)
+{
+    request_and_expect_prefix(2u, VEHICLE_CL250_MAX_FF_DL);
+    uint8_t other_dtc[6];
+    memcpy(other_dtc, dtc_ff_data, sizeof other_dtc);
+    other_dtc[3] = 0x99u; /* beyond the 2 prefix bytes */
+    inject_ff(40u, other_dtc);
+    run_ms(2u);
+    TEST_ASSERT_EQUAL_UINT32(1u, dut_frames());
+}
+
+static void test_D080_item3_a_first_frame_above_the_max_ff_dl_gets_no_fc(void)
+{
+    request_and_expect_prefix(5u, 100u);
+    inject_ff(101u, dtc_ff_data);
+    run_ms(2u);
+    TEST_ASSERT_EQUAL_UINT32(0u, dut_frames());
+    TEST_ASSERT_EQUAL_UINT32(1u, isotp_link_fc_withheld_count(&dut));
+    inject_ff(100u, dtc_ff_data); /* the boundary itself is answered */
+    run_ms(2u);
+    TEST_ASSERT_EQUAL_UINT32(1u, dut_frames());
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(vehicle_cl250_fc_cts, sniffed[sniff_count - 1u].f.data,
+                                 VEHICLE_CL250_FRAME_DLC);
+}
+
+static void test_D080_item3_a_first_frame_above_the_gen_cap_gets_no_fc_even_with_a_matching_prefix(void)
+{
+    request_and_expect_prefix(5u, VEHICLE_CL250_MAX_FF_DL);
+    inject_ff((uint16_t)(VEHICLE_CL250_MAX_FF_DL + 1u), dtc_ff_data);
+    run_ms(2u);
+    TEST_ASSERT_EQUAL_UINT32(0u, dut_frames()); /* the core answered OVFLW to nobody: no reception */
+    TEST_ASSERT_FALSE(isotp_link_rx_busy(&dut));
+}
+
+static void test_D080_item3_nothing_expected_means_no_fc(void)
+{
+    open_cl250();
+    inject_ff(40u, dtc_ff_data);
+    run_ms(2u);
+    TEST_ASSERT_EQUAL_UINT32(0u, dut_frames());
+    TEST_ASSERT_EQUAL_UINT32(1u, isotp_link_fc_withheld_count(&dut));
+    setUp(); /* a fresh link */
+    request_and_expect_prefix(5u, VEHICLE_CL250_MAX_FF_DL);
+    isotp_link_close_response(&dut);
+    inject_ff(40u, dtc_ff_data);
+    run_ms(2u);
+    TEST_ASSERT_EQUAL_UINT32(0u, dut_frames());
+}
+
+static void test_D080_item3_bad_expect_arguments_leave_nothing_armed(void)
+{
+    request_and_expect_prefix(5u, VEHICLE_CL250_MAX_FF_DL);
+    TEST_ASSERT_TRUE(dut.response_open);
+    isotp_link_expect_response_prefix(&dut, dtc_prefix, 0u, 64u);
+    TEST_ASSERT_FALSE(dut.response_open);
+    isotp_link_expect_response_prefix(&dut, dtc_prefix, 5u, 64u);
+    TEST_ASSERT_TRUE(dut.response_open);
+    isotp_link_expect_response_prefix(&dut, dtc_prefix, (uint8_t)(ISOTP_LINK_PREFIX_MAX + 1u), 64u);
+    TEST_ASSERT_FALSE(dut.response_open);
+    isotp_link_expect_response_prefix(&dut, NULL, 2u, 64u);
+    TEST_ASSERT_FALSE(dut.response_open);
+    isotp_link_expect_response_prefix(&dut, dtc_prefix, 2u, (uint16_t)(VEHICLE_CL250_MAX_FF_DL + 1u));
+    TEST_ASSERT_FALSE(dut.response_open); /* above the link's receive capacity */
+    isotp_link_expect_response_prefix(NULL, dtc_prefix, 2u, 64u);
+}
+
+static void test_D080_item3_the_prefix_variant_is_ignored_on_other_links_and_closed_links(void)
+{
+    isotp_link_expect_response_prefix(&dut, dtc_prefix, 2u, 64u); /* not open */
+    TEST_ASSERT_FALSE(dut.response_open);
+    const isotp_link_addr_t a = {CAN_PORT_PLATFORM, TEST_ID_A, TEST_ID_B, false};
+    isotp_config_t cfg;
+    isotp_default_config(&cfg);
+    TEST_ASSERT_EQUAL(ISOTP_OK, isotp_link_open(&dut, &a, &cfg, dut_rx, BUF, dut_tx, BUF));
+    isotp_link_expect_response_prefix(&dut, dtc_prefix, 2u, 64u);
+    TEST_ASSERT_FALSE(dut.response_open);
+}
+
+/*
+ * D-080 item 4: a 255 B answer is 36 CFs, more than the 4-bit sequence number counts. A
+ * run of 16 lost CFs shows no wrong SN, but the bytes stay short of FF_DL, so the
+ * reception ends in N_Cr: a failed reception, never an indication with wrong data.
+ */
+static void test_D080_major1_a_withheld_first_frame_reports_its_first_data_byte(void)
+{
+    request_and_expect_prefix(5u, VEHICLE_CL250_MAX_FF_DL);
+    uint8_t other[6];
+    memcpy(other, dtc_ff_data, sizeof other);
+    other[1] = 0x01u; /* 59 01: not the expected 59 04 <DTC> */
+    inject_ff(40u, other);
+    run_ms(2u);
+    TEST_ASSERT_TRUE(isotp_link_take_fc_withheld(&dut));
+    TEST_ASSERT_EQUAL_HEX8(0x59u, isotp_link_fc_withheld_first_byte(&dut));
+    /* a First Frame above the buffer starts no reception, but its first byte is kept */
+    inject_ff((uint16_t)(VEHICLE_CL250_MAX_FF_DL + 1u), dtc_ff_data);
+    run_ms(2u);
+    TEST_ASSERT_TRUE(isotp_link_take_fc_withheld(&dut));
+    TEST_ASSERT_EQUAL_HEX8(0x59u, isotp_link_fc_withheld_first_byte(&dut)); /* kept from the refused FF */
+    TEST_ASSERT_EQUAL_HEX8(0u, isotp_link_fc_withheld_first_byte(NULL));
+    TEST_ASSERT_EQUAL_UINT16(0u, isotp_link_rx_remaining(NULL));
+}
+
+static void test_D080_minor1_rx_cancel_ends_a_reception_without_an_indication_or_a_withheld_fc(void)
+{
+    request_and_expect_prefix(5u, VEHICLE_CL250_MAX_FF_DL);
+    inject_ff(40u, dtc_ff_data);
+    run_ms(2u);
+    TEST_ASSERT_TRUE(isotp_link_rx_busy(&dut));
+    TEST_ASSERT_EQUAL_UINT16(40u - 6u, isotp_link_rx_remaining(&dut));
+    isotp_link_rx_cancel(&dut);
+    TEST_ASSERT_EQUAL_UINT16(0u, isotp_link_rx_remaining(&dut));
+    TEST_ASSERT_FALSE(isotp_link_rx_busy(&dut));
+    run_ms(VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS + 5u);
+    isotp_n_result_t res;
+    uint16_t len;
+    TEST_ASSERT_FALSE(isotp_link_take_rx(&dut, &res, &len));
+    TEST_ASSERT_EQUAL_UINT32(0u, isotp_link_fc_withheld_count(&dut));
+    isotp_link_rx_cancel(NULL);
+}
+
+static void test_D080_item4_sixteen_lost_cfs_end_in_n_cr_and_never_in_an_indication(void)
+{
+    request_and_expect_prefix(5u, VEHICLE_CL250_MAX_FF_DL);
+    inject_ff((uint16_t)VEHICLE_CL250_MAX_FF_DL, dtc_ff_data);
+    run_ms(2u);
+    TEST_ASSERT_EQUAL_UINT32(1u, dut_frames());
+    TEST_ASSERT_TRUE(isotp_link_rx_busy(&dut));
+    uint32_t sent = 0u;
+    isotp_n_result_t res = ISOTP_N_OK;
+    uint16_t len = 0u;
+    for (uint32_t k = 1u; k <= 36u; k++) {
+        if ((k >= 5u) && (k <= 20u)) {
+            continue; /* 16 CFs lost in a row: SN 5..20 */
+        }
+        uint8_t cf[8] = {(uint8_t)(0x20u | (k & 0x0Fu)), 1u, 2u, 3u, 4u, 5u, 6u, 7u};
+        inject(VEHICLE_CL250_RESPONSE_ID, true, cf, 8u);
+        run_ms(1u);
+        sent++;
+        TEST_ASSERT_FALSE_MESSAGE(isotp_link_take_rx(&dut, &res, &len) && (res == ISOTP_N_OK),
+                                  "an indication with wrong data");
+    }
+    TEST_ASSERT_EQUAL_UINT32(20u, sent);
+    TEST_ASSERT_TRUE(isotp_link_rx_busy(&dut)); /* 6 + 20 * 7 = 146 of 255 bytes */
+    run_ms(VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS + 5u);
+    TEST_ASSERT_TRUE(isotp_link_take_rx(&dut, &res, &len));
+    TEST_ASSERT_EQUAL(ISOTP_N_TIMEOUT_CR, res);
+    TEST_ASSERT_FALSE(isotp_link_rx_busy(&dut));
 }
 
 /* ------------------------------------------------------------------------- */
@@ -807,6 +1020,17 @@ static void test_isotp_abort_tx_on_an_idle_link_is_a_no_op(void)
 int main(void)
 {
     UNITY_BEGIN();
+    RUN_TEST(test_D080_item3_a_matching_first_frame_gets_exactly_one_gen_fc);
+    RUN_TEST(test_D080_item3_every_prefix_byte_is_compared);
+    RUN_TEST(test_D080_item3_a_shorter_prefix_compares_only_its_bytes);
+    RUN_TEST(test_D080_item3_a_first_frame_above_the_max_ff_dl_gets_no_fc);
+    RUN_TEST(test_D080_item3_a_first_frame_above_the_gen_cap_gets_no_fc_even_with_a_matching_prefix);
+    RUN_TEST(test_D080_item3_nothing_expected_means_no_fc);
+    RUN_TEST(test_D080_item3_bad_expect_arguments_leave_nothing_armed);
+    RUN_TEST(test_D080_item3_the_prefix_variant_is_ignored_on_other_links_and_closed_links);
+    RUN_TEST(test_D080_major1_a_withheld_first_frame_reports_its_first_data_byte);
+    RUN_TEST(test_D080_minor1_rx_cancel_ends_a_reception_without_an_indication_or_a_withheld_fc);
+    RUN_TEST(test_D080_item4_sixteen_lost_cfs_end_in_n_cr_and_never_in_an_indication);
     RUN_TEST(test_cl250_link_takes_ids_and_padding_from_gen);
     RUN_TEST(test_cl250_request_is_a_padded_single_frame_on_the_request_id);
     RUN_TEST(test_cl250_every_gen_did_round_trips_through_the_simulated_ecu);

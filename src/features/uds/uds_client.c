@@ -12,10 +12,18 @@
 _Static_assert(UDS_CLIENT_TX_BUF >= UDS_CLIENT_REQ_MAX, "request buffer too small");
 _Static_assert(UDS_CLIENT_RX_BUF > ISOTP_SF_MAX_LEN, "rx buffer must exceed a Single Frame");
 _Static_assert(UDS_CLIENT_RX_BUF <= VEHICLE_CL250_MAX_FF_DL, "rx buffer above the D-059 cap");
-/* A lost CF must show as a wrong SN (or N_Cr for the last one): at most 15 CFs, so the
- * 4-bit sequence number cannot wrap within one answer (YAML flow_control rule). */
-/* CFs = ceil((RX_BUF - 6 FF data bytes) / 7 CF data bytes). */
-_Static_assert((((UDS_CLIENT_RX_BUF - 6u) + 6u) / 7u) <= 15u, "rx buffer allows an SN wrap");
+_Static_assert(UDS_CLIENT_READ_MAX_FF_DL <= UDS_CLIENT_RX_BUF, "read cap above the rx buffer");
+_Static_assert(ISOTP_LINK_PREFIX_MAX >= DTC_SNAPSHOT_PREFIX_MAX, "prefix does not fit the link");
+/*
+ * D-080: the buffer takes a 255 B answer, so up to 36 CFs at BS 0, which the gen/ rx queue
+ * sizing covers (FC_MAX_CF_BURST). CFs = ceil((RX_BUF - 6 FF data bytes) / 7 CF data
+ * bytes). The 4-bit sequence number wraps after 16 CFs, so a lost CF shows as a wrong SN
+ * unless a multiple of 16 CFs is lost in a row; then the bytes received stay short of FF_DL,
+ * so the reception ends in N_Cr (a failed reception, never an indication with wrong data;
+ * tested in test_isotp_core).
+ */
+_Static_assert((((UDS_CLIENT_RX_BUF - 6u) + 6u) / 7u) <= VEHICLE_CL250_FC_MAX_CF_BURST,
+               "rx buffer needs more CFs than the gen/ burst");
 
 #define FALLBACK_IDS_EXTENDED (VEHICLE_CL250_FALLBACK_REQUEST_ID > CAN_PORT_STD_ID_MAX)
 #define REQUEST_IDS_EXTENDED (VEHICLE_CL250_REQUEST_ID > CAN_PORT_STD_ID_MAX)
@@ -121,6 +129,14 @@ static void report_diag(uds_client_t* client, uint32_t now, bool present)
     diag_set_client_steps(st->step_overruns, st->step_gap_max_ms, now); /* 0xFD02, D-055 */
 }
 
+void uds_client_set_dtc_sink(uds_client_t* client, uds_client_dtc_sink_t sink, void* ctx)
+{
+    if (client != NULL) {
+        client->dtc_sink = sink;
+        client->dtc_sink_ctx = ctx;
+    }
+}
+
 static void take_indication(uds_client_t* client, uint32_t now)
 {
     isotp_n_result_t res = ISOTP_N_OK;
@@ -133,9 +149,50 @@ static void take_indication(uds_client_t* client, uint32_t now)
     if (uds_client_core_on_indication(&client->core, now, res, data, len, &s)) {
         (void)vehicle_signals_write(s.idx, s.raw, s.physical, s.stamp_ms); /* D-051 */
     }
+    uds_client_dtc_answer_t answer;
+    if ((res == ISOTP_N_OK) && uds_client_core_take_dtc_answer(&client->core, &answer) &&
+        (client->dtc_sink != NULL)) {
+        /* D-080 item 5: the raw bytes, before the buffer is released */
+        client->dtc_sink(client->dtc_sink_ctx, &answer, data, len);
+    }
     if (res == ISOTP_N_OK) {
         isotp_link_rx_release(&client->link);
     }
+}
+
+/* The warm-idle condition (D-080 item 1): every vehicle_cl250_dtc_warm_idle[] entry is
+ * met by a VALID sample of services/vehicle_signals; STALE or none = not met. */
+static bool warm_idle_holds(uint32_t now)
+{
+    bool holds = true;
+    for (uint32_t i = 0u; holds && (i < VEHICLE_CL250_DTC_WARM_IDLE_CONDITION_COUNT); i++) {
+        const vehicle_cl250_dtc_condition_t* cond = &vehicle_cl250_dtc_warm_idle[i];
+        vehicle_signal_sample_t s;
+        holds = vehicle_signals_get(cond->did_index, now, &s) && (s.state == VEHICLE_SIGNAL_VALID) &&
+                dtc_snapshot_core_condition_met(cond->op, s.physical, cond->value);
+    }
+    return holds;
+}
+
+/* D-059 / D-080: the answer to the request that just went out may get the one FC.CTS,
+ * but only for a First Frame that starts like it and fits what that request allows. */
+static void arm_response(uds_client_t* client)
+{
+    uint8_t prefix[ISOTP_LINK_PREFIX_MAX] = {0};
+    uint8_t prefix_len = 0u;
+    uint16_t max_ff_dl = UDS_CLIENT_READ_MAX_FF_DL;
+    if (uds_client_core_pending(&client->core) == UDS_CLIENT_REQ_DTC) {
+        if (dtc_snapshot_core_expected_prefix(uds_client_core_dtc(&client->core), prefix,
+                                              &prefix_len)) {
+            max_ff_dl = (uint16_t)VEHICLE_CL250_MAX_FF_DL;
+        } else {
+            prefix_len = 0u; /* cannot happen with a request in flight: arms nothing */
+        }
+    } else {
+        prefix[0] = uds_client_core_pending_response_sid(&client->core);
+        prefix_len = 1u;
+    }
+    isotp_link_expect_response_prefix(&client->link, prefix, prefix_len, max_ff_dl);
 }
 
 void uds_client_step(uds_client_t* client)
@@ -151,11 +208,13 @@ void uds_client_step(uds_client_t* client)
     }
     take_indication(client, now);
     if (isotp_link_take_fc_withheld(&client->link)) {
-        uds_client_core_on_fc_withheld(&client->core, now);
+        uds_client_core_on_fc_withheld(&client->core, now,
+                                       isotp_link_fc_withheld_first_byte(&client->link));
     }
     isotp_n_result_t conf = ISOTP_N_OK;
     (void)isotp_link_take_tx_confirm(&client->link, &conf); /* a Single Frame cannot fail */
 
+    (void)uds_client_core_dtc_warm_idle(&client->core, now, warm_idle_holds(now));
     uint8_t req[UDS_CLIENT_REQ_MAX];
     uint16_t len = 0u;
     if (uds_client_core_poll(&client->core, now, isotp_link_rx_busy(&client->link),
@@ -167,14 +226,23 @@ void uds_client_step(uds_client_t* client)
             latch(client, UDS_CLIENT_FAULT_GATE); /* D-020 gate or length: a bug */
         } else if (uds_client_core_pending(&client->core) != UDS_CLIENT_REQ_NONE) {
             /* D-059: its answer (positive response SID) may get the FC */
-            isotp_link_expect_response(&client->link,
-                                       uds_client_core_pending_response_sid(&client->core));
+            arm_response(client);
         } else {
             /* tester present: no answer is expected */
         }
     }
     if (uds_client_core_pending(&client->core) == UDS_CLIENT_REQ_NONE) {
         isotp_link_close_response(&client->link); /* answered, timed out or latched */
+    }
+    if (uds_client_core_take_rx_cancel(&client->core)) {
+        /* D-080: the cap fired during a 0x19 reception. The ECU (BS 0) keeps sending its
+         * remaining CFs, up to N_Cr apart; nothing is sent until they should be over
+         * (at least the link's N_Bs). N_Cr is the one configured by the link (gen/ base). */
+        const uint32_t cfs = ((uint32_t)isotp_link_rx_remaining(&client->link) +
+                              (ISOTP_CAN_DL - 1u)) / (ISOTP_CAN_DL - 1u);
+        uds_client_core_extend_hold(&client->core,
+                                    cfs * (uint32_t)VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS);
+        isotp_link_rx_cancel(&client->link);
     }
     isotp_link_step(&client->link);
 

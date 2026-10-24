@@ -148,8 +148,19 @@ static void assert_tester_frames_ok(void)
         const bool read = (n == 3u) && (f->data[1] == UDS_SID_READ_DATA_BY_IDENTIFIER) &&
                           (vehicle_cl250_find((uint16_t)(((uint16_t)f->data[2] << 8u) |
                                                          f->data[3])) != NULL);
-        TEST_ASSERT_TRUE_MESSAGE(session || tp || read, "unexpected tester request");
-        if (session || read) {
+        /* D-080: ReadDTCInformation, only the four gen/ sub-functions, padded Single Frame */
+        const bool dtc_list = (n == 3u) && (f->data[1] == UDS_SID_READ_DTC_INFORMATION) &&
+                              ((f->data[2] == UDS_READ_DTC_REPORT_NUMBER_OF_DTC_BY_STATUS_MASK) ||
+                               (f->data[2] == UDS_READ_DTC_REPORT_DTC_BY_STATUS_MASK)) &&
+                              (f->data[3] == VEHICLE_CL250_DTC_STATUS_MASK);
+        const bool dtc_rec = (n == 6u) && (f->data[1] == UDS_SID_READ_DTC_INFORMATION) &&
+                             (((f->data[2] == UDS_READ_DTC_REPORT_DTC_SNAPSHOT_RECORD_BY_DTC_NUMBER) &&
+                               (f->data[6] == VEHICLE_CL250_DTC_SNAPSHOT_RECORD)) ||
+                              ((f->data[2] == UDS_READ_DTC_REPORT_DTC_EXT_DATA_RECORD_BY_DTC_NUMBER) &&
+                               (f->data[6] == VEHICLE_CL250_DTC_EXT_DATA_RECORD)));
+        TEST_ASSERT_TRUE_MESSAGE(session || tp || read || dtc_list || dtc_rec,
+                                 "unexpected tester request");
+        if (session || read || dtc_list || dtc_rec) {
             answer_expected = true;
             fc_due = false;
         }
@@ -665,13 +676,13 @@ static void test_sil_first_frames_at_and_above_the_client_buffer(void)
     const uds_client_stats_t* st = uds_client_stats(&client);
     const uint32_t unavailable = st->unavailable;
     uint32_t mark = sniff_count;
-    ecu_first_frame(UDS_CLIENT_RX_BUF);
+    ecu_first_frame(UDS_CLIENT_READ_MAX_FF_DL);
     run(1u, false);
     TEST_ASSERT_EQUAL_UINT32(1u, tester_frames_since(mark));
     TEST_ASSERT_EQUAL_HEX8_ARRAY(vehicle_cl250_fc_cts, sniffed[sniff_count - 1u].f.data,
                                  VEHICLE_CL250_FRAME_DLC);
     uint8_t sn = 1u;
-    for (uint32_t got = 6u; got < UDS_CLIENT_RX_BUF; got += 7u) {
+    for (uint32_t got = 6u; got < UDS_CLIENT_READ_MAX_FF_DL; got += 7u) {
         const uint8_t cf[8] = {(uint8_t)(0x20u | sn), 1u, 2u, 3u, 4u, 5u, 6u, 7u};
         ecu_frame(cf);
         sn = (uint8_t)((sn + 1u) & 0x0Fu);
@@ -684,7 +695,7 @@ static void test_sil_first_frames_at_and_above_the_client_buffer(void)
     run_until_last_request(UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_CLIENT_REQ_READ);
     mark = sniff_count;
     const uint32_t t_ff = timebase_now_ms();
-    ecu_first_frame((uint16_t)(UDS_CLIENT_RX_BUF + 1u));
+    ecu_first_frame((uint16_t)(UDS_CLIENT_READ_MAX_FF_DL + 1u));
     run(VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS, false);
     TEST_ASSERT_EQUAL_UINT32(0u, tester_frames_since(mark)); /* no FC, no OVFLW, held */
     TEST_ASSERT_EQUAL_UINT32(1u, st->fc_withheld);
@@ -714,13 +725,13 @@ static void ecu_response_pending(void)
 
 /* MINOR-4 (e) setup: a read the silent ECU keeps open with NRC 0x78 (D-050 doubling: the
  * wait ends at +250, +600, +1350, then +2900 from the request) gets a First Frame of
- * FF_DL UDS_CLIENT_RX_BUF 500 ms before the total cap, and its FC. Returns the send time
+ * FF_DL UDS_CLIENT_READ_MAX_FF_DL 500 ms before the total cap, and its FC. Returns the send time
  * of the read; *mark is the sniff index before the First Frame. The answer needs
  * CAP_TEST_CFS Consecutive Frames, which the tests send CAP_TEST_CF_GAP_MS apart (below
  * N_Cr), so the reception runs past the cap. */
 #define CAP_TEST_FF_AT_MS (VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS - 500u)
 #define CAP_TEST_CF_GAP_MS (VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS - 10u)
-#define CAP_TEST_CFS ((UDS_CLIENT_RX_BUF - 6u + 6u) / 7u) /* 6 bytes in the FF, 7 per CF */
+#define CAP_TEST_CFS ((UDS_CLIENT_READ_MAX_FF_DL - 6u + 6u) / 7u) /* 6 bytes in the FF, 7 per CF */
 static uint32_t cap_test_t_ff; /* step that took the First Frame */
 static uint32_t read_in_reception_near_the_cap(uint32_t* mark)
 {
@@ -739,7 +750,7 @@ static uint32_t read_in_reception_near_the_cap(uint32_t* mark)
     TEST_ASSERT_EQUAL_UINT32(pending0 + 4u, uds_client_stats(&client)->response_pending);
     *mark = sniff_count;
     cap_test_t_ff = timebase_now_ms();
-    ecu_first_frame(UDS_CLIENT_RX_BUF);
+    ecu_first_frame(UDS_CLIENT_READ_MAX_FF_DL);
     run(1u, false);
     TEST_ASSERT_EQUAL_UINT32(*mark + 1u, sniff_count); /* the silent ECU sent nothing else */
     TEST_ASSERT_TRUE(is_tester(&sniffed[*mark]));
@@ -1256,6 +1267,500 @@ static void test_sil_an_answering_ecu_never_sets_the_comm_lost_dtc(void)
     TEST_ASSERT_FALSE(diag_vehicle_tester(timebase_now_ms()).latched);
 }
 
+/* ------------------------------------------------------------------------- */
+/* D-080: DTC freeze frames through the link and the simulated ECU            */
+/* ------------------------------------------------------------------------- */
+
+#define SINK_MAX 64u
+
+typedef struct {
+    uds_client_dtc_answer_t info;
+    uint16_t len;
+    uint8_t data[VEHICLE_CL250_MAX_FF_DL];
+} sink_rec_t;
+static sink_rec_t sink_recs[SINK_MAX];
+static uint32_t sink_n;
+static uint32_t sink_buffer_hits; /* the sink saw the link's own buffer, still held */
+
+static void dtc_sink(void* ctx, const uds_client_dtc_answer_t* info, const uint8_t* data,
+                     uint16_t len)
+{
+    (void)ctx;
+    TEST_ASSERT_LESS_OR_EQUAL_UINT16(VEHICLE_CL250_MAX_FF_DL, len);
+    if (data == isotp_link_rx_data(&client.link)) {
+        sink_buffer_hits++;
+    }
+    if (sink_n < SINK_MAX) {
+        sink_recs[sink_n].info = *info;
+        sink_recs[sink_n].len = len;
+        memcpy(sink_recs[sink_n].data, data, len);
+        sink_n++;
+    }
+}
+
+static void open_dtc(uint8_t stored)
+{
+    sink_n = 0u;
+    sink_buffer_hits = 0u;
+    ecu.dtc_count = stored;
+    uds_client_set_dtc_sink(&client, dtc_sink, NULL);
+}
+
+static const dtc_snapshot_core_t* dtc_core(void)
+{
+    return uds_client_core_dtc(&client.core);
+}
+
+/* Runs until the key-on run ended (or max_ms passed); returns the ms it took. */
+static uint32_t run_until_the_run_ends(uint32_t max_ms)
+{
+    uint32_t n = 0u;
+    while ((n < max_ms) && (dtc_snapshot_core_last_end(dtc_core()) == DTC_SNAPSHOT_END_NONE)) {
+        run(1u, false);
+        n++;
+    }
+    return n;
+}
+
+static uint32_t dtc_requests_after(uint32_t from_t)
+{
+    return tester_count(UDS_SID_READ_DTC_INFORMATION, from_t);
+}
+
+static void test_D080_item2_a_run_with_segmented_answers_gets_one_fc_each_and_the_sink_the_raw_bytes(void)
+{
+    open_dtc(2u);
+    const uint32_t took = run_until_the_run_ends(10000u);
+    TEST_ASSERT_LESS_THAN_UINT32(10000u, took);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_END_DONE, dtc_snapshot_core_last_end(dtc_core()));
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_NONE, dtc_snapshot_core_halt(dtc_core()));
+    run(50u, false);
+    TEST_ASSERT_EQUAL_UINT32(6u, sink_n);
+    TEST_ASSERT_EQUAL_UINT32(6u, sink_buffer_hits); /* called before the buffer was released */
+    const uint16_t lens[6] = {6u, 3u + (2u * 4u), SIM_ECU_DTC_RECORD_LEN, SIM_ECU_DTC_EXT_LEN,
+                              SIM_ECU_DTC_RECORD_LEN, SIM_ECU_DTC_EXT_LEN};
+    const uint8_t subs[6] = {UDS_READ_DTC_REPORT_NUMBER_OF_DTC_BY_STATUS_MASK,
+                             UDS_READ_DTC_REPORT_DTC_BY_STATUS_MASK,
+                             UDS_READ_DTC_REPORT_DTC_SNAPSHOT_RECORD_BY_DTC_NUMBER,
+                             UDS_READ_DTC_REPORT_DTC_EXT_DATA_RECORD_BY_DTC_NUMBER,
+                             UDS_READ_DTC_REPORT_DTC_SNAPSHOT_RECORD_BY_DTC_NUMBER,
+                             UDS_READ_DTC_REPORT_DTC_EXT_DATA_RECORD_BY_DTC_NUMBER};
+    for (uint32_t i = 0u; i < 6u; i++) {
+        TEST_ASSERT_EQUAL_UINT16(lens[i], sink_recs[i].len);
+        TEST_ASSERT_EQUAL_HEX8(UDS_SID_READ_DTC_INFORMATION + UDS_POSITIVE_RESPONSE_OFFSET,
+                               sink_recs[i].data[0]);
+        TEST_ASSERT_EQUAL_HEX8(subs[i], sink_recs[i].data[1]);
+        TEST_ASSERT_EQUAL_HEX8(subs[i], sink_recs[i].info.sub_function);
+        TEST_ASSERT_EQUAL(DTC_SNAPSHOT_TRIGGER_KEY_ON, sink_recs[i].info.trigger);
+        TEST_ASSERT_EQUAL_UINT8(1u, sink_recs[i].info.run);
+        if (i >= 2u) {
+            uint8_t n[3];
+            sim_ecu_dtc_number((uint8_t)((i - 2u) / 2u), n);
+            TEST_ASSERT_EQUAL_HEX8_ARRAY(n, &sink_recs[i].data[2], 3u);
+            TEST_ASSERT_EQUAL_HEX8_ARRAY(n, sink_recs[i].info.dtc, 3u);
+            /* a raw record byte, past the header: whole and in order across the CFs */
+            for (uint16_t b = 6u; b < sink_recs[i].len; b++) {
+                TEST_ASSERT_EQUAL_HEX8((uint8_t)(((i - 2u) / 2u) + b), sink_recs[i].data[b]);
+            }
+        }
+    }
+    /* the list: two records, then the count: 2 */
+    TEST_ASSERT_EQUAL_HEX8(2u, sink_recs[0].data[5]);
+    assert_tester_frames_ok();
+    /* the list and four records are segmented: exactly one FC each, none for the count */
+    TEST_ASSERT_EQUAL_UINT32(5u, tester_fcs);
+    TEST_ASSERT_EQUAL_UINT32(0u, uds_client_stats(&client)->fc_withheld);
+    TEST_ASSERT_EQUAL_UINT16(0u, isotp_link_rx_error_count(&client.link));
+    TEST_ASSERT_FALSE(uds_client_failed(&client));
+}
+
+static void test_D080_item2_the_run_without_stored_dtcs_is_one_request(void)
+{
+    open_dtc(0u);
+    run(2000u, false);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_END_NO_DTC, dtc_snapshot_core_last_end(dtc_core()));
+    TEST_ASSERT_EQUAL_UINT32(1u, dtc_requests_after(0u));
+    TEST_ASSERT_EQUAL_UINT32(1u, sink_n);
+    assert_tester_frames_ok();
+    TEST_ASSERT_EQUAL_UINT32(0u, tester_fcs); /* the count answer is a Single Frame */
+}
+
+static void test_D080_without_a_sink_the_run_still_completes_and_nothing_is_logged(void)
+{
+    uds_client_set_dtc_sink(&client, NULL, NULL);
+    ecu.dtc_count = 1u;
+    run(3000u, false);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_END_DONE, dtc_snapshot_core_last_end(dtc_core()));
+    uds_client_set_dtc_sink(NULL, dtc_sink, NULL);
+    assert_tester_frames_ok();
+}
+
+static void test_D080_item3_a_first_frame_with_a_wrong_dtc_echo_gets_no_fc_and_halts_0x19(void)
+{
+    open_dtc(2u);
+    ecu.dtc_bad_echo = true;
+    run(3000u, false);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_SEGMENTED, dtc_snapshot_core_halt(dtc_core()));
+    TEST_ASSERT_EQUAL_UINT32(2u, sink_n); /* count and list were answered */
+    TEST_ASSERT_EQUAL_UINT32(1u, isotp_link_fc_withheld_count(&client.link));
+    assert_tester_frames_ok();
+    TEST_ASSERT_EQUAL_UINT32(1u, tester_fcs); /* the list's only: none for the wrong echo */
+    const uint32_t requests = dtc_requests_after(0u);
+    TEST_ASSERT_EQUAL_UINT32(3u, requests); /* count, list, the 0x04 whose answer was refused */
+    run(5000u, false);
+    TEST_ASSERT_EQUAL_UINT32(requests, dtc_requests_after(0u)); /* never again in this epoch */
+    TEST_ASSERT_FALSE(uds_client_failed(&client));
+    TEST_ASSERT_EQUAL_UINT32(0u, isotp_link_tx_refused_count(&client.link));
+}
+
+static void test_D080_item3_a_first_frame_above_255_bytes_gets_no_fc_and_halts_0x19(void)
+{
+    open_dtc(2u); /* two records: the list is segmented and gets its FC */
+    ecu.dtc_record_len = (uint16_t)(VEHICLE_CL250_MAX_FF_DL + 1u);
+    run(3000u, false);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_SEGMENTED, dtc_snapshot_core_halt(dtc_core()));
+    TEST_ASSERT_EQUAL_UINT32(2u, sink_n);
+    TEST_ASSERT_EQUAL_UINT32(1u, uds_client_stats(&client)->fc_withheld);
+    assert_tester_frames_ok();
+    TEST_ASSERT_EQUAL_UINT32(1u, tester_fcs); /* only the list's */
+    TEST_ASSERT_FALSE(uds_client_failed(&client));
+}
+
+static void test_D080_item3_a_255_byte_answer_is_received_whole(void)
+{
+    open_dtc(1u);
+    ecu.dtc_record_len = (uint16_t)VEHICLE_CL250_MAX_FF_DL;
+    run(4000u, false);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_END_DONE, dtc_snapshot_core_last_end(dtc_core()));
+    TEST_ASSERT_EQUAL_UINT32(4u, sink_n);
+    TEST_ASSERT_EQUAL_UINT16(VEHICLE_CL250_MAX_FF_DL, sink_recs[2].len);
+    for (uint16_t b = 6u; b < VEHICLE_CL250_MAX_FF_DL; b++) {
+        TEST_ASSERT_EQUAL_HEX8((uint8_t)b, sink_recs[2].data[b]);
+    }
+    assert_tester_frames_ok();
+    TEST_ASSERT_EQUAL_UINT16(0u, isotp_link_rx_error_count(&client.link));
+}
+
+static void test_D080_item2_a_0x19_nrc_halts_the_epoch_and_the_dids_keep_running(void)
+{
+    open_dtc(1u);
+    ecu.dtc_nrc_enabled = true;
+    ecu.dtc_nrc = UDS_NRC_SERVICE_NOT_SUPPORTED;
+    run(1000u, false);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_NOT_SERVED, dtc_snapshot_core_halt(dtc_core()));
+    TEST_ASSERT_EQUAL_UINT32(1u, dtc_requests_after(0u));
+    run(3000u, true);
+    TEST_ASSERT_EQUAL_UINT32(1u, dtc_requests_after(0u));
+    assert_tester_frames_ok();
+}
+
+static void test_D080_item2_a_tester_that_asks_for_a_dtc_before_the_session_is_not_possible(void)
+{
+    /* the ECU needs the extended session for 0x19: the first 0x19 comes after the session */
+    open_dtc(1u);
+    run(2000u, false);
+    uint32_t session_i = UINT32_MAX;
+    uint32_t dtc_i = UINT32_MAX;
+    for (uint32_t i = 0u; i < sniff_count; i++) {
+        if (!is_tester(&sniffed[i])) {
+            continue;
+        }
+        if ((session_i == UINT32_MAX) && (sniffed[i].f.data[1] == VEHICLE_CL250_SESSION_SID)) {
+            session_i = i;
+        }
+        if ((dtc_i == UINT32_MAX) && (sniffed[i].f.data[1] == UDS_SID_READ_DTC_INFORMATION)) {
+            dtc_i = i;
+        }
+    }
+    TEST_ASSERT_NOT_EQUAL_UINT32(UINT32_MAX, dtc_i);
+    TEST_ASSERT_LESS_THAN_UINT32(dtc_i, session_i);
+}
+
+static void test_D080_every_frame_the_tester_sends_in_a_full_run_is_a_gen_request_or_the_gen_fc(void)
+{
+    open_dtc(10u); /* more than the cap of 8 */
+    (void)run_until_the_run_ends(20000u);
+    run(300u, false);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_END_DONE, dtc_snapshot_core_last_end(dtc_core()));
+    TEST_ASSERT_EQUAL_UINT8(VEHICLE_CL250_DTC_MAX_PER_RUN, dtc_snapshot_core_dtc_count(dtc_core()));
+    TEST_ASSERT_EQUAL_UINT8(DTC_SNAPSHOT_MAX_REQUESTS_PER_RUN,
+                            dtc_snapshot_core_requests_in_run(dtc_core()));
+    TEST_ASSERT_EQUAL_UINT32(DTC_SNAPSHOT_MAX_REQUESTS_PER_RUN, sink_n);
+    assert_tester_frames_ok(); /* gate, format, SIDs, sub-functions, FC only after an ECU First Frame */
+    for (uint32_t i = 0u; i < sniff_count; i++) {
+        const can_frame_t* f = &sniffed[i].f;
+        TEST_ASSERT_TRUE((f->id == VEHICLE_CL250_REQUEST_ID) || (f->id == VEHICLE_CL250_RESPONSE_ID));
+        if (is_tester(&sniffed[i]) && ((f->data[0] & 0xF0u) == 0u)) {
+            const uint8_t sid = f->data[1];
+            TEST_ASSERT_TRUE((sid == VEHICLE_CL250_SESSION_SID) ||
+                             (sid == VEHICLE_CL250_TESTER_PRESENT_SID) ||
+                             (sid == UDS_SID_READ_DATA_BY_IDENTIFIER) ||
+                             (sid == UDS_SID_READ_DTC_INFORMATION));
+            TEST_ASSERT_NOT_EQUAL_UINT8(0x14u, sid);
+            if (sid == UDS_SID_READ_DTC_INFORMATION) {
+                const uint8_t sub = f->data[2];
+                TEST_ASSERT_TRUE((sub == UDS_READ_DTC_REPORT_NUMBER_OF_DTC_BY_STATUS_MASK) ||
+                                 (sub == UDS_READ_DTC_REPORT_DTC_BY_STATUS_MASK) ||
+                                 (sub == UDS_READ_DTC_REPORT_DTC_SNAPSHOT_RECORD_BY_DTC_NUMBER) ||
+                                 (sub == UDS_READ_DTC_REPORT_DTC_EXT_DATA_RECORD_BY_DTC_NUMBER));
+            }
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(0u, can_if_tx_refused_count(CAN_PORT_VEHICLE));
+}
+
+static void test_D080_item4_the_key_on_run_completes_in_bounded_time_with_the_full_gen_table(void)
+{
+    open_dtc((uint8_t)VEHICLE_CL250_DTC_MAX_PER_RUN);
+    const uint32_t took = run_until_the_run_ends(20000u);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_END_DONE, dtc_snapshot_core_last_end(dtc_core()));
+    /* every DID is read once at its tier rate first (unverified ones are armed at once);
+     * the 0x19 steps fit in the gaps. Bound: well inside the 20 s warm-idle hold. */
+    TEST_ASSERT_LESS_THAN_UINT32(VEHICLE_CL250_DTC_WARM_IDLE_MIN_DURATION_MS, took);
+    TEST_ASSERT_LESS_THAN_UINT32(10000u, took);
+}
+
+/* Largest sample age (ms since the stamp) of each verified DID over the run helper below. */
+static uint32_t max_age[VEHICLE_CL250_DID_COUNT];
+
+static void run_measuring_ages(uint32_t ms, bool stop_when_ended)
+{
+    for (uint32_t n = 0u; n < ms; n++) {
+        run(1u, false);
+        const uint32_t now = timebase_now_ms();
+        for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+            vehicle_signal_sample_t smp;
+            TEST_ASSERT_TRUE(vehicle_signals_get(i, now, &smp));
+            if (vehicle_cl250_dids[i].verified && (smp.state != VEHICLE_SIGNAL_NONE) &&
+                (smp.age_ms > max_age[i])) {
+                max_age[i] = smp.age_ms;
+            }
+        }
+        if (stop_when_ended && (dtc_snapshot_core_last_end(dtc_core()) != DTC_SNAPSHOT_END_NONE)) {
+            break;
+        }
+    }
+}
+
+static void assert_ages_within(uint32_t extra_ms)
+{
+    uint32_t verified = 0u;
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        if (vehicle_cl250_dids[i].verified) {
+            verified++;
+            TEST_ASSERT_LESS_OR_EQUAL_UINT32_MESSAGE(vehicle_cl250_dids[i].stale_after_ms + extra_ms,
+                                                     max_age[i],
+                                                     "a verified DID exceeded its stale_after_ms");
+            TEST_ASSERT_GREATER_THAN_UINT32(0u, max_age[i]);
+        }
+    }
+    TEST_ASSERT_GREATER_THAN_UINT32(0u, verified);
+}
+
+static void test_D080_item4_verified_dids_stay_within_stale_after_during_a_full_18_request_run(void)
+{
+    memset(max_age, 0, sizeof max_age);
+    open_dtc(10u);
+    run_measuring_ages(15000u, false);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_END_DONE, dtc_snapshot_core_last_end(dtc_core()));
+    TEST_ASSERT_EQUAL_UINT8(DTC_SNAPSHOT_MAX_REQUESTS_PER_RUN,
+                            dtc_snapshot_core_requests_in_run(dtc_core()));
+    assert_ages_within(0u);
+    TEST_ASSERT_EQUAL_UINT32(0u, uds_client_stats(&client)->timeouts);
+}
+
+static void test_D080_item4_verified_dids_stay_within_stale_after_with_a_0x19_timeout_mid_run(void)
+{
+    memset(max_age, 0, sizeof max_age);
+    open_dtc(10u);
+    for (uint32_t n = 0u; (n < 15000u) && (sink_n < 4u); n++) {
+        run_measuring_ages(1u, false);
+    }
+    ecu.dtc_silent = true; /* the next 0x19 gets no answer */
+    run_measuring_ages(6000u, false);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_NO_ANSWER, dtc_snapshot_core_halt(dtc_core()));
+    TEST_ASSERT_EQUAL_UINT32(1u, uds_client_stats(&client)->timeouts);
+    assert_ages_within(0u); /* one timeout slot is the unverified-read slot the bound allows */
+}
+
+static void test_D080_item4_a_refused_first_frame_costs_one_hold_and_no_more(void)
+{
+    memset(max_age, 0, sizeof max_age);
+    open_dtc(10u);
+    for (uint32_t n = 0u; (n < 15000u) && (sink_n < 4u); n++) {
+        run_measuring_ages(1u, false);
+    }
+    ecu.dtc_bad_echo = true; /* the next record answer gets no FC: one hold, the ECU waits for it */
+    run_measuring_ages(8000u, false);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_SEGMENTED, dtc_snapshot_core_halt(dtc_core()));
+    /* D-080 item 3 / D-075 item 3: a withheld Flow Control holds the tester for
+     * RESPONSE_TIMEOUT_MAX_MS (a failed reception: N_Bs), once per epoch; the verified DIDs go
+     * STALE meanwhile, never an old value as fresh. */
+    assert_ages_within(VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS + VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS);
+    /* the hold happened once: afterwards the DIDs are fresh again */
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        vehicle_signal_sample_t smp;
+        TEST_ASSERT_TRUE(vehicle_signals_get(i, timebase_now_ms(), &smp));
+        if (vehicle_cl250_dids[i].verified) {
+            TEST_ASSERT_EQUAL(VEHICLE_SIGNAL_VALID, smp.state);
+        }
+    }
+}
+
+/* An ECU Single Frame NRC for the pending 0x19. */
+static void ecu_dtc_nrc(uint8_t code)
+{
+    const uint8_t nrc[8] = {0x03u, UDS_SID_NEGATIVE_RESPONSE, UDS_SID_READ_DTC_INFORMATION, code,
+                            0xAAu, 0xAAu, 0xAAu, 0xAAu};
+    ecu_frame(nrc);
+}
+
+/*
+ * safety-reviewer MAJOR-1: 0x19 -> 7F 19 78 -> timeout at the base -> a DID read is pending ->
+ * the ECU's late 59 04 <DTC> First Frame gets no FC. That DID is neither skipped nor stopped,
+ * 0x19 stays off, and the verified DIDs go STALE only for the one hold.
+ */
+static void test_D080_major1_a_late_0x19_first_frame_during_a_read_costs_that_did_nothing(void)
+{
+    memset(max_age, 0, sizeof max_age);
+    open_dtc(2u);
+    ecu.dtc_silent = true;
+    run_until_last_request(UDS_SID_READ_DTC_INFORMATION, UDS_CLIENT_REQ_DTC);
+    ecu_dtc_nrc(UDS_NRC_RESPONSE_PENDING);
+    run(1u, false);
+    run_until_last_request(UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_CLIENT_REQ_READ);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_NO_ANSWER, dtc_snapshot_core_halt(dtc_core()));
+    ecu.silent = true; /* the sim must not answer the read ahead of the First Frame */
+    const uint32_t idx = client.core.pending_idx;
+    const uint32_t ff_t = timebase_now_ms();
+    const uint8_t ff[8] = {0x10u, 0x20u, 0x59u, 0x04u, 0x12u, 0x34u, 0x56u, 0x2Fu};
+    ecu_frame(ff);
+    run_measuring_ages(3u, false);
+    ecu.silent = false; /* the ECU is alive again; the read it ignored is gone */
+    TEST_ASSERT_EQUAL_UINT32(1u, isotp_link_fc_withheld_count(&client.link));
+    run_measuring_ages(6000u, false);
+    TEST_ASSERT_FALSE(uds_client_core_did_skipped(&client.core, idx, timebase_now_ms()));
+    TEST_ASSERT_FALSE(uds_client_core_did_stopped(&client.core, idx));
+    TEST_ASSERT_EQUAL_UINT32(0u, uds_client_stats(&client)->did_skips);
+    TEST_ASSERT_EQUAL_UINT32(0u, uds_client_stats(&client)->did_stops);
+    TEST_ASSERT_EQUAL_UINT32(1u, uds_client_stats(&client)->timeouts); /* only the 0x19 */
+    TEST_ASSERT_EQUAL_UINT32(1u, dtc_requests_after(0u));
+    TEST_ASSERT_GREATER_THAN_UINT32(ff_t, timebase_now_ms());
+    assert_ages_within(VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS + VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS);
+    TEST_ASSERT_FALSE(uds_client_failed(&client));
+}
+
+/*
+ * safety-reviewer MINOR-1: an ECU that sends a First Frame and then a CF every 99 ms (just
+ * inside N_Cr) would keep the tester silent for the whole answer. The total cap cancels
+ * the reception: 0x19 off for the epoch, then the link's N_Bs, once.
+ */
+static void test_D080_minor1_a_slow_0x19_reception_is_cancelled_at_the_total_cap(void)
+{
+    memset(max_age, 0, sizeof max_age);
+    open_dtc(0u);
+    ecu.dtc_silent = true;
+    run_until_last_request(UDS_SID_READ_DTC_INFORMATION, UDS_CLIENT_REQ_DTC);
+    const uint32_t t_req = client.core.sent_ms;
+    const uint8_t ff[8] = {0x10u, 0xFFu, 0x59u, 0x01u, 0xFFu, 0x01u, 0x00u, 0x02u};
+    run_to(t_req + 50u);
+    ecu_frame(ff);
+    /* The ECU (BS 0) sends all 36 CFs, 99 ms apart, whatever the tester does. */
+    uint32_t cancelled_at = 0u;
+    uint32_t mark = 0u;
+    for (uint32_t k = 1u; k <= 36u; k++) {
+        run_to(t_req + 50u + (99u * k));
+        if ((cancelled_at == 0u) && !isotp_link_rx_busy(&client.link)) {
+            cancelled_at = timebase_now_ms();
+            mark = sniff_count;
+        }
+        if (cancelled_at != 0u) {
+            /* CFs of the cancelled answer neither start a reception nor refresh presence */
+            TEST_ASSERT_FALSE(isotp_link_rx_busy(&client.link));
+        }
+        const uint8_t cf[8] = {(uint8_t)(0x20u | (k & 0x0Fu)), 1u, 2u, 3u, 4u, 5u, 6u, 7u};
+        ecu_frame(cf);
+        run_measuring_ages(1u, false);
+    }
+    TEST_ASSERT_NOT_EQUAL_UINT32(0u, cancelled_at);
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT32(t_req + VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS, cancelled_at);
+    TEST_ASSERT_LESS_THAN_UINT32(t_req + VEHICLE_CL250_RESPONSE_TIMEOUT_MAX_MS + 150u, cancelled_at);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_SEGMENTED, dtc_snapshot_core_halt(dtc_core()));
+    TEST_ASSERT_EQUAL_UINT32(0u, isotp_link_fc_withheld_count(&client.link)); /* a cancel, not a withheld FC */
+    /* the tester stayed silent until the ECU's last CF (the hold is longer than the N_Bs) */
+    TEST_ASSERT_EQUAL_UINT32(0u, tester_frames_since(mark));
+    TEST_ASSERT_GREATER_THAN_UINT32(isotp_link_n_bs_ms(&client.link),
+                                    timebase_now_ms() - cancelled_at);
+    run_measuring_ages(30000u, false);
+    /* the reception proved the ECU alive: no new epoch, no second key-on run */
+    TEST_ASSERT_EQUAL_UINT32(1u, uds_client_stats(&client)->session_starts);
+    TEST_ASSERT_EQUAL_UINT32(0u, uds_client_stats(&client)->session_losses);
+    TEST_ASSERT_EQUAL_UINT8(1u, dtc_snapshot_core_runs_started(dtc_core()));
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_SEGMENTED, dtc_snapshot_core_halt(dtc_core()));
+    /* Nothing else was sent for the N_Bs, and 0x19 never came back in 30 s. */
+    TEST_ASSERT_EQUAL_UINT32(1u, dtc_requests_after(0u));
+    TEST_ASSERT_EQUAL_UINT32(0u, uds_client_stats(&client)->timeouts); /* no read ran into the CFs */
+    /* cap, then the remaining CFs (up to 36 x N_Cr from the FF) */
+    assert_ages_within((36u * VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS) + VEHICLE_CL250_RESPONSE_TIMEOUT_BASE_MS);
+    TEST_ASSERT_FALSE(uds_client_failed(&client));
+}
+
+/* safety-reviewer round 2 MINOR-B: an oversize (FF_DL > 255) late 0x19 First Frame during a
+ * read goes through the OVFLW path; the read still pays nothing and 0x19 halts. */
+static void test_D080_minorB_an_oversize_late_0x19_first_frame_costs_the_read_nothing(void)
+{
+    open_dtc(2u);
+    ecu.dtc_silent = true;
+    run_until_last_request(UDS_SID_READ_DTC_INFORMATION, UDS_CLIENT_REQ_DTC);
+    ecu_dtc_nrc(UDS_NRC_RESPONSE_PENDING);
+    run(1u, false);
+    run_until_last_request(UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_CLIENT_REQ_READ);
+    ecu.silent = true;
+    const uint32_t idx = client.core.pending_idx;
+    const uint8_t ff[8] = {0x11u, 0x00u, 0x59u, 0x04u, 0x12u, 0x34u, 0x56u, 0x2Fu}; /* FF_DL 256 */
+    ecu_frame(ff);
+    run(3u, false);
+    ecu.silent = false;
+    TEST_ASSERT_EQUAL_UINT32(1u, isotp_link_fc_withheld_count(&client.link));
+    run(6000u, false);
+    TEST_ASSERT_FALSE(uds_client_core_did_skipped(&client.core, idx, timebase_now_ms()));
+    TEST_ASSERT_FALSE(uds_client_core_did_stopped(&client.core, idx));
+    TEST_ASSERT_EQUAL_UINT32(0u, uds_client_stats(&client)->did_skips);
+    TEST_ASSERT_EQUAL_UINT32(0u, uds_client_stats(&client)->did_stops);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_HALT_NO_ANSWER, dtc_snapshot_core_halt(dtc_core())); /* the earlier reason stays */
+}
+
+static void test_D080_item1_the_warm_idle_run_starts_after_the_gen_hold_of_the_gen_conditions(void)
+{
+    open_dtc(0u);
+    ecu.warm_idle = true; /* values that satisfy every vehicle_cl250_dtc_warm_idle[] entry */
+    run(2000u, false);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_END_NO_DTC, dtc_snapshot_core_last_end(dtc_core()));
+    TEST_ASSERT_EQUAL_UINT8(1u, dtc_snapshot_core_runs_started(dtc_core()));
+    TEST_ASSERT_EQUAL_UINT32(1u, sink_n);
+    /* the conditions have held since the first samples: the run comes at the gen/ duration */
+    run(VEHICLE_CL250_DTC_WARM_IDLE_MIN_DURATION_MS - 2000u - 500u, false);
+    TEST_ASSERT_EQUAL_UINT8(1u, dtc_snapshot_core_runs_started(dtc_core()));
+    run(1500u, false);
+    TEST_ASSERT_EQUAL_UINT8(2u, dtc_snapshot_core_runs_started(dtc_core()));
+    TEST_ASSERT_EQUAL_UINT32(2u, sink_n);
+    TEST_ASSERT_EQUAL(DTC_SNAPSHOT_TRIGGER_WARM_IDLE, sink_recs[1].info.trigger);
+    TEST_ASSERT_EQUAL_UINT8(2u, sink_recs[1].info.run);
+    /* and no third run in this epoch */
+    run(2U * VEHICLE_CL250_DTC_WARM_IDLE_MIN_DURATION_MS, false);
+    TEST_ASSERT_EQUAL_UINT8(2u, dtc_snapshot_core_runs_started(dtc_core()));
+    TEST_ASSERT_EQUAL_UINT32(2u, sink_n);
+    assert_tester_frames_ok();
+}
+
+static void test_D080_item1_a_sweeping_ecu_never_holds_the_warm_idle_conditions(void)
+{
+    open_dtc(0u);
+    run(VEHICLE_CL250_DTC_WARM_IDLE_MIN_DURATION_MS + 10000u, false);
+    TEST_ASSERT_EQUAL_UINT8(1u, dtc_snapshot_core_runs_started(dtc_core()));
+    TEST_ASSERT_EQUAL_UINT32(1u, sink_n);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1290,5 +1795,23 @@ int main(void)
     RUN_TEST(test_sil_a_latch_is_reported_to_diag_and_clearing_never_releases_it);
     RUN_TEST(test_sil_ecu_comm_lost_dtc_needs_the_absence_timeout_since_open);
     RUN_TEST(test_sil_an_answering_ecu_never_sets_the_comm_lost_dtc);
+    RUN_TEST(test_D080_item2_a_run_with_segmented_answers_gets_one_fc_each_and_the_sink_the_raw_bytes);
+    RUN_TEST(test_D080_item2_the_run_without_stored_dtcs_is_one_request);
+    RUN_TEST(test_D080_without_a_sink_the_run_still_completes_and_nothing_is_logged);
+    RUN_TEST(test_D080_item3_a_first_frame_with_a_wrong_dtc_echo_gets_no_fc_and_halts_0x19);
+    RUN_TEST(test_D080_item3_a_first_frame_above_255_bytes_gets_no_fc_and_halts_0x19);
+    RUN_TEST(test_D080_item3_a_255_byte_answer_is_received_whole);
+    RUN_TEST(test_D080_item2_a_0x19_nrc_halts_the_epoch_and_the_dids_keep_running);
+    RUN_TEST(test_D080_item2_a_tester_that_asks_for_a_dtc_before_the_session_is_not_possible);
+    RUN_TEST(test_D080_every_frame_the_tester_sends_in_a_full_run_is_a_gen_request_or_the_gen_fc);
+    RUN_TEST(test_D080_item4_the_key_on_run_completes_in_bounded_time_with_the_full_gen_table);
+    RUN_TEST(test_D080_item4_verified_dids_stay_within_stale_after_during_a_full_18_request_run);
+    RUN_TEST(test_D080_item4_verified_dids_stay_within_stale_after_with_a_0x19_timeout_mid_run);
+    RUN_TEST(test_D080_item4_a_refused_first_frame_costs_one_hold_and_no_more);
+    RUN_TEST(test_D080_major1_a_late_0x19_first_frame_during_a_read_costs_that_did_nothing);
+    RUN_TEST(test_D080_minor1_a_slow_0x19_reception_is_cancelled_at_the_total_cap);
+    RUN_TEST(test_D080_minorB_an_oversize_late_0x19_first_frame_costs_the_read_nothing);
+    RUN_TEST(test_D080_item1_the_warm_idle_run_starts_after_the_gen_hold_of_the_gen_conditions);
+    RUN_TEST(test_D080_item1_a_sweeping_ecu_never_holds_the_warm_idle_conditions);
     return UNITY_END();
 }

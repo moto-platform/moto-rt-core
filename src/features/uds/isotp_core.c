@@ -121,9 +121,11 @@ static void rx_first_frame(isotp_link_t* link, const isotp_frame_t* frame, uint3
         if (link->rx_error_count < UINT16_MAX) {
             link->rx_error_count++;
         }
+        link->rx_refused_first = frame->data[2]; /* the client tells a late answer by it */
         queue_fc(link, FS_OVFLW); /* §9.6.5.2: refuse, no reception starts */
         return;
     }
+    link->rx_refused_first = 0u; /* a reception starts: no older refusal is reported */
     copy_bytes(link->rx_buf, &frame->data[2], FF_DATA_BYTES);
     link->rx_len = ff_dl;
     link->rx_pos = FF_DATA_BYTES;
@@ -457,6 +459,18 @@ void isotp_rx_cancel(isotp_link_t* link)
             link->rx_error_count++;
         }
     }
+}
+
+uint16_t isotp_rx_remaining_len(const isotp_link_t* link)
+{
+    return ((link != NULL) && (link->rx_state == ISOTP_RX_WAIT_CF))
+               ? (uint16_t)(link->rx_len - link->rx_pos)
+               : 0u;
+}
+
+uint8_t isotp_rx_refused_first_byte(const isotp_link_t* link)
+{
+    return (link != NULL) ? link->rx_refused_first : 0u;
 }
 
 uint16_t isotp_rx_pending_len(const isotp_link_t* link)

@@ -10,6 +10,9 @@
  *     a request (ISO 14229-2 S3server).
  *   - With require_session, 0x22 is refused with NRC 0x7F outside the extended session,
  *     like the real ECU needs the extended session for its reads (D-019).
+ *   - 0x19 ReadDTCInformation 0x01/0x02/0x04/0x06 (D-080) from a small stored-DTC table
+ *     (default: none stored). The DTC numbers, statuses and record bytes are SYNTHETIC
+ *     TEST DATA, not vehicle facts; the 0x04/0x06 answers are long enough to be segmented.
  *   - Anything else gets a negative response.
  * Fault hooks for tests: silent, NRC 0x78 bursts, a segmented (First Frame) answer, a
  * fixed NRC for one DID, and a session drop. It is a stand-in until the live vehicle
@@ -22,9 +25,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define SIM_ECU_BUF 64u
+#define SIM_ECU_BUF 512u               /* holds the longest 0x19 answer a test asks for */
 #define SIM_ECU_S3_MS 5000u            /* ISO 14229-2 default S3server */
 #define SIM_ECU_SEGMENTED_LEN 20u      /* length of the segmented answer (First Frame) */
+#define SIM_ECU_MAX_DTCS 12u           /* stored DTC table size (the tester reads at most 8) */
+#define SIM_ECU_DTC_RECORD_LEN 24u     /* default 0x04 answer length (segmented) */
+#define SIM_ECU_DTC_EXT_LEN 14u        /* default 0x06 answer length (segmented) */
 
 typedef struct {
     vbus_t* bus;
@@ -36,6 +42,7 @@ typedef struct {
     uint32_t reads;             /* 0x22 requests */
     uint32_t session_requests;  /* 0x10 requests */
     uint32_t tester_presents;   /* 0x3E requests */
+    uint32_t dtc_requests;      /* 0x19 requests */
     bool extended;              /* current session */
     uint32_t last_request_ms;
 
@@ -54,6 +61,21 @@ typedef struct {
     uint16_t nrc_did;
     uint8_t nrc_code;
 
+    /* The DIDs of the gen/ warm-idle window (VEHICLE_CL250_DTC_WARM_IDLE_*) answer values
+     * that satisfy all its conditions (coolant hot, speed exactly 0, idle rpm). */
+    bool warm_idle;
+
+    /* 0x19 (D-080). dtc_count DTCs are stored (synthetic, see sim_ecu_dtc_number()). */
+    uint8_t dtc_count;
+    uint8_t dtc_status;         /* status byte of every stored DTC (default matches the mask) */
+    uint16_t dtc_record_len;    /* length of a 0x04 answer; >= 6 */
+    uint16_t dtc_ext_len;       /* length of a 0x06 answer; >= 6 */
+    bool dtc_silent;            /* ignore 0x19 requests */
+    bool dtc_nrc_enabled;       /* answer every 0x19 with NRC dtc_nrc */
+    uint8_t dtc_nrc;
+    bool dtc_bad_echo;          /* 0x04/0x06 answers echo a wrong DTC */
+    bool dtc_pending_once;      /* answer the first 0x19 with NRC 0x78 and then never: it times out */
+
     /* Deferred answer after NRC 0x78. */
     bool deferred;
     uint8_t deferred_req[SIM_ECU_BUF];
@@ -64,6 +86,9 @@ typedef struct {
 
 bool sim_ecu_init(sim_ecu_t* ecu, vbus_t* bus);
 void sim_ecu_step(sim_ecu_t* ecu, uint32_t now_ms);
+
+/* Synthetic DTC number i (test data): 3 bytes into out. */
+void sim_ecu_dtc_number(uint8_t i, uint8_t* out);
 
 /* Back to the default session at once (ECU reset, S3 expiry). */
 void sim_ecu_drop_session(sim_ecu_t* ecu);
