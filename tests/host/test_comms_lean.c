@@ -555,6 +555,85 @@ static void test_REQ_FD03_an_unlearnable_gyro_shows_rejects_and_the_unlearned_ti
                                  fd03_u16(PLATFORM_UDS_LEAN_HEALTH_UNLEARNED_S_BYTE));
 }
 
+/* MINOR-1: a registered, running EKF but lean_tx_open() failing at the dedicated TX
+ * registration (the boot must treat that as fatal, cornering README). What the code gives:
+ * no record ever reaches the copy, so RECORD_FRESH, OFFSET_LEARNED clear and UNLEARNED_S
+ * UNKNOWN, while EKF_ALIVE_OK is SET (the EKF is registered and runs; the closed link is
+ * not an alive fault). 0x020 is never sent. */
+static void test_REQ_FD03_a_failed_lean_tx_open_reads_no_record_with_alive_ok_set_MINOR_1(void)
+{
+    TEST_ASSERT_TRUE(comms_ekf_register(&ekf, lean_link_alive(&link)));
+    TEST_ASSERT_EQUAL(CAN_IF_OK, can_if_register_tx_dedicated(CAN_PORT_PLATFORM, PLATFORM_EKF_LEAN_FRAME_ID,
+                                                              PLATFORM_EKF_LEAN_IS_EXTENDED != 0));
+    TEST_ASSERT_FALSE(comms_open_lean(&ekf, &tx, &link)); /* DUP: refused */
+    TEST_ASSERT_FALSE(tx.opened);
+    TEST_ASSERT_TRUE(comms_apply_filters());
+    const seen_t s = run(3000u, 54u, 1u);
+    TEST_ASSERT_EQUAL_UINT32(0u, s.lean_frames);
+    TEST_ASSERT_EQUAL_UINT32(s.hb_frames, s.hb_normal + 1u); /* heartbeat: all NORMAL but INIT */
+    TEST_ASSERT_EQUAL_HEX8(M_ALIVE_OK, fd03_flags());
+    TEST_ASSERT_EQUAL_UINT16(PLATFORM_UDS_LEAN_HEALTH_UNLEARNED_S_UNKNOWN,
+                             fd03_u16(PLATFORM_UDS_LEAN_HEALTH_UNLEARNED_S_BYTE));
+}
+
+/* (d) Polling 0xFD03 in every comms pass for 10 s changes nothing on the bus: the 0x020
+ * E2E counter sequence and the send times are identical to a run without polling. */
+#define POLL_FRAMES 520u
+
+typedef struct {
+    uint32_t n;
+    uint32_t t[POLL_FRAMES];
+    uint8_t c[POLL_FRAMES];
+    uint8_t invalid[POLL_FRAMES];
+} lean_trace_t;
+
+static void trace_run(bool poll, lean_trace_t* tr)
+{
+    memset(tr, 0, sizeof *tr);
+    ride_to_estimated();
+    for (uint32_t i = 0u; i < 10000u; i++) {
+        const uint32_t now = timebase_now_ms();
+        feed_imu(now);
+        if ((now % EKF_CYCLE_MS) == 0u) {
+            lean_ekf_step(&lean, now);
+        }
+        sim_ecu_step(&ecu, now);
+        comms_pass(&client, &server, &republisher, &heartbeat, &ekf, &tx);
+        if (poll) {
+            (void)fd03_flags();
+        }
+        can_frame_t got;
+        while (vbus_recv(&bus_p, node_ppeer, &got) == CAN_PORT_OK) {
+            if ((got.id == PLATFORM_EKF_LEAN_FRAME_ID) && (tr->n < POLL_FRAMES)) {
+                tr->t[tr->n] = now;
+                tr->c[tr->n] = (uint8_t)(got.data[MOTO_E2E_COUNTER_OFFSET] & MOTO_E2E_COUNTER_MASK);
+                tr->invalid[tr->n] = frame_is_invalid(got.data) ? 1u : 0u;
+                tr->n++;
+            }
+        }
+        hal_time_host_advance(1u);
+    }
+}
+
+static void test_REQ_FD03_polling_every_pass_leaves_the_0x020_sequence_and_cycle_unchanged(void)
+{
+    static lean_trace_t plain;
+    static lean_trace_t polled;
+    trace_run(false, &plain);
+    tearDown();
+    setUp();
+    trace_run(true, &polled);
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT32(10000u / EKF_CYCLE_MS - 1u, plain.n);
+    TEST_ASSERT_EQUAL_UINT32(plain.n, polled.n);
+    TEST_ASSERT_EQUAL_MEMORY(plain.t, polled.t, sizeof plain.t);
+    TEST_ASSERT_EQUAL_MEMORY(plain.c, polled.c, sizeof plain.c);
+    TEST_ASSERT_EQUAL_MEMORY(plain.invalid, polled.invalid, sizeof plain.invalid);
+    for (uint32_t i = 1u; i < plain.n; i++) { /* counter +1 per frame, fixed cycle */
+        TEST_ASSERT_EQUAL_UINT32(EKF_CYCLE_MS, polled.t[i] - polled.t[i - 1u]);
+        TEST_ASSERT_EQUAL_UINT8((polled.c[i - 1u] + 1u) & MOTO_E2E_COUNTER_MASK, polled.c[i]);
+    }
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -581,5 +660,7 @@ int main(void)
     RUN_TEST(test_REQ_FD03_a_latched_output_producer_fault_reads_not_fresh_with_alive_ok);
     RUN_TEST(test_REQ_FD03_the_comms_and_ekf_side_snapshot_latches_each_have_their_flag);
     RUN_TEST(test_REQ_FD03_an_unlearnable_gyro_shows_rejects_and_the_unlearned_time);
+    RUN_TEST(test_REQ_FD03_a_failed_lean_tx_open_reads_no_record_with_alive_ok_set_MINOR_1);
+    RUN_TEST(test_REQ_FD03_polling_every_pass_leaves_the_0x020_sequence_and_cycle_unchanged);
     return UNITY_END();
 }

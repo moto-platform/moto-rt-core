@@ -14,12 +14,12 @@ _Static_assert(PLATFORM_EKF_LEAN_CYCLE_TIME_MS > 0u, "a zero cycle time would se
 // cppcheck-suppress misra-c2012-8.7 ; DEV-002: called by app/comms (comms_open_lean) and the tests
 bool lean_tx_open(lean_tx_t* tx, lean_link_t* link, const alive_counter_t* registered)
 {
+    lean_health_init(); /* 0xFD03: no record since boot; first, before any validation */
     if (tx == NULL) {
         return false;
     }
     (void)memset(tx, 0, sizeof *tx);
     moto_e2e_tx_init(&tx->e2e);
-    lean_health_init(); /* 0xFD03: no record since boot */
     if ((link == NULL) || (registered == NULL) || (registered != lean_link_alive(link))) {
         return false; /* fail-closed: no supervised EKF behind this link */
     }

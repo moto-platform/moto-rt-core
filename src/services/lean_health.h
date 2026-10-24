@@ -15,6 +15,12 @@
  * (a second snapshot_read_index() would). The comms flags are comms-task state, set by
  * app/comms right before the UDS server step.
  *
+ * Singleton assumption: one lean_tx_t (one lean link) per image, as the platform has one
+ * EKF. The state here is one static; a second lean_tx_t would share and overwrite it.
+ * lean_tx_open() calls lean_health_init() FIRST, before it validates its arguments or
+ * registers the TX buffer (fail-safe order): a failed or repeated open can never leave
+ * the record of an earlier open behind, it reads "no record" instead.
+ *
  * Static storage, no heap. The zero state (also after lean_health_init()) is "no record
  * since boot, no comms flag set": RECORD_FRESH, OFFSET_LEARNED and EKF_ALIVE_OK clear,
  * UNLEARNED_S UNKNOWN.
