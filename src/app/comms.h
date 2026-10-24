@@ -84,7 +84,9 @@ bool comms_ekf_registered(const comms_ekf_t* ekf);
 /* Boot only, after comms_ekf_register() and before comms_apply_filters(): opens 0x020
  * (lean_tx_open()) only when ekf supervises exactly link's alive counter (D-065
  * amendment, architecture-guard MAJOR-3). False otherwise: tx stays closed, no speed is
- * handed to the EKF and 0x020 never goes out (fail-closed). */
+ * handed to the EKF and 0x020 never goes out (fail-closed). The boot may abort on false, but
+ * need not for safety: comms_pass() reads a registered EKF with a closed lean as stalled
+ * (D-086, ISSUES E-22 (1)). */
 bool comms_open_lean(const comms_ekf_t* ekf, lean_tx_t* tx, lean_link_t* link);
 
 /* Applies the acceptance filters (and the platform port's dedicated TX buffers) of both
@@ -96,7 +98,10 @@ bool comms_apply_filters(void);
 /* ekf: never NULL in a correct setup; NULL reads as a stalled EKF (DEGRADED, the safe
  * side), while a zeroed comms_ekf_t means "no EKF". lean: NULL or a closed lean_tx_t
  * means no 0x020. An open lean whose link counter is not ekf's counter sends no 0x020
- * and makes the heartbeat read a stalled EKF (D-065 amendment). */
+ * and makes the heartbeat read a stalled EKF (D-065 amendment). A registered EKF with no
+ * open lean (NULL, closed, or a failed lean_tx_open() at boot) reads as stalled too: the
+ * heartbeat is DEGRADED and 0xFD03 EKF_ALIVE_OK is clear (D-086, ISSUES E-22 (1)). A
+ * zeroed ekf (no EKF registered) with no lean is "no EKF", not stalled. */
 void comms_pass(uds_client_t* client, uds_server_t* server, vehicle_republish_t* republisher,
                 heartbeat_t* heartbeat, comms_ekf_t* ekf, lean_tx_t* lean);
 

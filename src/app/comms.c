@@ -96,7 +96,10 @@ void comms_pass(uds_client_t* client, uds_server_t* server, vehicle_republish_t*
     (void)can_if_dispatch(CAN_PORT_PLATFORM, COMMS_RX_PER_PASS);
     vehicle_republish_step(republisher);
     const bool stalled = ekf_stalled(ekf); /* sampled every pass */
-    const bool hb_stalled = stalled || (lean_open && !lean_supervised);
+    /* D-086, ISSUES E-22 (1): a registered EKF whose lean link is not open (a failed
+     * lean_tx_open(), or no lean at all) reads as a stalled EKF, whatever the boot did. */
+    const bool lean_missing = comms_ekf_registered(ekf) && !lean_open;
+    const bool hb_stalled = stalled || lean_missing || (lean_open && !lean_supervised);
     heartbeat_step(heartbeat, hb_stalled);
     lean_tx_step(active, timebase_now_ms());
     /* DID 0xFD03: the comms-side fields are comms-task state, set right before the server

@@ -21,6 +21,7 @@
 #include "moto_e2e.h"
 #include "platform.h"
 #include "platform_e2e.h"
+#include "uds_iso14229.h"
 #include "services/can_if.h"
 #include "services/can_sm.h"
 #include "services/diag.h"
@@ -555,12 +556,12 @@ static void test_REQ_FD03_an_unlearnable_gyro_shows_rejects_and_the_unlearned_ti
                                  fd03_u16(PLATFORM_UDS_LEAN_HEALTH_UNLEARNED_S_BYTE));
 }
 
-/* MINOR-1: a registered, running EKF but lean_tx_open() failing at the dedicated TX
- * registration (the boot must treat that as fatal, cornering README). What the code gives:
- * no record ever reaches the copy, so RECORD_FRESH, OFFSET_LEARNED clear and UNLEARNED_S
- * UNKNOWN, while EKF_ALIVE_OK is SET (the EKF is registered and runs; the closed link is
- * not an alive fault). 0x020 is never sent. */
-static void test_REQ_FD03_a_failed_lean_tx_open_reads_no_record_with_alive_ok_set_MINOR_1(void)
+/* MINOR-1, E-22 (1): a registered, running EKF but lean_tx_open() failing at the dedicated
+ * TX registration. The comms pass reads that as a stalled EKF whatever the boot did (user
+ * 2026-10-24): no record ever reaches the copy, so RECORD_FRESH, OFFSET_LEARNED and
+ * EKF_ALIVE_OK are clear and UNLEARNED_S is UNKNOWN, the heartbeat reads DEGRADED after
+ * INIT, and 0x020 is never sent (safety-node falls back on its timeout, D-042). */
+static void test_REQ_FD03_a_failed_lean_tx_open_reads_no_record_alive_ok_clear_and_degraded_MINOR_1(void)
 {
     TEST_ASSERT_TRUE(comms_ekf_register(&ekf, lean_link_alive(&link)));
     TEST_ASSERT_EQUAL(CAN_IF_OK, can_if_register_tx_dedicated(CAN_PORT_PLATFORM, PLATFORM_EKF_LEAN_FRAME_ID,
@@ -570,10 +571,48 @@ static void test_REQ_FD03_a_failed_lean_tx_open_reads_no_record_with_alive_ok_se
     TEST_ASSERT_TRUE(comms_apply_filters());
     const seen_t s = run(3000u, 54u, 1u);
     TEST_ASSERT_EQUAL_UINT32(0u, s.lean_frames);
-    TEST_ASSERT_EQUAL_UINT32(s.hb_frames, s.hb_normal + 1u); /* heartbeat: all NORMAL but INIT */
-    TEST_ASSERT_EQUAL_HEX8(M_ALIVE_OK, fd03_flags());
+    TEST_ASSERT_EQUAL_UINT32(0u, s.hb_normal);
+    TEST_ASSERT_EQUAL_UINT32(s.hb_frames - 1u, s.hb_degraded); /* all DEGRADED but INIT */
+    TEST_ASSERT_EQUAL_HEX8(0u, fd03_flags());
     TEST_ASSERT_EQUAL_UINT16(PLATFORM_UDS_LEAN_HEALTH_UNLEARNED_S_UNKNOWN,
                              fd03_u16(PLATFORM_UDS_LEAN_HEALTH_UNLEARNED_S_BYTE));
+}
+
+/* E-22 (1): the same without any lean sender handed to the pass. */
+static void test_REQ_FD03_a_registered_ekf_with_a_null_lean_sender_reads_degraded_and_not_alive(void)
+{
+    TEST_ASSERT_TRUE(comms_ekf_register(&ekf, lean_link_alive(&link)));
+    TEST_ASSERT_TRUE(comms_apply_filters());
+    uint32_t normal = 0u;
+    uint32_t degraded = 0u;
+    uint32_t frames = 0u;
+    uint32_t lean_frames = 0u;
+    for (uint32_t i = 0u; i < 1000u; i++) {
+        const uint32_t now = timebase_now_ms();
+        feed_imu(now);
+        if ((now % EKF_CYCLE_MS) == 0u) {
+            lean_ekf_step(&lean, now); /* the EKF runs: only the missing sender is wrong */
+        }
+        sim_ecu_step(&ecu, now);
+        comms_pass(&client, &server, &republisher, &heartbeat, &ekf, NULL);
+        can_frame_t got;
+        while (vbus_recv(&bus_p, node_ppeer, &got) == CAN_PORT_OK) {
+            lean_frames += (got.id == PLATFORM_EKF_LEAN_FRAME_ID) ? 1u : 0u;
+            if (got.id == PLATFORM_HEARTBEAT_RT_CORE_FRAME_ID) {
+                frames++;
+                struct platform_heartbeat_rt_core_t hb;
+                sim_listener_heartbeat_decode(got.data, &hb);
+                normal += (hb.node_mode == PLATFORM_HEARTBEAT_RT_CORE_NODE_MODE_NORMAL_CHOICE) ? 1u : 0u;
+                degraded += (hb.node_mode == PLATFORM_HEARTBEAT_RT_CORE_NODE_MODE_DEGRADED_CHOICE) ? 1u : 0u;
+            }
+        }
+        hal_time_host_advance(1u);
+    }
+    TEST_ASSERT_EQUAL_UINT32(0u, normal);
+    TEST_ASSERT_GREATER_THAN_UINT32(0u, frames);
+    TEST_ASSERT_EQUAL_UINT32(frames - 1u, degraded); /* every frame but INIT (N-2) */
+    TEST_ASSERT_EQUAL_UINT32(0u, lean_frames);
+    TEST_ASSERT_EQUAL_UINT8(0u, fd03_flags() & M_ALIVE_OK);
 }
 
 /* (d) Polling 0xFD03 in every comms pass for 10 s changes nothing on the bus: the 0x020
@@ -587,9 +626,73 @@ typedef struct {
     uint8_t invalid[POLL_FRAMES];
 } lean_trace_t;
 
-static void trace_run(bool poll, lean_trace_t* tr)
+typedef enum { POLL_NONE, POLL_DIRECT, POLL_UDS } poll_mode_t;
+
+/* The 0x62 FD03 answers the test peer collected (POLL_UDS). */
+typedef struct {
+    uint32_t requests;
+    uint32_t answers;
+    uint32_t bad; /* anything that is not a complete positive 0xFD03 answer */
+} uds_poll_t;
+
+#define POLL_PERIOD_MS 5u
+#define FD03_RESPONSE_LEN (3u + PLATFORM_UDS_DID_LEAN_HEALTH_LENGTH)
+#define ISOTP_PCI_FF 0x10u
+#define ISOTP_PCI_CF 0x20u
+#define ISOTP_FC_CTS 0x30u
+
+static void peer_send(uint8_t pci_or_len, const uint8_t* body, uint8_t body_len)
 {
+    can_frame_t f;
+    memset(&f, 0, sizeof f);
+    memset(f.data, PLATFORM_UDS_PADDING_BYTE, sizeof f.data);
+    f.id = PLATFORM_UDS_PHYS_REQUEST_ID;
+    f.dlc = PLATFORM_UDS_FRAME_DLC;
+    f.data[0] = pci_or_len;
+    memcpy(&f.data[1], body, body_len);
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_send(&bus_p, node_ppeer, &f));
+}
+
+/* The peer's request: ReadDataByIdentifier 0xFD03 as a Single Frame. */
+static void peer_request_fd03(uds_poll_t* up)
+{
+    const uint8_t req[] = {UDS_SID_READ_DATA_BY_IDENTIFIER, (uint8_t)(PLATFORM_UDS_DID_LEAN_HEALTH >> 8u),
+                           (uint8_t)(PLATFORM_UDS_DID_LEAN_HEALTH & 0xFFu)};
+    peer_send((uint8_t)sizeof req, req, (uint8_t)sizeof req);
+    up->requests++;
+}
+
+/* One frame of the server's physical answer. The 8-byte answer is segmented: FF (6 bytes),
+ * our flow control, CF (the rest). */
+static void peer_on_response(const can_frame_t* f, uds_poll_t* up, uint8_t* msg, uint32_t* have)
+{
+    const uint8_t pci = (uint8_t)(f->data[0] & 0xF0u);
+    if (pci == ISOTP_PCI_FF) {
+        const uint8_t fc[] = {PLATFORM_UDS_BLOCK_SIZE, PLATFORM_UDS_ST_MIN_MS};
+        up->bad += ((((uint32_t)(f->data[0] & 0x0Fu) << 8u) | f->data[1]) != FD03_RESPONSE_LEN) ? 1u : 0u;
+        memcpy(msg, &f->data[2], 6u);
+        *have = 6u;
+        peer_send(ISOTP_FC_CTS, fc, (uint8_t)sizeof fc);
+    } else if ((pci == ISOTP_PCI_CF) && (*have > 0u) && (*have < FD03_RESPONSE_LEN)) {
+        memcpy(&msg[*have], &f->data[1], FD03_RESPONSE_LEN - *have);
+        *have = FD03_RESPONSE_LEN;
+        const bool ok = (msg[0] == (UDS_SID_READ_DATA_BY_IDENTIFIER + UDS_POSITIVE_RESPONSE_OFFSET)) &&
+                        (msg[1] == (uint8_t)(PLATFORM_UDS_DID_LEAN_HEALTH >> 8u)) &&
+                        (msg[2] == (uint8_t)(PLATFORM_UDS_DID_LEAN_HEALTH & 0xFFu));
+        up->answers += ok ? 1u : 0u;
+        up->bad += ok ? 0u : 1u;
+        *have = 0u;
+    } else {
+        up->bad++; /* a negative response, a stray CF or an unexpected PCI */
+    }
+}
+
+static void trace_run(poll_mode_t mode, lean_trace_t* tr, uds_poll_t* up)
+{
+    uint8_t msg[FD03_RESPONSE_LEN];
+    uint32_t have = 0u;
     memset(tr, 0, sizeof *tr);
+    memset(up, 0, sizeof *up);
     ride_to_estimated();
     for (uint32_t i = 0u; i < 10000u; i++) {
         const uint32_t now = timebase_now_ms();
@@ -599,11 +702,17 @@ static void trace_run(bool poll, lean_trace_t* tr)
         }
         sim_ecu_step(&ecu, now);
         comms_pass(&client, &server, &republisher, &heartbeat, &ekf, &tx);
-        if (poll) {
+        if (mode == POLL_DIRECT) {
             (void)fd03_flags();
+        }
+        if ((mode == POLL_UDS) && ((now % POLL_PERIOD_MS) == 0u)) {
+            peer_request_fd03(up);
         }
         can_frame_t got;
         while (vbus_recv(&bus_p, node_ppeer, &got) == CAN_PORT_OK) {
+            if ((got.id == PLATFORM_UDS_PHYS_RESPONSE_ID) && (mode == POLL_UDS)) {
+                peer_on_response(&got, up, msg, &have);
+            }
             if ((got.id == PLATFORM_EKF_LEAN_FRAME_ID) && (tr->n < POLL_FRAMES)) {
                 tr->t[tr->n] = now;
                 tr->c[tr->n] = (uint8_t)(got.data[MOTO_E2E_COUNTER_OFFSET] & MOTO_E2E_COUNTER_MASK);
@@ -615,23 +724,55 @@ static void trace_run(bool poll, lean_trace_t* tr)
     }
 }
 
+static void assert_no_invalid(const lean_trace_t* t)
+{
+    for (uint32_t i = 0u; i < t->n; i++) {
+        TEST_ASSERT_EQUAL_UINT8(0u, t->invalid[i]);
+    }
+}
+
+static void assert_same_trace(const lean_trace_t* plain, const lean_trace_t* polled)
+{
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT32(10000u / EKF_CYCLE_MS - 1u, plain->n);
+    TEST_ASSERT_EQUAL_UINT32(plain->n, polled->n);
+    TEST_ASSERT_EQUAL_MEMORY(plain->t, polled->t, sizeof plain->t);
+    TEST_ASSERT_EQUAL_MEMORY(plain->c, polled->c, sizeof plain->c);
+    TEST_ASSERT_EQUAL_MEMORY(plain->invalid, polled->invalid, sizeof plain->invalid);
+    assert_no_invalid(plain);
+    assert_no_invalid(polled);
+    for (uint32_t i = 1u; i < plain->n; i++) { /* counter +1 per frame, fixed cycle */
+        TEST_ASSERT_EQUAL_UINT32(EKF_CYCLE_MS, polled->t[i] - polled->t[i - 1u]);
+        TEST_ASSERT_EQUAL_UINT8((polled->c[i - 1u] + 1u) & MOTO_E2E_COUNTER_MASK, polled->c[i]);
+    }
+}
+
 static void test_REQ_FD03_polling_every_pass_leaves_the_0x020_sequence_and_cycle_unchanged(void)
 {
     static lean_trace_t plain;
     static lean_trace_t polled;
-    trace_run(false, &plain);
+    uds_poll_t up;
+    trace_run(POLL_NONE, &plain, &up);
     tearDown();
     setUp();
-    trace_run(true, &polled);
-    TEST_ASSERT_GREATER_OR_EQUAL_UINT32(10000u / EKF_CYCLE_MS - 1u, plain.n);
-    TEST_ASSERT_EQUAL_UINT32(plain.n, polled.n);
-    TEST_ASSERT_EQUAL_MEMORY(plain.t, polled.t, sizeof plain.t);
-    TEST_ASSERT_EQUAL_MEMORY(plain.c, polled.c, sizeof plain.c);
-    TEST_ASSERT_EQUAL_MEMORY(plain.invalid, polled.invalid, sizeof plain.invalid);
-    for (uint32_t i = 1u; i < plain.n; i++) { /* counter +1 per frame, fixed cycle */
-        TEST_ASSERT_EQUAL_UINT32(EKF_CYCLE_MS, polled.t[i] - polled.t[i - 1u]);
-        TEST_ASSERT_EQUAL_UINT8((polled.c[i - 1u] + 1u) & MOTO_E2E_COUNTER_MASK, polled.c[i]);
-    }
+    trace_run(POLL_DIRECT, &polled, &up);
+    assert_same_trace(&plain, &polled);
+}
+
+/* E-22 (2): real 0x22 FD03 requests through the UDS server in comms_pass(), every 5 ms for
+ * 10 s: the 0x020 trace is identical to the plain run and none of its frames is INVALID. */
+static void test_REQ_FD03_real_0x22_requests_every_5_ms_leave_the_0x020_trace_unchanged(void)
+{
+    static lean_trace_t plain;
+    static lean_trace_t polled;
+    uds_poll_t up;
+    trace_run(POLL_NONE, &plain, &up);
+    tearDown();
+    setUp();
+    trace_run(POLL_UDS, &polled, &up);
+    assert_same_trace(&plain, &polled);
+    TEST_ASSERT_EQUAL_UINT32(10000u / POLL_PERIOD_MS, up.requests);
+    TEST_ASSERT_EQUAL_UINT32(0u, up.bad);
+    TEST_ASSERT_EQUAL_UINT32(up.requests, up.answers);
 }
 
 int main(void)
@@ -660,7 +801,9 @@ int main(void)
     RUN_TEST(test_REQ_FD03_a_latched_output_producer_fault_reads_not_fresh_with_alive_ok);
     RUN_TEST(test_REQ_FD03_the_comms_and_ekf_side_snapshot_latches_each_have_their_flag);
     RUN_TEST(test_REQ_FD03_an_unlearnable_gyro_shows_rejects_and_the_unlearned_time);
-    RUN_TEST(test_REQ_FD03_a_failed_lean_tx_open_reads_no_record_with_alive_ok_set_MINOR_1);
+    RUN_TEST(test_REQ_FD03_a_failed_lean_tx_open_reads_no_record_alive_ok_clear_and_degraded_MINOR_1);
+    RUN_TEST(test_REQ_FD03_a_registered_ekf_with_a_null_lean_sender_reads_degraded_and_not_alive);
     RUN_TEST(test_REQ_FD03_polling_every_pass_leaves_the_0x020_sequence_and_cycle_unchanged);
+    RUN_TEST(test_REQ_FD03_real_0x22_requests_every_5_ms_leave_the_0x020_trace_unchanged);
     return UNITY_END();
 }

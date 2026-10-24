@@ -4,11 +4,14 @@
  * the republisher, the heartbeat and the server, on the in-process buses with a manual
  * clock. The EKF task is simulated by bumping its alive counter every gen/ EKF cycle.
  * What a platform receiver sees on 0x081 is checked: NODE_MODE NORMAL only while the
- * registered EKF completes its cycles, DEGRADED when it stalls or never ran.
+ * registered EKF completes its cycles, DEGRADED when it stalls or never ran, or when its
+ * lean link is not open (D-086, ISSUES E-22 (1)). The EKF counter is the lean link's,
+ * as at boot.
  */
 #include "app/comms.h"
 #include "app/host/sim_ecu.h"
 #include "app/host/sim_listener.h"
+#include "features/cornering/lean.h"
 #include "hal/host/can_port_host.h"
 #include "hal/host/hal_time_host.h"
 #include "platform.h"
@@ -36,7 +39,9 @@ static uds_server_t server;
 static vehicle_republish_t republisher;
 static heartbeat_t heartbeat;
 static comms_ekf_t ekf;
-static alive_counter_t ekf_alive;
+static lean_link_t lnk;
+static lean_tx_t tx;
+static lean_tx_t* lean_arg; /* what the pass gets as its lean sender */
 static sim_ecu_t ecu;
 
 typedef struct {
@@ -69,15 +74,28 @@ void setUp(void)
     TEST_ASSERT_EQUAL(ISOTP_OK, uds_server_open(&server));
     TEST_ASSERT_TRUE(vehicle_republish_open(&republisher));
     TEST_ASSERT_TRUE(heartbeat_open(&heartbeat));
-    TEST_ASSERT_TRUE(comms_apply_filters());
     comms_ekf_init(&ekf);
-    alive_init(&ekf_alive);
+    lean_link_init(&lnk);
+    memset(&tx, 0, sizeof tx);
+    lean_arg = &tx;
 }
 
 void tearDown(void)
 {
     can_port_host_unbind_all();
     hal_time_host_use_monotonic();
+}
+
+/* The boot order of the cornering README: register the lean link's counter, open 0x020 (or
+ * not), then the filters. */
+static void start(bool open_lean)
+{
+    TEST_ASSERT_TRUE(comms_ekf_register(&ekf, lean_link_alive(&lnk)));
+    if (open_lean) {
+        TEST_ASSERT_TRUE(comms_open_lean(&ekf, &tx, &lnk));
+        TEST_ASSERT_TRUE(tx.opened);
+    }
+    TEST_ASSERT_TRUE(comms_apply_filters());
 }
 
 /* ms comms passes of 1 ms; the simulated EKF bumps its counter every EKF cycle while
@@ -89,10 +107,10 @@ static hb_seen_t run(uint32_t ms, bool ekf_runs, comms_ekf_t* e)
     for (uint32_t i = 0u; i < ms; i++) {
         const uint32_t now = timebase_now_ms();
         if (ekf_runs && ((now % EKF_CYCLE_MS) == 0u)) {
-            alive_bump(&ekf_alive); /* the EKF task completed a cycle */
+            alive_bump(&lnk.alive); /* the EKF task completed a cycle */
         }
         sim_ecu_step(&ecu, now);
-        comms_pass(&client, &server, &republisher, &heartbeat, e, NULL);
+        comms_pass(&client, &server, &republisher, &heartbeat, e, lean_arg);
         can_frame_t got;
         while (vbus_recv(&bus_p, node_ppeer, &got) == CAN_PORT_OK) {
             if (got.id != PLATFORM_HEARTBEAT_RT_CORE_FRAME_ID) {
@@ -118,6 +136,7 @@ static hb_seen_t run(uint32_t ms, bool ekf_runs, comms_ekf_t* e)
 static void test_no_registered_ekf_leaves_node_mode_as_before(void)
 {
     TEST_ASSERT_FALSE(comms_ekf_registered(&ekf));
+    TEST_ASSERT_TRUE(comms_apply_filters());
     const hb_seen_t s = run(1000u, false, &ekf);
     TEST_ASSERT_EQUAL_UINT32(0u, s.degraded);
     TEST_ASSERT_EQUAL_UINT32(s.frames - 1u, s.normal); /* all but the INIT frame */
@@ -125,7 +144,7 @@ static void test_no_registered_ekf_leaves_node_mode_as_before(void)
 
 static void test_a_registered_ekf_that_never_ran_reads_degraded_from_the_first_cycle(void)
 {
-    TEST_ASSERT_TRUE(comms_ekf_register(&ekf, &ekf_alive));
+    start(true);
     TEST_ASSERT_TRUE(comms_ekf_registered(&ekf));
     const hb_seen_t s = run(1000u, false, &ekf);
     TEST_ASSERT_EQUAL_UINT32(0u, s.normal);
@@ -136,16 +155,16 @@ static void test_a_registered_ekf_that_never_ran_reads_degraded_from_the_first_c
 static void test_the_baseline_is_the_count_at_registration_not_zero(void)
 {
     for (uint32_t k = 0u; k < 5u; k++) {
-        alive_bump(&ekf_alive); /* the EKF ran before it was registered */
+        alive_bump(&lnk.alive); /* the EKF ran before it was registered */
     }
-    TEST_ASSERT_TRUE(comms_ekf_register(&ekf, &ekf_alive));
+    start(true);
     const hb_seen_t s = run(1000u, false, &ekf);
     TEST_ASSERT_EQUAL_UINT32(0u, s.normal); /* a nonzero count is no proof of life */
 }
 
 static void test_a_running_ekf_reads_normal_and_a_stall_degrades_within_the_window(void)
 {
-    TEST_ASSERT_TRUE(comms_ekf_register(&ekf, &ekf_alive));
+    start(true);
     hb_seen_t s = run(1000u, true, &ekf);
     TEST_ASSERT_EQUAL_UINT32(0u, s.degraded);
     TEST_ASSERT_EQUAL_UINT32(s.frames - 1u, s.normal);
@@ -172,7 +191,7 @@ static void test_a_running_ekf_reads_normal_and_a_stall_degrades_within_the_wind
 
 static void test_one_late_ekf_cycle_is_not_a_stall(void)
 {
-    TEST_ASSERT_TRUE(comms_ekf_register(&ekf, &ekf_alive));
+    start(true);
     (void)run(500u, true, &ekf); /* last bump 20 ms before the end */
     /* two cycles missed: the next bump comes 3 cycles = the window after the last, not more */
     hb_seen_t s = run(2u * EKF_CYCLE_MS, false, &ekf);
@@ -183,6 +202,7 @@ static void test_one_late_ekf_cycle_is_not_a_stall(void)
 
 static void test_a_missing_supervision_object_reads_degraded(void)
 {
+    TEST_ASSERT_TRUE(comms_apply_filters());
     const hb_seen_t s = run(1000u, true, NULL);
     TEST_ASSERT_EQUAL_UINT32(0u, s.normal);
     TEST_ASSERT_EQUAL_UINT32(s.frames - 1u, s.degraded);
@@ -192,14 +212,43 @@ static void test_register_refuses_null_and_a_second_counter(void)
 {
     alive_counter_t other;
     alive_init(&other);
-    TEST_ASSERT_FALSE(comms_ekf_register(NULL, &ekf_alive));
+    TEST_ASSERT_FALSE(comms_ekf_register(NULL, &lnk.alive));
     TEST_ASSERT_FALSE(comms_ekf_register(&ekf, NULL));
     TEST_ASSERT_FALSE(comms_ekf_registered(&ekf));
     TEST_ASSERT_FALSE(comms_ekf_registered(NULL));
-    TEST_ASSERT_TRUE(comms_ekf_register(&ekf, &ekf_alive));
+    TEST_ASSERT_TRUE(comms_ekf_register(&ekf, &lnk.alive));
     TEST_ASSERT_FALSE(comms_ekf_register(&ekf, &other));
-    TEST_ASSERT_EQUAL_PTR(&ekf_alive, ekf.counter); /* the first stays */
+    TEST_ASSERT_EQUAL_PTR(&lnk.alive, ekf.counter); /* the first stays */
     comms_ekf_init(NULL);                          /* harmless */
+}
+
+/* D-086, ISSUES E-22 (1): a registered EKF whose lean link is not open reads as a
+ * stalled EKF, even while its counter keeps changing. */
+static void test_a_registered_ekf_without_a_lean_sender_reads_degraded_E22(void)
+{
+    start(false);
+    lean_arg = NULL;
+    const hb_seen_t s = run(1000u, true, &ekf);
+    TEST_ASSERT_EQUAL_UINT32(0u, s.normal);
+    TEST_ASSERT_EQUAL_UINT32(s.frames - 1u, s.degraded);
+}
+
+static void test_a_registered_ekf_with_a_never_opened_lean_tx_reads_degraded_E22(void)
+{
+    start(false);
+    TEST_ASSERT_FALSE(tx.opened);
+    const hb_seen_t s = run(1000u, true, &ekf);
+    TEST_ASSERT_EQUAL_UINT32(0u, s.normal);
+    TEST_ASSERT_EQUAL_UINT32(s.frames - 1u, s.degraded);
+}
+
+static void test_no_ekf_and_no_lean_sender_stays_normal_E22(void)
+{
+    TEST_ASSERT_TRUE(comms_apply_filters());
+    lean_arg = NULL;
+    const hb_seen_t s = run(1000u, true, &ekf);
+    TEST_ASSERT_EQUAL_UINT32(0u, s.degraded);
+    TEST_ASSERT_EQUAL_UINT32(s.frames - 1u, s.normal);
 }
 
 int main(void)
@@ -212,5 +261,8 @@ int main(void)
     RUN_TEST(test_one_late_ekf_cycle_is_not_a_stall);
     RUN_TEST(test_a_missing_supervision_object_reads_degraded);
     RUN_TEST(test_register_refuses_null_and_a_second_counter);
+    RUN_TEST(test_a_registered_ekf_without_a_lean_sender_reads_degraded_E22);
+    RUN_TEST(test_a_registered_ekf_with_a_never_opened_lean_tx_reads_degraded_E22);
+    RUN_TEST(test_no_ekf_and_no_lean_sender_stays_normal_E22);
     return UNITY_END();
 }

@@ -19,7 +19,7 @@ Every ID, length, choice value, cycle time and E2E parameter comes from gen/ (`p
   - **DEGRADED** while `heartbeat_fault_active()`:
     - a DTC monitor's last result is failed (`diag_fault_active()`: U0100-00 VEHICLE_ECU_COMM_LOST, U3000-00 VEHICLE_TESTER_LATCHED, U0001-88 VEHICLE_BUS_OFF_LATCHED), or
     - one of these conditions holds although its monitor did not run (architecture-guard MAJOR-1: U3000-00 supervision and U0001-88 are evaluated in `uds_server_step()`): the vehicle tester status is latched or reads NOT_RUNNING (missing or stale, `diag_vehicle_tester()`), or the vehicle CAN port is latched (`can_sm`). An unknown port state is not a latch: the UDS client then sees no answers and fails U0100-00 on its own, or
-    - **the EKF stalled** (`ekf_stalled`, D-064 item 4, D-065 item 2): `app/comms` samples the registered EKF's alive counter (`services/alive`) every pass and passes the verdict to `heartbeat_step()`. Stalled means the counter did not change for more than `COMMS_EKF_ALIVE_WINDOW_MS` (gen/ `PLATFORM_EKF_LEAN_E2E_TIMEOUT_MS`, 60 ms = three EKF cycles), or never changed since the EKF was registered (registered but never ran: no grace time). It is not a DTC: it degrades NODE_MODE but adds no onset. No EKF is registered until D-065 PR 3, so today it is always false; a NULL supervision object reads as stalled.
+    - **the EKF stalled** (`ekf_stalled`, D-064 item 4, D-065 item 2): `app/comms` samples the registered EKF's alive counter (`services/alive`) every pass and passes the verdict to `heartbeat_step()`. Stalled means the counter did not change for more than `COMMS_EKF_ALIVE_WINDOW_MS` (gen/ `PLATFORM_EKF_LEAN_E2E_TIMEOUT_MS`, 60 ms = three EKF cycles), or never changed since the EKF was registered (registered but never ran: no grace time). It is not a DTC: it degrades NODE_MODE but adds no onset. Without a registered EKF it is false; a NULL supervision object reads as stalled, and so does a registered EKF whose lean sender is not open (a failed `lean_tx_open()` or no sender; D-086, ISSUES E-22 (1)).
   - **NORMAL** otherwise.
   - SAFE_STATE, BOOTLOADER and DIAGNOSTIC are not sent until they are defined.
   - **NORMAL attests the EKF only once it is registered.** It attests that the comms pass runs, no DTC monitor reports a fault and, with an EKF registered in `app/comms`, that the EKF completed a cycle within the window. The heartbeat never includes cornering/: it only gets the bool.
@@ -64,7 +64,7 @@ D-064 item 4 is now mechanical on the heartbeat side: `heartbeat_fault_active()`
 | platform port bus-off / stalled | cycles dropped / retried, only the newest frame waits | E2E timeout or INITIAL resync, never OK across the gap |
 | ECU silent, client latched or not running, vehicle port latched | DEGRADED | fallback (D-042) |
 | UDS server not stepped | DEGRADED still follows the conditions (read directly) | fallback |
-| registered EKF stalls or never ran | DEGRADED within 60 ms + one cycle; NORMAL after its next complete cycle | fallback (D-042) |
+| registered EKF stalls or never ran, or its lean sender is not open | DEGRADED within 60 ms + one cycle; NORMAL after its next complete cycle | fallback (D-042) |
 
 ## Memory
 
@@ -89,7 +89,7 @@ D-064 item 4 is now mechanical on the heartbeat side: `heartbeat_fault_active()`
   - after a stall only the newest frame goes out, never OK across the gap; a platform bus-off drops cycles and the receiver resyncs INITIAL
   - a refused open (sealed, already listed) and NULL send nothing
 - **`tests/host/test_diag.c`:** onset counting, clear and init.
-- **`tests/host/test_comms_ekf.c`** (real comms pass, client, ECU, server; the EKF simulated by bumping its counter every gen/ EKF cycle): no EKF registered leaves NODE_MODE as before; a registered EKF that never ran reads DEGRADED from the first cycle, also when its count was nonzero at registration; a running EKF reads NORMAL, a stall reads DEGRADED after more than the window and within one heartbeat cycle, a resume reads NORMAL within one cycle; two missed EKF cycles are not a stall; a NULL supervision object reads DEGRADED; NULL or a second registration is refused.
+- **`tests/host/test_comms_ekf.c`** (real comms pass, client, ECU, server; the EKF simulated by bumping its counter every gen/ EKF cycle): no EKF registered leaves NODE_MODE as before; a registered EKF that never ran reads DEGRADED from the first cycle, also when its count was nonzero at registration; a running EKF reads NORMAL, a stall reads DEGRADED after more than the window and within one heartbeat cycle, a resume reads NORMAL within one cycle; two missed EKF cycles are not a stall; a NULL supervision object reads DEGRADED; a registered EKF with no open lean sender (NULL or never opened) reads DEGRADED while a zeroed one with no sender stays NORMAL (E-22 (1)); NULL or a second registration is refused.
 - **`tests/host/test_alive.c`**, **`test_snapshot.c`**, **`test_snapshot_stress.c`** (two threads, also under ThreadSanitizer): the services the EKF supervision and exchange are built on (`src/services/README.md`).
 - **`tests/host/test_can_sm.c`** (real comms pass, client and server stepped):
   - 0x081 at its cycle time next to the client, the server and the republisher
