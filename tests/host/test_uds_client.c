@@ -17,6 +17,7 @@
 #include "services/can_if.h"
 #include "services/can_sm.h"
 #include "services/diag.h"
+#include "services/tester_epoch.h"
 #include "services/timebase.h"
 #include "services/vehicle_signals.h"
 #include "platform_limits.h"
@@ -262,6 +263,8 @@ static void test_sil_ecu_off_goes_absent_and_stale_then_recovers(void)
 {
     run(1000u, false);
     TEST_ASSERT_TRUE(all_valid(timebase_now_ms()));
+    TEST_ASSERT_TRUE(tester_epoch_get().open); /* D-087: the glue publishes the stop epoch */
+    TEST_ASSERT_EQUAL_UINT16(1u, tester_epoch_get().counter);
     ecu.silent = true; /* ignition off */
     const uint32_t off = timebase_now_ms();
     uint32_t max_stale = 0u;
@@ -280,6 +283,8 @@ static void test_sil_ecu_off_goes_absent_and_stale_then_recovers(void)
     TEST_ASSERT_FALSE(uds_client_ecu_present(&client));
     TEST_ASSERT_FALSE(vehicle_signals_ecu_present());
     TEST_ASSERT_FALSE(uds_client_session_up(&client));
+    TEST_ASSERT_FALSE(tester_epoch_get().open); /* the epoch ended with the ECU */
+    TEST_ASSERT_EQUAL_UINT16(1u, tester_epoch_get().counter);
     /* While absent: only session attempts and tester present, no DID reads. */
     const uint32_t absent_from = timebase_now_ms();
     run(5000u, false);
@@ -293,6 +298,8 @@ static void test_sil_ecu_off_goes_absent_and_stale_then_recovers(void)
     run(VEHICLE_CL250_SESSION_RETRY_INTERVAL_MS + 200u, false);
     TEST_ASSERT_TRUE(uds_client_session_up(&client));
     TEST_ASSERT_TRUE(uds_client_ecu_present(&client));
+    TEST_ASSERT_TRUE(tester_epoch_get().open); /* a new epoch, a new ride */
+    TEST_ASSERT_EQUAL_UINT16(2u, tester_epoch_get().counter);
     /* The five verified DIDs are back at once; the unverified ones were armed by the new
      * session (D-068 item 2) and are all read again within a few ms. A read that was
      * pending when the ECU went absent and timed out just after it keeps its old stamp

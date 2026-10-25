@@ -790,6 +790,7 @@ bool uds_client_core_on_indication(uds_client_core_t* c, uint32_t now_ms,
         count(&c->stats.session_starts);
         if (!c->epoch_open) {
             c->epoch_open = true;
+            c->epoch_counter++; /* a new stop epoch: a new ride for the derived signals */
             arm_unverified_reads(c);
             dtc_snapshot_core_start_epoch(&c->dtc); /* D-080: the key-on run */
             c->dtc_answer_ready = false;
@@ -908,4 +909,15 @@ uint8_t uds_client_core_pending_response_sid(const uds_client_core_t* c)
 const uds_client_stats_t* uds_client_core_stats(const uds_client_core_t* c)
 {
     return (c == NULL) ? NULL : &c->stats;
+}
+
+bool uds_client_core_epoch(const uds_client_core_t* c, uint16_t* counter)
+{
+    if (c == NULL) {
+        return false;
+    }
+    if (counter != NULL) {
+        *counter = c->epoch_counter;
+    }
+    return c->epoch_open;
 }

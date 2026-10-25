@@ -22,3 +22,9 @@ cd moto-server && uv run moto-server golden --out ../moto-rt-core/tests/host/vec
   keeps the same hashes in `tests/golden/MANIFEST.sha256` and fails its CI when the reference
   changes without regenerating. Regenerate and commit here whenever that manifest changes.
 - Size about 1.3 MB; host tests only, never linked into the firmware.
+- Class B (C3 part 2a): `derived_vectors_b.h` (ride marker and closed-value row types) and
+  `derived_<scenario>_b.h`: the rides table is the epoch-marker table (start_ms opens a stop epoch,
+  end_ms ends it and the closed values of that ride are compared), one row per class-B scalar signal
+  (12) with its tolerance. The four single-ride scenarios replay the DID inputs of the class-A header
+  of the same name; `derived_two_rides_b.h` carries its own inputs (two rides and an ECU-absent gap).
+  `test_derived_ride` replays them. No GPS or sensor input.

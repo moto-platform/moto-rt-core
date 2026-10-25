@@ -23,6 +23,8 @@ void derived_init(void)
     }
     latest.pass = 0u;
     latest.published_ms = 0u;
+    latest.epoch_counter = 0u;
+    latest.epoch_open = 0u;
 }
 
 // cppcheck-suppress misra-c2012-8.7 ; DEV-002: called by the derived task (host program, H7) and the tests
@@ -37,7 +39,8 @@ void derived_step(uint32_t now_ms)
         inputs[i].value = latest.did[i].value;
         inputs[i].stamp_ms = latest.did[i].stamp_ms;
     }
-    derived_core_step(&core, now_ms, inputs);
+    const derived_epoch_t epoch = {true, latest.epoch_open != 0u, latest.epoch_counter};
+    derived_core_step_epoch(&core, now_ms, inputs, &epoch);
 }
 
 // cppcheck-suppress misra-c2012-8.7 ; DEV-002: called by the derived task (future logger) and the tests
@@ -49,6 +52,12 @@ bool derived_get(uint32_t sig, derived_out_t* out)
     }
     *out = *o;
     return true;
+}
+
+// cppcheck-suppress misra-c2012-8.7 ; DEV-002: called by the derived task (future logger) and the tests
+bool derived_ride_get(derived_ride_which_t which, uint32_t sig, derived_out_t* out)
+{
+    return derived_core_ride_out(&core, which, sig, out);
 }
 
 // cppcheck-suppress misra-c2012-8.7 ; DEV-002: tests and diagnostics

@@ -254,6 +254,7 @@ typedef struct {
     uint8_t rpm_run;          /* consecutive valid ENGINE_SPEED samples > 0 after that zero */
     bool engine_rearmed;      /* the engine-start re-ask happened in this stop epoch */
     bool epoch_open;          /* D-075 item 1: a stop epoch is running (a confirmation armed it) */
+    uint16_t epoch_counter;   /* D-087 item 2: bumped where an epoch opens; wraps */
 
     uint32_t last_poll_ms;    /* the step gap check (D-053) */
     bool polled;              /* last_poll_ms is set */
@@ -364,6 +365,10 @@ uds_client_req_kind_t uds_client_core_pending(const uds_client_core_t* c);
 uint8_t uds_client_core_pending_response_sid(const uds_client_core_t* c);
 
 const uds_client_stats_t* uds_client_core_stats(const uds_client_core_t* c);
+
+/* The stop epoch for the ride boundary of the derived signals (D-087 item 2): true while an
+ * epoch is running; *counter (may be NULL) changes at every epoch start. */
+bool uds_client_core_epoch(const uds_client_core_t* c, uint16_t* counter);
 
 #ifdef __cplusplus
 }

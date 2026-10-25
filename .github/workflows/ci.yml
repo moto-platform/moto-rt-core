@@ -137,6 +137,13 @@ jobs:
             echo "::error::only src/features/derived and src/app/host may include the derived headers"
             exit 1
           fi
+          # services/ sit below features/: the tester epoch and the derived hand-over include no
+          # feature header (the ride boundary reaches the derived task through the snapshot).
+          if grep -rnE '#include[[:space:]]+"features/' src/services/tester_epoch.c src/services/tester_epoch.h \
+              src/services/derived_inputs.c src/services/derived_inputs.h; then
+            echo "::error::services/tester_epoch and services/derived_inputs must not include features/"
+            exit 1
+          fi
           if grep -rnE --include='*.c' --include='*.h' 'derived_inputs_read[[:space:]]*\(' src \
               | grep -vE '^src/(features/derived/derived\.c|services/derived_inputs\.(c|h)):'; then
             echo "::error::derived_inputs_read() has one consumer call site: src/features/derived/derived.c"

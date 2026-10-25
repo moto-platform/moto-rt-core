@@ -3,6 +3,7 @@
 #include "platform_uds.h"
 #include "services/can_if.h"
 #include "services/diag.h"
+#include "services/tester_epoch.h"
 #include "services/timebase.h"
 #include "services/vehicle_signals.h"
 #include "vehicle_cl250.h"
@@ -64,6 +65,7 @@ isotp_status_t uds_client_open(uds_client_t* client)
     if (st != ISOTP_OK) {
         return st;
     }
+    tester_epoch_set(false, 0u); /* a new tester: no epoch yet */
     if ((can_if_register_rx(CAN_PORT_VEHICLE, VEHICLE_CL250_REQUEST_ID, REQUEST_IDS_EXTENDED,
                             on_foreign_request, NULL) != CAN_IF_OK) ||
         (can_if_register_rx(CAN_PORT_VEHICLE, VEHICLE_CL250_FALLBACK_REQUEST_ID,
@@ -256,6 +258,9 @@ void uds_client_step(uds_client_t* client)
     }
     const bool present = uds_client_core_ecu_present(&client->core, now);
     vehicle_signals_set_ecu_present(present);
+    uint16_t epoch_counter = 0u;
+    const bool epoch_open = uds_client_core_epoch(&client->core, &epoch_counter);
+    tester_epoch_set(epoch_open, epoch_counter); /* D-087: the ride boundary of the derived signals */
     report_diag(client, now, present);
 }
 

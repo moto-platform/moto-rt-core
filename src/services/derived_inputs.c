@@ -1,6 +1,7 @@
 #include "services/derived_inputs.h"
 
 #include "services/snapshot.h"
+#include "services/tester_epoch.h"
 #include "services/vehicle_signals.h"
 
 #include <stddef.h>
@@ -38,6 +39,9 @@ void derived_inputs_publish(uint32_t now_ms)
     pass_no++;
     rec->pass = pass_no;
     rec->published_ms = now_ms;
+    const tester_epoch_t epoch = tester_epoch_get(); /* the same record as the DIDs: one channel */
+    rec->epoch_counter = epoch.counter;
+    rec->epoch_open = epoch.open ? 1u : 0u;
     for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
         vehicle_signal_sample_t s;
         (void)memset(&s, 0, sizeof s); /* NONE */

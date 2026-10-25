@@ -33,6 +33,7 @@
 #define KIND_POINT (1u)
 #define KIND_INTEGRAL (2u)
 #define KIND_EVENT (3u)
+#define KIND_RIDE (4u)
 
 #define HALF_RANGE (0x7FFFFFFFu)
 
@@ -116,7 +117,8 @@ static uint32_t kind_of(uint32_t sig)
         kind = KIND_POINT;
         break;
     default:
-        kind = KIND_NONE; /* no formula in part 1 */
+        /* a class-B ride summary, or no formula yet */
+        kind = (derived_ride_slot(sig) != DERIVED_RIDE_NO_SLOT) ? KIND_RIDE : KIND_NONE;
         break;
     }
     return kind;
@@ -893,6 +895,9 @@ static void store(derived_core_t* c, uint32_t sig, uint32_t stamp, derived_flag_
     if ((sig == VEHICLE_CL250_DERIVED_VEHICLE_ACCEL) && (f == DERIVED_FLAG_NONE)) {
         ring_push(c, RING_ACCEL, value, stamp);
     }
+    if (c->ride.open && (f == DERIVED_FLAG_NONE)) {
+        derived_ride_class_a(&c->ride.acc, sig, value); /* the ride's last-valid / count / max */
+    }
 }
 
 /* ---- stop event --------------------------------------------------------------------------------- */
@@ -954,9 +959,12 @@ static void ingest(derived_core_t* c, uint32_t now, const derived_in_t* in)
     for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
         derived_did_t* const d = &c->did[i];
         d->fresh_now = false;
-        if (!in[i].present) {
+        if (d->ignore_valid && in[i].present && (in[i].stamp_ms == d->ignore_stamp_ms)) {
+            d->present = false; /* the old epoch's last sample, held by the producer */
+        } else if (!in[i].present) {
             d->present = false;
         } else {
+            d->ignore_valid = false;
             const bool is_new = (!d->present) || (in[i].stamp_ms != d->stamp_ms);
             d->present = true;
             d->value = in[i].value;
@@ -969,6 +977,9 @@ static void ingest(derived_core_t* c, uint32_t now, const derived_in_t* in)
                     d->first_ms = in[i].stamp_ms;
                 }
                 record_sample(c, i, in[i].value, in[i].stamp_ms);
+                if (c->ride.open) {
+                    derived_ride_sample(&c->ride.acc, i, in[i].value, in[i].stamp_ms);
+                }
             }
             const uint32_t a = now - d->stamp_ms;
             if ((a > c->max_stale_ms) && (a <= HALF_RANGE)) {
@@ -1026,29 +1037,97 @@ static void grid_step(derived_core_t* c, uint32_t sig, uint32_t now)
     }
 }
 
-void derived_core_step(derived_core_t* c, uint32_t now_ms, const derived_in_t* in)
+/* A new ride starts from a fresh class-A state (the reference evaluates every ride on its own):
+ * grids, integrals, windows, the altitude reference and the stop event restart, and the DID
+ * samples held now (the old epoch's) are ignored until a new sample arrives. Sequence
+ * counters keep counting. */
+static void reset_class_a(derived_core_t* c)
+{
+    for (uint32_t sig = 0u; sig < VEHICLE_CL250_DERIVED_COUNT; sig++) {
+        if (c->sched[sig].computed && (kind_of(sig) != KIND_RIDE)) {
+            derived_out_t* const o = &c->out[sig];
+            o->status = DERIVED_NO_DATA;
+            o->flag = DERIVED_FLAG_NONE;
+            o->value = 0.0f;
+            o->unranged = 0.0f;
+            c->sched[sig].armed = false;
+            c->sched[sig].start_ms = 0u;
+            c->sched[sig].next_ms = 0u;
+        }
+    }
+    for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
+        derived_did_t* const d = &c->did[i];
+        if (d->present) {
+            d->ignore_valid = true;
+            d->ignore_stamp_ms = d->stamp_ms;
+        }
+        d->present = false;
+        d->seen = false;
+        d->fresh_now = false;
+        d->lapsed = false;
+        d->first_ms = 0u;
+    }
+    (void)memset(c->integral, 0, sizeof c->integral);
+    (void)memset(&c->stop, 0, sizeof c->stop);
+    (void)memset(c->ring, 0, sizeof c->ring);
+    c->baro_ref = 0.0f;
+    c->baro_ref_set = false;
+}
+
+/*
+ * The ride follows the epoch (D-087 item 2): a changed counter (!=, any jump, wrap-safe) or
+ * a closed epoch closes the open ride at once, then an open epoch with no ride opens one.
+ * Close + reopen in one record (counter + 1, open still true) is therefore two events in
+ * this order. A power-down close is not handled (no persistence yet, D-045).
+ */
+static void epoch_step(derived_core_t* c, uint32_t now, const derived_epoch_t* e)
+{
+    derived_ride_t* const r = &c->ride;
+    r->last_now_ms = now;
+    if ((e != NULL) && e->known) {
+        if (r->open && ((!e->open) || (e->counter != r->counter))) {
+            derived_ride_close(r, now);
+        }
+        if ((!r->open) && e->open) {
+            reset_class_a(c);
+            derived_ride_begin(r, e->counter);
+        }
+    }
+}
+
+void derived_core_step_epoch(derived_core_t* c, uint32_t now_ms, const derived_in_t* in,
+                             const derived_epoch_t* epoch)
 {
     if ((c == NULL) || (in == NULL)) {
         return;
     }
     c->evals_step = 0u;
+    epoch_step(c, now_ms, epoch);
     ingest(c, now_ms, in);
     for (uint32_t sig = 0u; sig < VEHICLE_CL250_DERIVED_COUNT; sig++) {
         if (c->sched[sig].computed) {
             const uint32_t kind = kind_of(sig);
             if (kind == KIND_EVENT) {
                 stop_step(c, sig);
-            } else {
+            } else if (kind != KIND_RIDE) {
                 if (kind == KIND_INTEGRAL) {
                     integral_update(c, sig);
                 }
                 grid_step(c, sig, now_ms);
+            } else {
+                /* class B: accumulated from the samples and outputs above, read at the close */
             }
         }
     }
     if (c->evals_step > c->evals_max) {
         c->evals_max = c->evals_step;
     }
+}
+
+// cppcheck-suppress misra-c2012-8.7 ; DEV-002: the class-A-only step, called by the tests
+void derived_core_step(derived_core_t* c, uint32_t now_ms, const derived_in_t* in)
+{
+    derived_core_step_epoch(c, now_ms, in, NULL);
 }
 
 /* ---- init: which signals are computed ---------------------------------------------------------- */
@@ -1090,15 +1169,19 @@ static bool sizing_ok(uint32_t sig)
 static derived_nc_reason_t classify(const derived_core_t* c, uint32_t sig)
 {
     const vehicle_cl250_derived_t* const s = &vehicle_cl250_derived[sig];
+    const bool ride = (s->derived_class == VEHICLE_CL250_DERIVED_CLASS_RIDE);
     derived_nc_reason_t r = DERIVED_NC_NONE;
-    if (s->derived_class != VEHICLE_CL250_DERIVED_CLASS_LIVE) {
+    if ((s->derived_class != VEHICLE_CL250_DERIVED_CLASS_LIVE) && (!ride)) {
         r = DERIVED_NC_CLASS;
     } else if (!s->rt_core_ready) {
         r = DERIVED_NC_NOT_READY;
+    } else if (ride && ((s->elements != 1u) || (s->axis_count != 0u) || s->per_gear)) {
+        r = DERIVED_NC_ELEMENTS; /* binned or per-gear: more than a scalar state */
     } else if (kind_of(sig) == KIND_NONE) {
         r = DERIVED_NC_NO_FORMULA;
     } else if ((s->input_count == 0u) || (s->input_count > VEHICLE_CL250_DERIVED_INPUT_MAX) ||
-               ((!s->event) && (s->period_ms == 0u)) || ((kind_of(sig) == KIND_EVENT) ? (!s->event) : s->event)) {
+               ((!ride) && (!s->event) && (s->period_ms == 0u)) ||
+               ((kind_of(sig) == KIND_EVENT) ? (!s->event) : s->event)) {
         r = DERIVED_NC_GEN;
     } else {
         for (uint32_t k = 0u; k < (uint32_t)s->input_count; k++) {
@@ -1114,7 +1197,7 @@ static derived_nc_reason_t classify(const derived_core_t* c, uint32_t sig)
                     r = DERIVED_NC_INPUT;
                 }
             } else {
-                r = DERIVED_NC_INPUT; /* a sensor: part 1 has none */
+                r = DERIVED_NC_INPUT; /* a sensor: none is computed yet */
             }
         }
         if ((r == DERIVED_NC_NONE) && (!sizing_ok(sig))) {
@@ -1130,6 +1213,7 @@ void derived_core_init(derived_core_t* c)
         return;
     }
     (void)memset(c, 0, sizeof *c);
+    derived_ride_init(&c->ride);
     uint32_t max_stale = 0u;
     for (uint32_t sig = 0u; sig < VEHICLE_CL250_DERIVED_COUNT; sig++) {
         const derived_nc_reason_t r = classify(c, sig);
@@ -1168,4 +1252,29 @@ bool derived_core_is_computed(const derived_core_t* c, uint32_t sig)
 derived_nc_reason_t derived_core_reason(const derived_core_t* c, uint32_t sig)
 {
     return ((c == NULL) || (sig >= VEHICLE_CL250_DERIVED_COUNT)) ? DERIVED_NC_GEN : c->sched[sig].reason;
+}
+
+bool derived_core_ride_out(const derived_core_t* c, derived_ride_which_t which, uint32_t sig,
+                           derived_out_t* out)
+{
+    if ((c == NULL) || (out == NULL) || (sig >= VEHICLE_CL250_DERIVED_COUNT)) {
+        return false;
+    }
+    const uint32_t slot = derived_ride_slot(sig);
+    (void)memset(out, 0, sizeof *out);
+    if ((slot == DERIVED_RIDE_NO_SLOT) || (!c->sched[sig].computed)) {
+        out->status = DERIVED_NOT_COMPUTED;
+    } else if (which == DERIVED_RIDE_PREVIOUS) {
+        if (c->ride.have_prev) {
+            *out = c->ride.prev[slot];
+        } else {
+            out->status = DERIVED_NO_DATA;
+        }
+    } else if (c->ride.open) {
+        derived_ride_finalize(&c->ride.acc, sig, out);
+        out->stamp_ms = c->ride.last_now_ms;
+    } else {
+        out->status = DERIVED_NO_DATA;
+    }
+    return true;
 }

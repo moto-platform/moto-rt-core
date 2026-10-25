@@ -3594,6 +3594,45 @@ static void test_d075_ecu_loss_starts_a_new_epoch_with_every_unverified_did_due_
     }
 }
 
+/* D-087 item 2: the epoch counter is the ride boundary of the derived signals. */
+static void test_d087_the_epoch_counter_changes_at_every_new_epoch(void)
+{
+    uint16_t n = 99u;
+    TEST_ASSERT_FALSE(uds_client_core_epoch(&c, &n)); /* before any confirmation */
+    TEST_ASSERT_EQUAL_UINT16(0u, n);
+    TEST_ASSERT_FALSE(uds_client_core_epoch(NULL, &n));
+    bring_up(0u);
+    TEST_ASSERT_TRUE(uds_client_core_epoch(&c, &n));
+    TEST_ASSERT_EQUAL_UINT16(1u, n);
+    TEST_ASSERT_TRUE(uds_client_core_epoch(&c, NULL));
+    drive(0u, 10001u);
+    /* a 0x7E/0x7F re-confirmation stays in the epoch: same counter */
+    uint32_t t = 10001u;
+    while (poll_at(t) != K_READ) {
+        t++;
+    }
+    nrc(t, UDS_SID_READ_DATA_BY_IDENTIFIER, UDS_NRC_SERVICE_NOT_SUPPORTED_IN_ACTIVE_SESSION);
+    TEST_ASSERT_EQUAL(K_SESSION, poll_skip_tp(t));
+    answer_session(t);
+    TEST_ASSERT_TRUE(uds_client_core_epoch(&c, &n));
+    TEST_ASSERT_EQUAL_UINT16(1u, n);
+    /* the loss of the ECU ends the epoch (the counter stays), its return starts the next */
+    ecu_silent = true;
+    drive(t, t + VEHICLE_CL250_ECU_ABSENT_TIMEOUT_MS + 500u);
+    ecu_silent = false;
+    TEST_ASSERT_FALSE(uds_client_core_epoch(&c, &n));
+    TEST_ASSERT_EQUAL_UINT16(1u, n);
+    t += VEHICLE_CL250_ECU_ABSENT_TIMEOUT_MS + 500u;
+    const uint32_t starts = stats()->session_starts;
+    while (stats()->session_starts == starts) {
+        drive(t, t + 1u);
+        t++;
+        TEST_ASSERT_LESS_THAN_UINT32(40000u, t);
+    }
+    TEST_ASSERT_TRUE(uds_client_core_epoch(&c, &n));
+    TEST_ASSERT_EQUAL_UINT16(2u, n);
+}
+
 /* (c) The D-069 engine-start flag survives a 0x7E/0x7F re-confirmation. */
 static void test_d075_the_engine_start_flag_survives_an_nrc_0x7f_reconfirmation(void)
 {
@@ -4971,6 +5010,7 @@ int main(void)
     RUN_TEST(test_d075_an_unverified_did_dropping_the_session_is_stopped_after_two_reads);
     RUN_TEST(test_d075_one_nrc_0x7e_does_not_stop_and_the_quiet_window_does_not_count);
     RUN_TEST(test_d075_ecu_loss_starts_a_new_epoch_with_every_unverified_did_due_at_once);
+    RUN_TEST(test_d087_the_epoch_counter_changes_at_every_new_epoch);
     RUN_TEST(test_d075_the_engine_start_flag_survives_an_nrc_0x7f_reconfirmation);
     RUN_TEST(test_d075_a_positive_answer_undoes_the_stop);
     RUN_TEST(test_d075_an_nrc_0x7f_reconfirmation_does_not_repeat_the_n_bs_window);
