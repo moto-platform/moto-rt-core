@@ -30,6 +30,13 @@
  * runs in its own, higher-priority task and shares only lock-free data with this one
  * (services/alive, services/snapshot).
  *
+ * derived_inputs_publish() (services/derived_inputs, D-070) is the comms task's one producer
+ * call for the derived-signal task and the LAST call of the pass, after uds_server_step():
+ * it copies the DID samples the client wrote in this pass (nothing later writes
+ * vehicle_signals) into a snapshot (bounded, no lock, no wait) that only features/derived
+ * reads. No frame work waits for it and nothing in this pass depends on that task; before
+ * derived_inputs_init() it does nothing but count (derived_inputs_skipped_count()).
+ *
  * Portable: services and feature headers only, never a direct hal/ include
  * (services/alive.h brings hal/hal_atomic.h transitively, like can_if.h brings
  * hal/can_types.h).

@@ -3,6 +3,7 @@
 #include "platform.h"
 #include "services/can_if.h"
 #include "services/can_sm.h"
+#include "services/derived_inputs.h"
 #include "services/lean_health.h"
 #include "services/timebase.h"
 
@@ -110,4 +111,7 @@ void comms_pass(uds_client_t* client, uds_server_t* server, vehicle_republish_t*
                                         comms_ekf_registered(ekf) && !hb_stalled};
     lean_health_set_comms(&health);
     uds_server_step(server);
+    /* The DID copy for the derived task (D-070): last, so no 0x021/0x020/0x081 work waits
+     * for it; nothing later in the pass writes vehicle_signals (the client wrote them). */
+    derived_inputs_publish(timebase_now_ms());
 }

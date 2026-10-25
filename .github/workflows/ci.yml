@@ -128,6 +128,20 @@ jobs:
             echo "::error::hal/imu.h is for services/imu.c only"
             exit 1
           fi
+          # Structural QM separation (D-070 item 5): the derived signals are QM information. Only
+          # features/derived itself and the host program may include its headers (any include
+          # form); the comms pass reaches the derived task through services/derived_inputs, and
+          # that service has one consumer call site, the derived glue.
+          if grep -rnE --include='*.c' --include='*.h' '^[[:space:]]*#[[:space:]]*include[[:space:]]*[<"]([^">]*/)?derived(_core|_gear)?\.h' src \
+              | grep -vE '^src/(features/derived|app/host)/'; then
+            echo "::error::only src/features/derived and src/app/host may include the derived headers"
+            exit 1
+          fi
+          if grep -rnE --include='*.c' --include='*.h' 'derived_inputs_read[[:space:]]*\(' src \
+              | grep -vE '^src/(features/derived/derived\.c|services/derived_inputs\.(c|h)):'; then
+            echo "::error::derived_inputs_read() has one consumer call site: src/features/derived/derived.c"
+            exit 1
+          fi
 
       - name: Static analysis (cppcheck, blocking)
         run: |
