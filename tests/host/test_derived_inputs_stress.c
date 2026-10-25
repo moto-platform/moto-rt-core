@@ -10,7 +10,9 @@
  * passes never go backwards and the last pass arrives. Unity asserts only in the main
  * thread; the workers count what they saw.
  */
+#define _POSIX_C_SOURCE 200809L
 #include "services/derived_inputs.h"
+#include "services/tester_epoch.h"
 #include "services/vehicle_signals.h"
 
 #include <pthread.h>
@@ -43,6 +45,11 @@ static void check(const derived_inputs_record_t* rec, consumer_result_t* r)
         r->backwards++;
     }
     r->last_pass = rec->pass;
+    /* the epoch fields travel in the same record: counter = pass, open = pass is even */
+    if ((rec->pass != 0u) && ((rec->epoch_counter != (uint16_t)rec->pass) ||
+                              (rec->epoch_open != (uint8_t)((rec->pass % 2u) == 0u)))) {
+        r->torn++;
+    }
     for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
         const bool ok = (rec->pass == 0u)
                             ? (rec->did[i].state == (uint8_t)VEHICLE_SIGNAL_NONE)
@@ -62,6 +69,7 @@ static void* producer(void* arg)
         for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
             (void)vehicle_signals_write(i, p, (float)p, p);
         }
+        tester_epoch_set((p % 2u) == 0u, (uint16_t)p);
         derived_inputs_publish(p);
         if ((p % 64u) == 0u) {
             (void)sched_yield();

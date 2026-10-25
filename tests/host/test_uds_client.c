@@ -16,7 +16,10 @@
 #include "platform_uds.h"
 #include "services/can_if.h"
 #include "services/can_sm.h"
+#include "features/derived/derived.h"
+#include "services/derived_inputs.h"
 #include "services/diag.h"
+#include "services/tester_epoch.h"
 #include "services/timebase.h"
 #include "services/vehicle_signals.h"
 #include "platform_limits.h"
@@ -262,6 +265,8 @@ static void test_sil_ecu_off_goes_absent_and_stale_then_recovers(void)
 {
     run(1000u, false);
     TEST_ASSERT_TRUE(all_valid(timebase_now_ms()));
+    TEST_ASSERT_TRUE(tester_epoch_get().open); /* D-087: the glue publishes the stop epoch */
+    TEST_ASSERT_EQUAL_UINT16(1u, tester_epoch_get().counter);
     ecu.silent = true; /* ignition off */
     const uint32_t off = timebase_now_ms();
     uint32_t max_stale = 0u;
@@ -280,6 +285,8 @@ static void test_sil_ecu_off_goes_absent_and_stale_then_recovers(void)
     TEST_ASSERT_FALSE(uds_client_ecu_present(&client));
     TEST_ASSERT_FALSE(vehicle_signals_ecu_present());
     TEST_ASSERT_FALSE(uds_client_session_up(&client));
+    TEST_ASSERT_FALSE(tester_epoch_get().open); /* the epoch ended with the ECU */
+    TEST_ASSERT_EQUAL_UINT16(1u, tester_epoch_get().counter);
     /* While absent: only session attempts and tester present, no DID reads. */
     const uint32_t absent_from = timebase_now_ms();
     run(5000u, false);
@@ -293,6 +300,8 @@ static void test_sil_ecu_off_goes_absent_and_stale_then_recovers(void)
     run(VEHICLE_CL250_SESSION_RETRY_INTERVAL_MS + 200u, false);
     TEST_ASSERT_TRUE(uds_client_session_up(&client));
     TEST_ASSERT_TRUE(uds_client_ecu_present(&client));
+    TEST_ASSERT_TRUE(tester_epoch_get().open); /* a new epoch, a new ride */
+    TEST_ASSERT_EQUAL_UINT16(2u, tester_epoch_get().counter);
     /* The five verified DIDs are back at once; the unverified ones were armed by the new
      * session (D-068 item 2) and are all read again within a few ms. A read that was
      * pending when the ECU went absent and timed out just after it keeps its old stamp
@@ -316,6 +325,75 @@ static void test_sil_ecu_off_goes_absent_and_stale_then_recovers(void)
     TEST_ASSERT_EQUAL_UINT32(1u, uds_client_stats(&client)->session_losses);
     TEST_ASSERT_GREATER_THAN_UINT32(off, absent_from);
     assert_tester_frames_ok();
+}
+
+/* run() with the comms task's DID hand-over and the derived task stepped every ms. */
+static void run_with_derived(uint32_t ms)
+{
+    for (uint32_t i = 0u; i < ms; i++) {
+        run(1u, false);
+        derived_inputs_publish(timebase_now_ms());
+        derived_step(timebase_now_ms());
+    }
+}
+
+/* D-087 follow-up: a latched client in an open epoch, then the ECU goes silent: the epoch
+ * closes within the presence window and the derived ride closes once. */
+static void test_sil_a_latched_client_in_an_open_epoch_closes_the_ride_when_the_ecu_goes_silent(void)
+{
+    derived_inputs_init();
+    derived_init();
+    run_with_derived(500u);
+    TEST_ASSERT_TRUE(tester_epoch_get().open);
+    TEST_ASSERT_TRUE(derived_core()->ride.open);
+    can_frame_t f;
+    memset(&f, 0, sizeof f);
+    f.id = VEHICLE_CL250_REQUEST_ID;
+    f.extended = true;
+    f.dlc = 8u;
+    const uint8_t read_rpm[8] = {0x03u, UDS_SID_READ_DATA_BY_IDENTIFIER,
+                                 (uint8_t)(VEHICLE_CL250_DID_ENGINE_SPEED >> 8u),
+                                 (uint8_t)(VEHICLE_CL250_DID_ENGINE_SPEED & 0xFFu), 0xAAu, 0xAAu, 0xAAu, 0xAAu};
+    memcpy(f.data, read_rpm, 8u);
+    TEST_ASSERT_EQUAL(CAN_PORT_OK, vbus_send(&bus, node_sniff, &f));
+    run_with_derived(1u);
+    TEST_ASSERT_TRUE(uds_client_failed(&client));
+    TEST_ASSERT_TRUE(tester_epoch_get().open); /* a latch is not an epoch end */
+    TEST_ASSERT_TRUE(derived_core()->ride.open);
+    ecu.silent = true;
+    run_with_derived(VEHICLE_CL250_ECU_ABSENT_TIMEOUT_MS + 200u);
+    TEST_ASSERT_FALSE(tester_epoch_get().open);
+    TEST_ASSERT_EQUAL_UINT16(1u, tester_epoch_get().counter);
+    TEST_ASSERT_FALSE(derived_core()->ride.open);
+    TEST_ASSERT_EQUAL_UINT32(1u, derived_core()->ride.closed_count);
+}
+
+/* D-087 follow-up: re-opening the client resets the counter, yet the ride closes once and the
+ * next epoch opens a new one (the closed state is published in between). */
+static void test_sil_reopening_the_client_closes_the_ride_and_the_next_epoch_opens_a_new_one(void)
+{
+    derived_inputs_init();
+    derived_init();
+    run_with_derived(1000u);
+    TEST_ASSERT_TRUE(derived_core()->ride.open);
+    TEST_ASSERT_EQUAL_UINT16(1u, tester_epoch_get().counter);
+    TEST_ASSERT_EQUAL_UINT16(1u, derived_core()->ride.counter);
+
+    can_if_init();
+    memset(&client, 0, sizeof client);
+    TEST_ASSERT_EQUAL(ISOTP_OK, uds_client_open(&client));
+    TEST_ASSERT_FALSE(tester_epoch_get().open);
+    TEST_ASSERT_EQUAL_UINT16(0u, tester_epoch_get().counter);
+    derived_inputs_publish(timebase_now_ms()); /* one comms pass between the open and the first epoch */
+    derived_step(timebase_now_ms());
+    TEST_ASSERT_FALSE(derived_core()->ride.open);
+    TEST_ASSERT_EQUAL_UINT32(1u, derived_core()->ride.closed_count);
+
+    run_with_derived(1000u);
+    TEST_ASSERT_TRUE(tester_epoch_get().open);
+    TEST_ASSERT_EQUAL_UINT16(1u, tester_epoch_get().counter); /* the same value as before the re-open */
+    TEST_ASSERT_TRUE(derived_core()->ride.open);
+    TEST_ASSERT_EQUAL_UINT32(1u, derived_core()->ride.closed_count); /* closed once, not twice */
 }
 
 static void test_sil_unread_sample_stays_stale_across_the_counter_wrap(void)
@@ -1767,6 +1845,8 @@ int main(void)
     RUN_TEST(test_sil_session_first_then_every_did_valid_with_the_gen_formula);
     RUN_TEST(test_sil_every_did_stays_valid_and_tester_present_keeps_its_period);
     RUN_TEST(test_sil_ecu_off_goes_absent_and_stale_then_recovers);
+    RUN_TEST(test_sil_a_latched_client_in_an_open_epoch_closes_the_ride_when_the_ecu_goes_silent);
+    RUN_TEST(test_sil_reopening_the_client_closes_the_ride_and_the_next_epoch_opens_a_new_one);
     RUN_TEST(test_sil_unread_sample_stays_stale_across_the_counter_wrap);
     RUN_TEST(test_sil_session_drop_is_detected_by_nrc_and_reestablished);
     RUN_TEST(test_sil_response_pending_bursts_within_the_period_are_waited_out);

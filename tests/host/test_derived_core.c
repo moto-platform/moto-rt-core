@@ -367,18 +367,23 @@ static void test_computed_set_equals_the_golden_set(void)
     }
     derived_core_init(&core);
     uint32_t differences = 0u;
+    uint32_t class_a_computed = 0u;
     for (uint32_t s = 0u; s < VEHICLE_CL250_DERIVED_COUNT; s++) {
+        if (vehicle_cl250_derived[s].derived_class != VEHICLE_CL250_DERIVED_CLASS_LIVE) {
+            continue; /* class B is checked in test_derived_ride */
+        }
+        class_a_computed += derived_core_is_computed(&core, s) ? 1u : 0u;
         if (golden[s] != derived_core_is_computed(&core, s)) {
             fprintf(stderr, "signal %u: golden %d, computed %d (reason %d)\n", (unsigned)s, (int)golden[s],
                     (int)derived_core_is_computed(&core, s), (int)derived_core_reason(&core, s));
             differences++;
         }
     }
-    printf("computed set: %u computed, %u in the golden vectors, %u differences\n",
-           (unsigned)core.computed_count, (unsigned)n_golden, (unsigned)differences);
+    printf("computed set (class A): %u computed, %u in the golden vectors, %u differences\n",
+           (unsigned)class_a_computed, (unsigned)n_golden, (unsigned)differences);
     TEST_ASSERT_EQUAL_UINT32(0u, differences);
     TEST_ASSERT_EQUAL_UINT32(28u, n_golden);
-    TEST_ASSERT_EQUAL_UINT32(n_golden, core.computed_count);
+    TEST_ASSERT_EQUAL_UINT32(n_golden, class_a_computed);
 }
 
 static void test_not_computed_signals_report_a_distinct_reason(void)
@@ -398,17 +403,17 @@ static void test_not_computed_signals_report_a_distinct_reason(void)
         }
         TEST_ASSERT_EQUAL_INT(DERIVED_FLAG_NONE, o->flag);
     }
-    /* a ride summary is class B; an IMU-input signal is not ready; wheel slip has no formula */
-    TEST_ASSERT_EQUAL_INT(DERIVED_NC_CLASS, derived_core_reason(&core, VEHICLE_CL250_DERIVED_RIDE_DISTANCE));
+    /* an unimplemented ride summary has no formula; an IMU-input signal is not ready */
+    TEST_ASSERT_EQUAL_INT(DERIVED_NC_NO_FORMULA, derived_core_reason(&core, VEHICLE_CL250_DERIVED_RIDE_SHIFT_COUNT));
     TEST_ASSERT_EQUAL_INT(DERIVED_NC_NOT_READY, derived_core_reason(&core, VEHICLE_CL250_DERIVED_ACCEL_IMU_RESIDUAL));
     TEST_ASSERT_EQUAL_INT(DERIVED_NC_NOT_READY, derived_core_reason(&core, VEHICLE_CL250_DERIVED_ROAD_GRADE));
-    TEST_ASSERT_TRUE(seen[(uint32_t)DERIVED_NC_CLASS] > 0u);
+    TEST_ASSERT_EQUAL_UINT32(0u, seen[(uint32_t)DERIVED_NC_CLASS]); /* the gen table has only A and B */
     TEST_ASSERT_TRUE(seen[(uint32_t)DERIVED_NC_NOT_READY] > 0u);
     TEST_ASSERT_TRUE(seen[(uint32_t)DERIVED_NC_NO_FORMULA] > 0u);
     TEST_ASSERT_EQUAL_UINT32(0u, seen[(uint32_t)DERIVED_NC_SIZING]); /* every window fits */
     TEST_ASSERT_EQUAL_UINT32(0u, seen[(uint32_t)DERIVED_NC_GEN]);
-    printf("not computed: %u class B, %u not ready, %u no formula, %u input\n",
-           (unsigned)seen[(uint32_t)DERIVED_NC_CLASS], (unsigned)seen[(uint32_t)DERIVED_NC_NOT_READY],
+    printf("not computed: %u elements, %u not ready, %u no formula, %u input\n",
+           (unsigned)seen[(uint32_t)DERIVED_NC_ELEMENTS], (unsigned)seen[(uint32_t)DERIVED_NC_NOT_READY],
            (unsigned)seen[(uint32_t)DERIVED_NC_NO_FORMULA], (unsigned)seen[(uint32_t)DERIVED_NC_INPUT]);
 }
 

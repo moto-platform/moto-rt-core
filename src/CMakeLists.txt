@@ -17,6 +17,7 @@ add_library(moto_rtcore_logic STATIC
     features/cornering/lean_tx_core.c
     features/derived/derived_core.c
     features/derived/derived_gear.c
+    features/derived/derived_ride.c
 )
 target_include_directories(moto_rtcore_logic PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -58,6 +59,7 @@ add_library(moto_rtcore_fw STATIC
     services/imu.c
     services/lean_health.c
     services/derived_inputs.c
+    services/tester_epoch.c
     features/uds/isotp_link.c
     features/uds/uds_client.c
     features/uds/uds_server.c

@@ -35,6 +35,13 @@ void derived_step(uint32_t now_ms);
  * sig is out of range or out is NULL. Not-computed signals read NOT_COMPUTED. */
 bool derived_get(uint32_t sig, derived_out_t* out);
 
+/* Derived task only: a class-B ride summary (D-070 parts 2-3, D-087 item 2): CURRENT is the
+ * open ride as it would close now, PREVIOUS the last closed ride. NO_DATA while there is no
+ * such ride; NOT_COMPUTED for any signal that is not a computed class-B scalar. False if sig
+ * is out of range or out is NULL. A ride is one tester stop epoch; there is no persistence
+ * and no UDS DID yet (part 2b). */
+bool derived_ride_get(derived_ride_which_t which, uint32_t sig, derived_out_t* out);
+
 /* Derived task only: the core, for counters and the computed set (tests, diagnostics). */
 const derived_core_t* derived_core(void);
 

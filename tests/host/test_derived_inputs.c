@@ -1,5 +1,6 @@
 /* services/derived_inputs: the DID copy from vehicle_signals into the snapshot (D-070). */
 #include "services/derived_inputs.h"
+#include "services/tester_epoch.h"
 #include "services/vehicle_signals.h"
 
 #include <string.h>
@@ -65,6 +66,27 @@ static void test_a_sample_that_ages_out_is_published_as_stale(void)
     TEST_ASSERT_EQUAL_UINT32(1000u, rec.did[VEHICLE_CL250_IDX_VEHICLE_SPEED].stamp_ms); /* its own stamp */
 }
 
+static void test_the_epoch_travels_in_the_same_record(void)
+{
+    derived_inputs_record_t rec;
+    derived_inputs_init();
+    vehicle_signals_init();
+    TEST_ASSERT_FALSE(tester_epoch_get().open);
+    TEST_ASSERT_EQUAL_UINT16(0u, tester_epoch_get().counter);
+    tester_epoch_set(true, 41u);
+    (void)vehicle_signals_write(VEHICLE_CL250_IDX_COOLANT_TEMP, 100u, 60.0f, 500u);
+    derived_inputs_publish(520u);
+    TEST_ASSERT_TRUE(derived_inputs_read(&rec));
+    TEST_ASSERT_EQUAL_UINT8(1u, rec.epoch_open);
+    TEST_ASSERT_EQUAL_UINT16(41u, rec.epoch_counter);
+    tester_epoch_set(false, 41u);
+    derived_inputs_publish(540u);
+    TEST_ASSERT_TRUE(derived_inputs_read(&rec));
+    TEST_ASSERT_EQUAL_UINT8(0u, rec.epoch_open);
+    TEST_ASSERT_EQUAL_UINT16(41u, rec.epoch_counter);
+    tester_epoch_set(false, 0u);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -72,5 +94,6 @@ int main(void)
     RUN_TEST(test_boot_record_is_invalid);
     RUN_TEST(test_publish_copies_value_stamp_and_state);
     RUN_TEST(test_a_sample_that_ages_out_is_published_as_stale);
+    RUN_TEST(test_the_epoch_travels_in_the_same_record);
     return UNITY_END();
 }
