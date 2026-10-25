@@ -15,6 +15,8 @@ add_library(moto_rtcore_logic STATIC
     services/lean_health_core.c
     features/cornering/lean_core.c
     features/cornering/lean_tx_core.c
+    features/derived/derived_core.c
+    features/derived/derived_gear.c
 )
 target_include_directories(moto_rtcore_logic PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -33,6 +35,7 @@ target_link_libraries(moto_rtcore_logic PUBLIC m)
 # functions with the E2E protection (D-005, D-026). Built with its own flags.
 add_library(moto_defs_gen STATIC
     ${MOTO_DEFS_GEN}/vehicle_cl250.c
+    ${MOTO_DEFS_GEN}/vehicle_cl250_derived.c
     ${MOTO_DEFS_GEN}/platform_uds.c
     ${MOTO_DEFS_GEN}/platform.c
     ${MOTO_DEFS_GEN}/platform_e2e.c
@@ -54,6 +57,7 @@ add_library(moto_rtcore_fw STATIC
     services/alive.c
     services/imu.c
     services/lean_health.c
+    services/derived_inputs.c
     features/uds/isotp_link.c
     features/uds/uds_client.c
     features/uds/uds_server.c
@@ -61,6 +65,7 @@ add_library(moto_rtcore_fw STATIC
     features/heartbeat/heartbeat.c
     features/cornering/lean.c
     features/cornering/lean_tx.c
+    features/derived/derived.c
     app/comms.c
 )
 target_link_libraries(moto_rtcore_fw PUBLIC moto_rtcore_logic moto_defs_gen)

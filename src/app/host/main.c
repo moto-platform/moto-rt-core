@@ -33,6 +33,7 @@
 #include "app/host/sim_tester.h"
 #include "features/cornering/lean.h"
 #include "features/cornering/lean_tx.h"
+#include "features/derived/derived.h"
 #include "features/heartbeat/heartbeat.h"
 #include "features/uds/uds_client.h"
 #include "features/uds/uds_server.h"
@@ -44,6 +45,7 @@
 #include "hal/host/imu_host.h"
 #include "services/can_if.h"
 #include "services/can_sm.h"
+#include "services/derived_inputs.h"
 #include "services/diag.h"
 #include "services/timebase.h"
 #include "services/vehicle_signals.h"
@@ -296,6 +298,9 @@ int main(int argc, char** argv)
         fprintf(stderr, "EKF lean (0x020) setup failed\n");
         return 1;
     }
+    /* Derived-signal task (D-070): the DID hand-over first, then the task's state. */
+    derived_inputs_init();
+    derived_init();
     if (!comms_apply_filters()) {
         fprintf(stderr, "CAN acceptance filter setup failed\n");
         return 1;
@@ -334,6 +339,7 @@ int main(int argc, char** argv)
             ekf_started = true;
         }
         comms_pass(&client, &server, &republisher, &heartbeat, &ekf, &lean_tx);
+        derived_step(now); /* below the comms task: after its pass, QM information */
         sim_listener_step(&listener, now);
 
         if (!opt.quiet && timebase_expired(now, printed_at, PRINT_PERIOD_MS)) {
@@ -376,6 +382,18 @@ int main(int argc, char** argv)
            "%u S3 timeouts\n",
            (unsigned)ss->requests, (unsigned)ss->positive, (unsigned)ss->negative,
            (unsigned)ss->suppressed, (unsigned)ss->s3_timeouts);
+    if (!opt.quiet) {
+        uint32_t valid = 0u;
+        for (uint32_t i = 0u; i < VEHICLE_CL250_DERIVED_COUNT; i++) {
+            derived_out_t o;
+            if (derived_get(i, &o) && (o.status == DERIVED_VALID)) {
+                valid++;
+            }
+        }
+        printf("moto_rtcore_host: derived %u signals computed, %u valid now, at most %u evaluations per step\n",
+               (unsigned)derived_core()->computed_count, (unsigned)valid,
+               (unsigned)derived_core()->evals_max);
+    }
     const int listener_ok = sim_listener_passed(&listener);
     printf("moto_rtcore_host: EKF lean 0x%03X %u sent, %u retried, %u dropped; last state %d "
            "(reason %d), IMU reason %d\n",

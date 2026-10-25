@@ -128,6 +128,14 @@ jobs:
             echo "::error::hal/imu.h is for services/imu.c only"
             exit 1
           fi
+          # Structural QM separation (D-070 item 5): the derived signals are QM information. The
+          # safety-relevant modules, the other features and the comms pass never include
+          # features/derived (comms only calls services/derived_inputs, the producer copy).
+          if grep -rnE '#include[[:space:]]+"features/derived/' src/features/cornering src/features/heartbeat \
+              src/features/uds src/features/vehicle_republish src/services src/app/comms.c src/app/comms.h; then
+            echo "::error::features/derived must not be included by cornering, heartbeat, uds, vehicle_republish, services or app/comms"
+            exit 1
+          fi
 
       - name: Static analysis (cppcheck, blocking)
         run: |

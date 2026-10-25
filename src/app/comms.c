@@ -3,6 +3,7 @@
 #include "platform.h"
 #include "services/can_if.h"
 #include "services/can_sm.h"
+#include "services/derived_inputs.h"
 #include "services/lean_health.h"
 #include "services/timebase.h"
 
@@ -90,6 +91,7 @@ void comms_pass(uds_client_t* client, uds_server_t* server, vehicle_republish_t*
     can_sm_step(CAN_PORT_VEHICLE);
     (void)can_if_dispatch(CAN_PORT_VEHICLE, COMMS_RX_PER_PASS);
     uds_client_step(client);
+    derived_inputs_publish(timebase_now_ms()); /* the DID copy for the derived task (D-070) */
     lean_tx_publish_speed(active, timebase_now_ms()); /* the sample the client wrote in this pass */
 
     can_sm_step(CAN_PORT_PLATFORM);

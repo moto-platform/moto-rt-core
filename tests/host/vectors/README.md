@@ -16,7 +16,7 @@ cd moto-server && uv run moto-server golden --out ../moto-rt-core/tests/host/vec
   version's derived `stale_after_ms` (the age limit of a signal's DID inputs), so the
   features/derived test that compares against them needs a pin with the same derived table
   (v0.14.0 or later). This repo pins v0.14.0 since the 0xFD03 PR (E-17 (a)), so the table
-  matches; `test_derived_vectors` is still shape-only until `features/derived` exists.
+  matches; `test_derived_vectors` checks the shape only; `test_derived_core` (features/derived, C3) replays the scenarios through the core and compares every row, and fingerprints the gen table the vectors depend on.
 - Provenance: the banner of each file carries the defs version and a content SHA-256; moto-server
   keeps the same hashes in `tests/golden/MANIFEST.sha256` and fails its CI when the reference
   changes without regenerating. Regenerate and commit here whenever that manifest changes.
