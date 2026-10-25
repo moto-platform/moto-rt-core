@@ -15,8 +15,8 @@
  * Sampling rule (D-070 item 1, the moto-server reference engine.py / context.py): an
  * input's value at time t is its last sample at or before t, and counts only while its age
  * is within its own stale_after_ms: for a DID input the DID's (vehicle_cl250_dids[], D-070),
- * for a derived input the producer's (vehicle_cl250_derived[]); the event signal keeps the
- * reference's polls-of-a-DID limit (open point, README). A held value is never
+ * for a derived input the producer's (vehicle_cl250_derived[]). The event signal is judged
+ * the same way (D-087). A held value is never
  * presented as fresh. The output of a signal is on its own period_ms grid, which starts at
  * the latest first-sample time of its inputs (a derived input: the producer's grid start).
  * A result outside the gen/ [min, max] is invalid (OUT_OF_RANGE), never clamped.
@@ -134,10 +134,6 @@ typedef struct {
  * (D-070 item 6), formulas.py:56-57. */
 #define DERIVED_J1349_REFERENCE_PRESSURE_KPA (99.0f)
 #define DERIVED_J1349_REFERENCE_TEMPERATURE_C (25.0f)
-/* A DID is considered gone after this many of its poll periods: the age limit of the
- * event signals, which have no stale_after_ms in gen/. Algorithm parameter, provisional
- * (D-070 item 6), context.py:27 DID_AGE_LIMIT_POLLS. */
-#define DERIVED_DID_AGE_LIMIT_POLLS (3u)
 /* A slope or a window mean needs at least this many samples: algorithm parameter,
  * provisional (D-070 item 6), formulas.py:160 and :417. */
 #define DERIVED_MIN_WINDOW_SAMPLES (2u)

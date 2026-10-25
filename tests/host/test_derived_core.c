@@ -747,17 +747,27 @@ static void test_stop_event(void)
     sample_stop(220u, 5.0f, 1500.0f);
     TEST_ASSERT_EQUAL_UINT32(0u, out(VEHICLE_CL250_DERIVED_STOP_EVENT)->seq);
 
-    /* a gap longer than three speed polls ends the stop and the moving state */
+    /* D-087: the gap limit is the speed DID's own stale_after_ms (300 ms), not three polls */
+    const uint32_t limit = vehicle_cl250_dids[VEHICLE_CL250_IDX_VEHICLE_SPEED].stale_after_ms;
+    TEST_ASSERT_EQUAL_UINT32(300u, limit);
+    TEST_ASSERT_EQUAL_UINT32(330u, 3u * vehicle_cl250_dids[VEHICLE_CL250_IDX_VEHICLE_SPEED].poll_period_ms);
+    /* a 330 ms gap (three polls) is not bridged: it ends the stop and the moving state */
     rig();
     sample_stop(0u, 10.0f, 1500.0f);
     sample_stop(110u, 0.0f, 1500.0f);
-    sample_stop(441u, 5.0f, 1500.0f); /* 331 ms after the last sample */
+    sample_stop(110u + 330u, 5.0f, 1500.0f);
     TEST_ASSERT_EQUAL_UINT32(0u, out(VEHICLE_CL250_DERIVED_STOP_EVENT)->seq);
-    /* ... and exactly three polls (330 ms) is still followed */
+    /* one past the limit is not bridged either */
     rig();
     sample_stop(0u, 10.0f, 1500.0f);
     sample_stop(110u, 0.0f, 1500.0f);
-    sample_stop(440u, 5.0f, 1500.0f);
+    sample_stop(110u + limit + 1u, 5.0f, 1500.0f);
+    TEST_ASSERT_EQUAL_UINT32(0u, out(VEHICLE_CL250_DERIVED_STOP_EVENT)->seq);
+    /* exactly the limit (300 ms) is still followed */
+    rig();
+    sample_stop(0u, 10.0f, 1500.0f);
+    sample_stop(110u, 0.0f, 1500.0f);
+    sample_stop(110u + limit, 5.0f, 1500.0f);
     TEST_ASSERT_EQUAL_UINT32(1u, out(VEHICLE_CL250_DERIVED_STOP_EVENT)->seq);
 }
 
