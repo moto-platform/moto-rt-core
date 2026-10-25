@@ -18,8 +18,9 @@
  *
  * Record: for every DID index of vehicle_cl250_dids[] the value, the sample stamp and the
  * state vehicle_signals reported at copy time, the tester's stop epoch (services/tester_epoch:
- * open flag and counter, the ride boundary of the class-B summaries) and a pass counter (one per publish, so a
- * test can tell a torn record: every entry of one record comes from the same pass).
+ * open flag and counter, the ride boundary of the class-B summaries) and a pass counter (one
+ * per publish, so a test can tell a torn record: every entry of one record comes from the
+ * same pass).
  * Entries keep the sample's own stamp, so a stalled producer makes them age out in the
  * consumer: the record says "newest", not "fresh".
  *

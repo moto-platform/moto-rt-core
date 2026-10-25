@@ -139,6 +139,12 @@ jobs:
           fi
           # services/ sit below features/: the tester epoch and the derived hand-over include no
           # feature header (the ride boundary reaches the derived task through the snapshot).
+          # Single-writer rule: only the UDS client glue (comms task) calls tester_epoch_set().
+          if grep -rn --include='*.c' --include='*.h' 'tester_epoch_set[[:space:]]*(' src \
+              | grep -vE '^src/(services/tester_epoch\.[ch]|features/uds/uds_client\.c):'; then
+            echo "::error::tester_epoch_set() has one writer: src/features/uds/uds_client.c"
+            exit 1
+          fi
           if grep -rnE '#include[[:space:]]+"features/' src/services/tester_epoch.c src/services/tester_epoch.h \
               src/services/derived_inputs.c src/services/derived_inputs.h; then
             echo "::error::services/tester_epoch and services/derived_inputs must not include features/"

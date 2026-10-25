@@ -65,7 +65,10 @@ isotp_status_t uds_client_open(uds_client_t* client)
     if (st != ISOTP_OK) {
         return st;
     }
-    tester_epoch_set(false, 0u); /* a new tester: no epoch yet */
+    /* A new tester: no epoch yet. The counter restarts at 0 (its core is new), so the first
+     * epoch after a re-open can repeat an old value; that is safe because this publishes the
+     * closed state first and consumers compare with != (services/tester_epoch.h). */
+    tester_epoch_set(false, 0u);
     if ((can_if_register_rx(CAN_PORT_VEHICLE, VEHICLE_CL250_REQUEST_ID, REQUEST_IDS_EXTENDED,
                             on_foreign_request, NULL) != CAN_IF_OK) ||
         (can_if_register_rx(CAN_PORT_VEHICLE, VEHICLE_CL250_FALLBACK_REQUEST_ID,
@@ -260,7 +263,9 @@ void uds_client_step(uds_client_t* client)
     vehicle_signals_set_ecu_present(present);
     uint16_t epoch_counter = 0u;
     const bool epoch_open = uds_client_core_epoch(&client->core, &epoch_counter);
-    tester_epoch_set(epoch_open, epoch_counter); /* D-087: the ride boundary of the derived signals */
+    /* D-087: the ride boundary of the derived signals; the only writer of the service, and only
+     * while the client is open (the early return above leaves it untouched when closed). */
+    tester_epoch_set(epoch_open, epoch_counter);
     report_diag(client, now, present);
 }
 
