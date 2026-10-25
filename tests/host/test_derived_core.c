@@ -286,7 +286,9 @@ static void test_golden_replay_matches_the_reference(void)
            (unsigned)core.evals_max, (unsigned)core.computed_count);
     TEST_ASSERT_EQUAL_UINT32(0u, n_mismatch);
     TEST_ASSERT_EQUAL_UINT32(N_EXPECTED_SKIPPED, n_skipped);
-    for (uint32_t i = 0u; i < N_EXPECTED_SKIPPED; i++) {
+    /* the list may be empty: count from the array so gcc's -Wtype-limits sees no `i < 0` */
+    const uint32_t listed = (uint32_t)(sizeof EXPECTED_SKIPPED / sizeof EXPECTED_SKIPPED[0]);
+    for (uint32_t i = 0u; (i < listed) && (i < n_skipped); i++) {
         TEST_ASSERT_TRUE(was_skipped(EXPECTED_SKIPPED[i].scenario, EXPECTED_SKIPPED[i].time_ms,
                                      EXPECTED_SKIPPED[i].sig));
     }
