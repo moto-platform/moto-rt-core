@@ -498,6 +498,7 @@ static uint32_t gen_fingerprint(void)
         if (used_did[i] || (i == (uint32_t)VEHICLE_CL250_IDX_BATTERY_VOLTAGE)) { /* the extra DID */
             h = fnv(h, &i, sizeof i);
             h = fnv(h, &vehicle_cl250_dids[i].poll_period_ms, sizeof vehicle_cl250_dids[i].poll_period_ms);
+            h = fnv(h, &vehicle_cl250_dids[i].stale_after_ms, sizeof vehicle_cl250_dids[i].stale_after_ms); /* D-070 */
         }
     }
     const float constants[] = {
@@ -509,7 +510,7 @@ static uint32_t gen_fingerprint(void)
     return fnv(h, constants, sizeof constants);
 }
 
-#define GEN_FINGERPRINT (0x22D549F9u)
+#define GEN_FINGERPRINT (0xC4A62B59u)
 
 static void test_vectors_match_the_pinned_gen_table(void)
 {
@@ -598,7 +599,7 @@ static void test_fuel_and_residuals(void)
     put(VEHICLE_CL250_IDX_ACCEL_PEDAL_POS_D, 40.0f, 0u);
     put(VEHICLE_CL250_IDX_RELATIVE_ACCEL_PEDAL_POS, 38.0f, 0u);
     derived_core_step(&core, 0u, in);
-    assert_valid(VEHICLE_CL250_DERIVED_AIR_FUEL_RATIO, 14.7f, 1.0e-4f);            /* lambda 1 */
+    assert_valid(VEHICLE_CL250_DERIVED_AIR_FUEL_RATIO, VEHICLE_CL250_STOICHIOMETRIC_AFR, 1.0e-4f);            /* lambda 1 */
     assert_valid(VEHICLE_CL250_DERIVED_FUEL_RATE_MAF, 1.314888f, 1.0e-4f);         /* 4 * 3.6 / (14.7 * 0.745) */
     assert_valid(VEHICLE_CL250_DERIVED_FUEL_CONSUMPTION_INSTANT, 5.0f, 1.0e-4f);   /* 3 L/h at 60 km/h */
     assert_valid(VEHICLE_CL250_DERIVED_FUEL_PER_STROKE, 24.83333f, 1.0e-3f);       /* 3 * 0.745e6 / 90000 */
@@ -615,13 +616,17 @@ static void test_gearbox_ratio_and_gear(void)
     put(VEHICLE_CL250_IDX_VEHICLE_SPEED, 60.0f, 0u);
     put(VEHICLE_CL250_IDX_ENGINE_SPEED, 8000.0f, 0u);
     derived_core_step(&core, 0u, in);
-    /* wheel 511.752 rpm at 60 km/h, reduction 7.416094: 8000 / (511.752 * 7.416094) */
+    /* 8000 / (wheel rpm at 60 km/h on the dynamic radius * primary * secondary reduction ratio) */
     assert_valid(VEHICLE_CL250_DERIVED_GEARBOX_RATIO_MEASURED, 2.107924f, 1.0e-3f);
     assert_valid(VEHICLE_CL250_DERIVED_GEAR_ESTIMATE, 0.0f, 1.0e-6f); /* between 1st (3.416) and 2nd (2.25)... */
     touch_all(110u);
-    put(VEHICLE_CL250_IDX_ENGINE_SPEED, 6262.084f, 110u); /* exactly 3rd (1.65) */
+    /* the rpm of exactly 3rd at 60 km/h: ratio * wheel rpm * primary * secondary reduction */
+    const float wheel_rpm = ((60.0f / 3.6f) / (2.0f * 3.14159265f * VEHICLE_CL250_REAR_WHEEL_RADIUS_DYNAMIC_M)) * 60.0f;
+    put(VEHICLE_CL250_IDX_ENGINE_SPEED,
+        VEHICLE_CL250_GEAR_RATIO_3 * wheel_rpm * VEHICLE_CL250_PRIMARY_REDUCTION_RATIO * VEHICLE_CL250_SECONDARY_REDUCTION_RATIO,
+        110u);
     derived_core_step(&core, 110u, in);
-    assert_valid(VEHICLE_CL250_DERIVED_GEARBOX_RATIO_MEASURED, 1.65f, 1.0e-3f);
+    assert_valid(VEHICLE_CL250_DERIVED_GEARBOX_RATIO_MEASURED, VEHICLE_CL250_GEAR_RATIO_3, 1.0e-3f);
     assert_valid(VEHICLE_CL250_DERIVED_GEAR_ESTIMATE, 3.0f, 1.0e-6f);
     touch_all(220u);
     put(VEHICLE_CL250_IDX_VEHICLE_SPEED, 0.0f, 220u);
@@ -693,7 +698,7 @@ static void test_integrals_hold_across_gaps_only_within_the_stale_limit(void)
     }
     derived_core_step(&core, 5000u, in);
     assert_valid(VEHICLE_CL250_DERIVED_TRIP_DISTANCE, 0.05f, 1.0e-5f);
-    /* a gap: after the last sample at 990 ms the speed is held for the 3000 ms stale limit and
+    /* a gap: after the last sample at 990 ms the speed is held for the speed DID's own 300 ms stale limit and
      * not a millisecond more, then samples resume at 20 s */
     rig();
     for (uint32_t t = 0u; t <= 990u; t += 110u) {
@@ -702,7 +707,7 @@ static void test_integrals_hold_across_gaps_only_within_the_stale_limit(void)
     }
     put(VEHICLE_CL250_IDX_VEHICLE_SPEED, 36.0f, 20000u);
     derived_core_step(&core, 20000u, in);
-    assert_valid(VEHICLE_CL250_DERIVED_TRIP_DISTANCE, 0.0399f, 1.0e-5f); /* 0.0099 + 3 s * 0.01 */
+    assert_valid(VEHICLE_CL250_DERIVED_TRIP_DISTANCE, 0.0129f, 1.0e-5f); /* 0.0099 + 0.3 s * 0.01 */
 }
 
 /* ---- the stop event -------------------------------------------------------------------------------- */
@@ -776,11 +781,27 @@ static void test_stale_exactly_at_the_limit_and_one_past(void)
     rig();
     all_dids(1.0f, 0u);
     derived_core_step(&core, limit, in);
-    assert_valid(VEHICLE_CL250_DERIVED_AIR_FUEL_RATIO, 14.7f, 1.0e-4f);
+    assert_valid(VEHICLE_CL250_DERIVED_AIR_FUEL_RATIO, VEHICLE_CL250_STOICHIOMETRIC_AFR, 1.0e-4f);
     rig();
     all_dids(1.0f, 0u);
     derived_core_step(&core, limit + 1u, in);
     assert_invalid(VEHICLE_CL250_DERIVED_AIR_FUEL_RATIO, DERIVED_FLAG_STALE_INPUT);
+}
+
+static void test_a_did_uses_its_own_limit_not_the_signals(void)
+{
+    /* the speed DID goes stale at 300 ms, the gearbox ratio's own limit is 330 ms */
+    TEST_ASSERT_TRUE(vehicle_cl250_dids[VEHICLE_CL250_IDX_VEHICLE_SPEED].stale_after_ms <
+                     vehicle_cl250_derived[VEHICLE_CL250_DERIVED_GEARBOX_RATIO_MEASURED].stale_after_ms);
+    rig();
+    all_dids(10.0f, 0u);
+    put(VEHICLE_CL250_IDX_VEHICLE_SPEED, 60.0f, 0u);
+    put(VEHICLE_CL250_IDX_ENGINE_SPEED, 3000.0f, 0u);
+    derived_core_step(&core, 0u, in);
+    assert_valid(VEHICLE_CL250_DERIVED_GEARBOX_RATIO_MEASURED, 1.6f, 1.0f); /* some valid ratio */
+    in[VEHICLE_CL250_IDX_ENGINE_SPEED].stamp_ms = 330u; /* the rpm is fresh, the speed is not */
+    derived_core_step(&core, 330u, in);
+    assert_invalid(VEHICLE_CL250_DERIVED_GEARBOX_RATIO_MEASURED, DERIVED_FLAG_STALE_INPUT);
 }
 
 static void test_range_is_checked_and_never_clamped(void)
@@ -799,7 +820,7 @@ static void test_range_is_checked_and_never_clamped(void)
     /* exactly on the limit is in range: 5 / 14.7 */
     rig();
     all_dids(10.0f, 0u);
-    put(VEHICLE_CL250_IDX_COMMANDED_EQUIV_RATIO, 5.0f / 14.7f, 0u);
+    put(VEHICLE_CL250_IDX_COMMANDED_EQUIV_RATIO, 5.0f / VEHICLE_CL250_STOICHIOMETRIC_AFR, 0u);
     derived_core_step(&core, 0u, in);
     TEST_ASSERT_EQUAL_INT(DERIVED_VALID, out(VEHICLE_CL250_DERIVED_AIR_FUEL_RATIO)->status);
     /* an invalid torque makes its consumers INVALID_INPUT, not a stale or range flag */
@@ -838,14 +859,14 @@ static void test_lapsed_input_stays_unusable_until_a_new_sample(void)
     rig();
     all_dids(1.0f, 1000u);
     derived_core_step(&core, 1000u, in);
-    assert_valid(VEHICLE_CL250_DERIVED_AIR_FUEL_RATIO, 14.7f, 1.0e-4f);
+    assert_valid(VEHICLE_CL250_DERIVED_AIR_FUEL_RATIO, VEHICLE_CL250_STOICHIOMETRIC_AFR, 1.0e-4f);
     derived_core_step(&core, 41000u, in); /* far beyond every limit: latched as lapsed */
     TEST_ASSERT_TRUE(core.did[VEHICLE_CL250_IDX_COMMANDED_EQUIV_RATIO].lapsed);
     assert_invalid(VEHICLE_CL250_DERIVED_AIR_FUEL_RATIO, DERIVED_FLAG_STALE_INPUT);
     touch_all(43000u);
     derived_core_step(&core, 43000u, in);
     TEST_ASSERT_FALSE(core.did[VEHICLE_CL250_IDX_COMMANDED_EQUIV_RATIO].lapsed);
-    assert_valid(VEHICLE_CL250_DERIVED_AIR_FUEL_RATIO, 14.7f, 1.0e-4f);
+    assert_valid(VEHICLE_CL250_DERIVED_AIR_FUEL_RATIO, VEHICLE_CL250_STOICHIOMETRIC_AFR, 1.0e-4f);
     /* a sample that disappears (present false) is stale, not held */
     in[VEHICLE_CL250_IDX_COMMANDED_EQUIV_RATIO].present = false;
     derived_core_step(&core, 45000u, in);
@@ -930,6 +951,7 @@ int main(void)
     RUN_TEST(test_stop_event);
     RUN_TEST(test_stop_event_longer_than_the_range_is_invalid);
     RUN_TEST(test_stale_exactly_at_the_limit_and_one_past);
+    RUN_TEST(test_a_did_uses_its_own_limit_not_the_signals);
     RUN_TEST(test_range_is_checked_and_never_clamped);
     RUN_TEST(test_non_finite_input_is_a_math_error);
     RUN_TEST(test_lapsed_input_stays_unusable_until_a_new_sample);

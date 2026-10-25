@@ -14,8 +14,9 @@
  *
  * Sampling rule (D-070 item 1, the moto-server reference engine.py / context.py): an
  * input's value at time t is its last sample at or before t, and counts only while its age
- * is within the stale_after_ms of the SIGNAL (for a DID input, the signal's own limit, as
- * the golden vectors use; for a derived input, the producer's). A held value is never
+ * is within its own stale_after_ms: for a DID input the DID's (vehicle_cl250_dids[], D-070),
+ * for a derived input the producer's (vehicle_cl250_derived[]); the event signal keeps the
+ * reference's polls-of-a-DID limit (open point, README). A held value is never
  * presented as fresh. The output of a signal is on its own period_ms grid, which starts at
  * the latest first-sample time of its inputs (a derived input: the producer's grid start).
  * A result outside the gen/ [min, max] is invalid (OUT_OF_RANGE), never clamped.
@@ -97,7 +98,9 @@ typedef struct {
  * DID (or of the derived producer). gen/ does not export window or period as constant
  * expressions, so the numbers below are checked against the gen/ table at init: a signal
  * whose window needs more is NOT_COMPUTED (DERIVED_NC_SIZING), never silently truncated.
- * Values for the pinned defs: SPEED 60000/110+2 = 547, FUEL_RATE 60000/2000+2 = 32,
+ * The caps derive from the gen/ table fields `poll_period_ms` (vehicle_cl250_dids[]; for the
+ * accel ring `period_ms` of the producer) and `window_ms` (vehicle_cl250_derived[]) and are
+ * checked against them at init (SIZING). Values for the pinned defs: SPEED 60000/110+2 = 547, FUEL_RATE 60000/2000+2 = 32,
  * COOLANT 60000/800+2 = 77, OIL 60000/5000+2 = 14, VEHICLE_ACCEL output 440/110+2 = 6.
  */
 #define DERIVED_WIN_SPEED_CAP (548u)

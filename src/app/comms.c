@@ -91,7 +91,6 @@ void comms_pass(uds_client_t* client, uds_server_t* server, vehicle_republish_t*
     can_sm_step(CAN_PORT_VEHICLE);
     (void)can_if_dispatch(CAN_PORT_VEHICLE, COMMS_RX_PER_PASS);
     uds_client_step(client);
-    derived_inputs_publish(timebase_now_ms()); /* the DID copy for the derived task (D-070) */
     lean_tx_publish_speed(active, timebase_now_ms()); /* the sample the client wrote in this pass */
 
     can_sm_step(CAN_PORT_PLATFORM);
@@ -112,4 +111,7 @@ void comms_pass(uds_client_t* client, uds_server_t* server, vehicle_republish_t*
                                         comms_ekf_registered(ekf) && !hb_stalled};
     lean_health_set_comms(&health);
     uds_server_step(server);
+    /* The DID copy for the derived task (D-070): last, so no 0x021/0x020/0x081 work waits
+     * for it; nothing later in the pass writes vehicle_signals (the client wrote them). */
+    derived_inputs_publish(timebase_now_ms());
 }

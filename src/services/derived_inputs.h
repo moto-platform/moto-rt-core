@@ -59,6 +59,10 @@ void derived_inputs_publish(uint32_t now_ms);
  * false keeps the previous record (an all-NONE boot record before the first publish). */
 bool derived_inputs_read(derived_inputs_record_t* out);
 
+/* Publish calls that did nothing because derived_inputs_init() never ran (a missing boot
+ * call on the H7 shows up here; saturates at UINT32_MAX). Comms task only. */
+uint32_t derived_inputs_skipped_count(void);
+
 /* Latched snapshot faults (see services/snapshot): producer side / consumer side. */
 bool derived_inputs_producer_fault(void);
 bool derived_inputs_consumer_fault(void);

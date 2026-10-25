@@ -30,9 +30,9 @@ void derived_step(uint32_t now_ms)
 {
     (void)derived_inputs_read(&latest); /* the one consumer call site */
     for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
-        /* STALE here is vehicle_signals' own DID limit; the core judges every input by the
-         * stale_after_ms of the signal that uses it, from the stamp, so a sample counts
-         * as present whenever one exists. */
+        /* The core judges every DID by its own stale_after_ms from the sample stamp, the
+         * limit vehicle_signals uses for STALE too, so a sample counts as present whenever
+         * one exists (and a sticky STALE only ever coincides with the core's verdict). */
         inputs[i].present = latest.did[i].state != (uint8_t)VEHICLE_SIGNAL_NONE;
         inputs[i].value = latest.did[i].value;
         inputs[i].stamp_ms = latest.did[i].stamp_ms;

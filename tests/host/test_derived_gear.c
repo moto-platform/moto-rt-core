@@ -20,14 +20,15 @@ static void test_every_gear_ratio_gives_its_gear(void)
 
 static void test_within_the_tolerance_is_the_gear_and_outside_is_none(void)
 {
-    TEST_ASSERT_EQUAL_UINT8(3u, derived_gear_estimate(1.65f * 1.04f));
-    TEST_ASSERT_EQUAL_UINT8(3u, derived_gear_estimate(1.65f * 0.96f));
-    TEST_ASSERT_EQUAL_UINT8(0u, derived_gear_estimate(1.65f * 1.06f));
-    TEST_ASSERT_EQUAL_UINT8(0u, derived_gear_estimate(1.65f * 0.94f));
-    TEST_ASSERT_EQUAL_UINT8(5u, derived_gear_estimate(1.12f)); /* 5th and 6th are 12 % apart: 1.12 is nearer 5th */
-    TEST_ASSERT_EQUAL_UINT8(0u, derived_gear_estimate(1.10f)); /* 5.7 % and 6.0 % off */
-    TEST_ASSERT_EQUAL_UINT8(0u, derived_gear_estimate(0.5f));
-    TEST_ASSERT_EQUAL_UINT8(0u, derived_gear_estimate(8.0f));
+    TEST_ASSERT_EQUAL_UINT8(3u, derived_gear_estimate(ratios[2] * 1.04f));
+    TEST_ASSERT_EQUAL_UINT8(3u, derived_gear_estimate(ratios[2] * 0.96f));
+    TEST_ASSERT_EQUAL_UINT8(0u, derived_gear_estimate(ratios[2] * 1.06f));
+    TEST_ASSERT_EQUAL_UINT8(0u, derived_gear_estimate(ratios[2] * 0.94f));
+    TEST_ASSERT_EQUAL_UINT8(5u, derived_gear_estimate(ratios[4] * 1.04f));
+    /* the geometric mean of 5th and 6th is 5.6 % / 6.0 % off both: no gear */
+    TEST_ASSERT_EQUAL_UINT8(0u, derived_gear_estimate(sqrtf(ratios[4] * ratios[5])));
+    TEST_ASSERT_EQUAL_UINT8(0u, derived_gear_estimate(ratios[5] * 0.5f));
+    TEST_ASSERT_EQUAL_UINT8(0u, derived_gear_estimate(ratios[0] * 2.0f));
 }
 
 static void test_a_bad_ratio_is_no_gear(void)
@@ -35,7 +36,7 @@ static void test_a_bad_ratio_is_no_gear(void)
     TEST_ASSERT_EQUAL_UINT8(0u, derived_gear_estimate(NAN));
     TEST_ASSERT_EQUAL_UINT8(0u, derived_gear_estimate(INFINITY));
     TEST_ASSERT_EQUAL_UINT8(0u, derived_gear_estimate(0.0f));
-    TEST_ASSERT_EQUAL_UINT8(0u, derived_gear_estimate(-1.65f));
+    TEST_ASSERT_EQUAL_UINT8(0u, derived_gear_estimate(-ratios[2]));
 }
 
 int main(void)

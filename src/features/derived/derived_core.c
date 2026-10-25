@@ -273,12 +273,12 @@ static derived_flag_t did_fresh(const derived_core_t* c, uint32_t did, uint32_t 
     return f;
 }
 
-/* A declared DID input, with the signal's own stale_after_ms. */
+/* A declared DID input, with that DID's own stale_after_ms from the gen/ DID table (D-070). */
 static derived_flag_t did_value(const ctx_t* x, uint32_t did, float* v)
 {
     derived_flag_t f = DERIVED_FLAG_MATH_ERROR; /* an undeclared input is a bug: fail closed */
     if (declares(x->spec, VEHICLE_CL250_DERIVED_INPUT_DID, did)) {
-        f = did_fresh(x->c, did, x->now, (uint32_t)x->spec->stale_after_ms, v);
+        f = did_fresh(x->c, did, x->now, (uint32_t)vehicle_cl250_dids[did].stale_after_ms, v);
     }
     return f;
 }
@@ -366,7 +366,7 @@ static derived_flag_t f_gearbox_ratio(const ctx_t* x, float* out)
         if (speed <= 0.0f) {
             f = DERIVED_FLAG_STANDSTILL;
         } else {
-            const float wheel_rpm = (speed / (2.0f * DERIVED_PI * VEHICLE_CL250_REAR_WHEEL_RADIUS_DYNAMIC_M)) * 60.0f;
+            const float wheel_rpm = (speed / (2.0f * DERIVED_PI * VEHICLE_CL250_REAR_WHEEL_RADIUS_DYNAMIC_M)) * DERIVED_SECONDS_PER_MINUTE;
             const float reduction = VEHICLE_CL250_PRIMARY_REDUCTION_RATIO * VEHICLE_CL250_SECONDARY_REDUCTION_RATIO;
             f = did_value(x, (uint32_t)VEHICLE_CL250_IDX_ENGINE_SPEED, &rpm);
             if (f == DERIVED_FLAG_NONE) {
@@ -787,7 +787,7 @@ static double integral_rate(uint32_t sig, const float* v)
  * shortest remaining freshness of its inputs (a gap adds nothing); a new segment starts
  * when every input is fresh at b. The reference does the same over the whole session.
  */
-static void integral_update(derived_core_t* c, uint32_t sig, uint32_t limit_ms)
+static void integral_update(derived_core_t* c, uint32_t sig)
 {
     uint32_t ids[2] = {0u, 0u};
     const uint32_t n = integral_inputs(sig, ids);
@@ -820,6 +820,7 @@ static void integral_update(derived_core_t* c, uint32_t sig, uint32_t limit_ms)
         int32_t remaining = 0;
         for (uint32_t k = 0u; k < n; k++) {
             float one = 0.0f;
+            const uint32_t limit_ms = (uint32_t)vehicle_cl250_dids[ids[k]].stale_after_ms;
             if (did_fresh(c, ids[k], b, limit_ms, &one) != DERIVED_FLAG_NONE) {
                 usable = false;
             } else {
@@ -1039,7 +1040,7 @@ void derived_core_step(derived_core_t* c, uint32_t now_ms, const derived_in_t* i
                 stop_step(c, sig);
             } else {
                 if (kind == KIND_INTEGRAL) {
-                    integral_update(c, sig, (uint32_t)vehicle_cl250_derived[sig].stale_after_ms);
+                    integral_update(c, sig);
                 }
                 grid_step(c, sig, now_ms);
             }
@@ -1143,9 +1144,12 @@ void derived_core_init(derived_core_t* c)
             }
         }
     }
-    /* the event limit is polls of a DID, not stale_after_ms */
+    /* the DIDs' own limits, and the event limit (polls of a DID) */
     for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
-        const uint32_t lim = DERIVED_DID_AGE_LIMIT_POLLS * (uint32_t)vehicle_cl250_dids[i].poll_period_ms;
+        uint32_t lim = DERIVED_DID_AGE_LIMIT_POLLS * (uint32_t)vehicle_cl250_dids[i].poll_period_ms;
+        if ((uint32_t)vehicle_cl250_dids[i].stale_after_ms > lim) {
+            lim = vehicle_cl250_dids[i].stale_after_ms;
+        }
         if (lim > max_stale) {
             max_stale = lim;
         }

@@ -10,6 +10,7 @@ static snapshot_t snap;
 static derived_inputs_record_t slots[SNAPSHOT_SLOTS];
 static bool inited;       /* set at boot, before the tasks run */
 static uint32_t pass_no;  /* producer only */
+static uint32_t skipped;  /* producer only: publishes before init */
 
 // cppcheck-suppress misra-c2012-8.7 ; DEV-002: called by the boot setup (host program, H7) and the tests
 void derived_inputs_init(void)
@@ -17,13 +18,20 @@ void derived_inputs_init(void)
     (void)memset(slots, 0, sizeof slots); /* state NONE, pass 0: INVALID */
     snapshot_init(&snap);
     pass_no = 0u;
+    skipped = 0u;
     inited = true;
 }
 
 // cppcheck-suppress misra-c2012-8.7 ; DEV-002: called by app/comms (comms task) and the tests
 void derived_inputs_publish(uint32_t now_ms)
 {
-    if ((!inited) || snapshot_producer_fault(&snap)) {
+    if (!inited) {
+        if (skipped < UINT32_MAX) {
+            skipped++; /* a missing derived_inputs_init() at boot must be visible */
+        }
+        return;
+    }
+    if (snapshot_producer_fault(&snap)) {
         return; /* after a producer fault the write slot may be the consumer's front */
     }
     derived_inputs_record_t* const rec = &slots[snapshot_write_index(&snap)];
@@ -51,6 +59,12 @@ bool derived_inputs_read(derived_inputs_record_t* out)
     const bool fresh = snapshot_read_index(&snap, &idx);
     *out = slots[idx]; /* the one copy; no index outlives this call */
     return fresh;
+}
+
+// cppcheck-suppress misra-c2012-8.7 ; DEV-002: diagnostics and the tests
+uint32_t derived_inputs_skipped_count(void)
+{
+    return skipped;
 }
 
 // cppcheck-suppress misra-c2012-8.7 ; DEV-002: diagnostics and the tests

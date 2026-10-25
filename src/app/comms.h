@@ -5,7 +5,6 @@
  * The comms pass (Ç1, ISSUES D-2): the fixed order of rt-core's CAN work, shared by the
  * host program and the H7 comms task (one task runs both UDS roles):
  *   can_sm_step(VEHICLE)  -> can_if_dispatch(VEHICLE)  -> uds_client_step()
- *                                                      -> derived_inputs_publish()
  *                                                      -> lean_tx_publish_speed()
  *   can_sm_step(PLATFORM) -> can_if_dispatch(PLATFORM) -> vehicle_republish_step()
  *                                                      -> heartbeat_step()
@@ -32,9 +31,11 @@
  * (services/alive, services/snapshot).
  *
  * derived_inputs_publish() (services/derived_inputs, D-070) is the comms task's one producer
- * call for the derived-signal task: it copies the DID samples the client wrote in this pass
- * into a snapshot (bounded, no lock, no wait) that only features/derived reads. Nothing in
- * this pass depends on that task; it does nothing before derived_inputs_init().
+ * call for the derived-signal task and the LAST call of the pass, after uds_server_step():
+ * it copies the DID samples the client wrote in this pass (nothing later writes
+ * vehicle_signals) into a snapshot (bounded, no lock, no wait) that only features/derived
+ * reads. No frame work waits for it and nothing in this pass depends on that task; before
+ * derived_inputs_init() it does nothing but count (derived_inputs_skipped_count()).
  *
  * Portable: services and feature headers only, never a direct hal/ include
  * (services/alive.h brings hal/hal_atomic.h transitively, like can_if.h brings
