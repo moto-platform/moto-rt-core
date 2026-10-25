@@ -904,7 +904,7 @@ static void stop_step(derived_core_t* c, uint32_t sig)
         derived_stop_t* const st = &c->stop;
         const uint32_t t = speed->stamp_ms;
         const uint32_t speed_limit =
-            DERIVED_DID_AGE_LIMIT_POLLS * (uint32_t)vehicle_cl250_dids[VEHICLE_CL250_IDX_VEHICLE_SPEED].poll_period_ms;
+            (uint32_t)vehicle_cl250_dids[VEHICLE_CL250_IDX_VEHICLE_SPEED].stale_after_ms; /* D-087 */
         c->evals_step++;
         if (st->has_prev && (((uint32_t)(t - st->prev_ms) > speed_limit))) {
             st->started = false; /* nothing is followed across a gap */
@@ -921,7 +921,7 @@ static void stop_step(derived_core_t* c, uint32_t sig)
         } else if (is_zero(speed->value) && st->moving) {
             float rpm = 0.0f;
             const uint32_t rpm_limit =
-                DERIVED_DID_AGE_LIMIT_POLLS * (uint32_t)vehicle_cl250_dids[VEHICLE_CL250_IDX_ENGINE_SPEED].poll_period_ms;
+                (uint32_t)vehicle_cl250_dids[VEHICLE_CL250_IDX_ENGINE_SPEED].stale_after_ms; /* D-087 */
             if ((did_fresh(c, (uint32_t)VEHICLE_CL250_IDX_ENGINE_SPEED, t, rpm_limit, &rpm) == DERIVED_FLAG_NONE) &&
                 (rpm > 0.0f)) {
                 st->started = true;
@@ -1144,14 +1144,10 @@ void derived_core_init(derived_core_t* c)
             }
         }
     }
-    /* the DIDs' own limits, and the event limit (polls of a DID) */
+    /* the DIDs' own limits (every DID input, events included, D-087) */
     for (uint32_t i = 0u; i < VEHICLE_CL250_DID_COUNT; i++) {
-        uint32_t lim = DERIVED_DID_AGE_LIMIT_POLLS * (uint32_t)vehicle_cl250_dids[i].poll_period_ms;
-        if ((uint32_t)vehicle_cl250_dids[i].stale_after_ms > lim) {
-            lim = vehicle_cl250_dids[i].stale_after_ms;
-        }
-        if (lim > max_stale) {
-            max_stale = lim;
+        if ((uint32_t)vehicle_cl250_dids[i].stale_after_ms > max_stale) {
+            max_stale = vehicle_cl250_dids[i].stale_after_ms;
         }
     }
     c->max_stale_ms = max_stale;
