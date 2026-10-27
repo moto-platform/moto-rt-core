@@ -55,7 +55,7 @@ void heartbeat_msg(bool first_frame, bool fault_active, uint32_t fault_onsets,
 }
 
 bool heartbeat_frame(const struct platform_heartbeat_rt_core_t* msg,
-                     const moto_e2e_tx_state_t* committed, moto_e2e_tx_state_t* next,
+                     const vehicle_e2e_tx_state_t* committed, vehicle_e2e_tx_state_t* next,
                      uint8_t out[PLATFORM_HEARTBEAT_RT_CORE_LENGTH])
 {
     if ((msg == NULL) || (committed == NULL) || (next == NULL) || (out == NULL)) {
@@ -67,5 +67,5 @@ bool heartbeat_frame(const struct platform_heartbeat_rt_core_t* msg,
     }
     *next = *committed;
     return platform_heartbeat_rt_core_e2e_protect(out, PLATFORM_HEARTBEAT_RT_CORE_LENGTH, next) ==
-           MOTO_E2E_OK;
+           VEHICLE_E2E_OK;
 }

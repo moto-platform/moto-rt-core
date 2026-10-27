@@ -1,7 +1,7 @@
 /*
  * Pure derived-signal core (D-070). See derived_core.h for the sampling rule and
  * features/derived/README.md for the rationale. The formulas follow the Python reference
- * (moto-server src/moto_server/derived/formulas.py), input by input in the same order, so a
+ * (vehicle-server src/vehicle_server/derived/formulas.py), input by input in the same order, so a
  * flag is the one the reference gives when more than one input is unusable.
  */
 #include "features/derived/derived_core.h"

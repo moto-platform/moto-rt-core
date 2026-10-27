@@ -2,7 +2,7 @@
  * Tests of the pure derived-signal core (D-070). Two kinds of evidence, because golden
  * vectors are necessary but not sufficient (architecture-guard MAJOR on the C3 plan):
  *
- * 1. Golden replay (tests/host/vectors, written by the moto-server Python reference): each
+ * 1. Golden replay (tests/host/vectors, written by the vehicle-server Python reference): each
  *    scenario's DID inputs go through the core in time order, stepped every millisecond, and
  *    every expected output row is compared at its time: the core's evaluation tick must be
  *    the reference grid time of the row, the valid flag and the flag code must match

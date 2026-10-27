@@ -43,7 +43,7 @@ Every ID, length, choice value, cycle time and E2E parameter comes from gen/ (`p
 
 ## E2E
 
-Same rules as 0x021 (`features/vehicle_republish/README.md` § E2E, D-056 item 5): the module owns its `moto_e2e_tx_state_t`, `heartbeat_frame()` protects a copy, and the glue commits it only on `CAN_PORT_OK`. A frame replaced in its buffer shows up as a counter gap; a gap longer than the 300 ms timeout makes the receiver resync as INITIAL, never OK (D-026).
+Same rules as 0x021 (`features/vehicle_republish/README.md` § E2E, D-056 item 5): the module owns its `vehicle_e2e_tx_state_t`, `heartbeat_frame()` protects a copy, and the glue commits it only on `CAN_PORT_OK`. A frame replaced in its buffer shows up as a counter gap; a gap longer than the 300 ms timeout makes the receiver resync as INITIAL, never OK (D-026).
 
 ## Before 0x020 (safety-reviewer MINOR-3, D-065 item 4)
 
@@ -69,7 +69,7 @@ D-064 item 4 is now mechanical on the heartbeat side: `heartbeat_fault_active()`
 ## Memory
 
 - **RAM:** `heartbeat_t` (cycle, E2E state, uptime, three counters, two flags), owned by the caller: about 36 B. The EKF supervision (`comms_ekf_t`, 16 B) and the counter (`alive_counter_t`, 4 B) are owned by the setup, not the heartbeat. `services/diag` adds the per-DTC monitor results and the onset count (bss +7 B). Stack per step is under 100 B. No heap; the only loop is bounded by `PLATFORM_UDS_DTC_COUNT`.
-- **Flash** (M7 release, `arm-none-eabi-size` of `moto_rtcore_logic` + `moto_rtcore_fw`, 2026-10-09): text 10904 → 11524 B (+620 B) for the heartbeat, `services/com` and the diag additions. The gen/ functions the linker keeps add about 154 B (pack, init, two encodes, the 0x081 E2E protect). D-065 PR 1: 12018 → 12370 B (+352 B: `services/snapshot` 144 with its defensive index checks, `alive` 42, `alive_core` 54, the `app/comms` supervision and the extra input), bss unchanged.
+- **Flash** (M7 release, `arm-none-eabi-size` of `vehicle_rtcore_logic` + `vehicle_rtcore_fw`, 2026-10-09): text 10904 → 11524 B (+620 B) for the heartbeat, `services/com` and the diag additions. The gen/ functions the linker keeps add about 154 B (pack, init, two encodes, the 0x081 E2E protect). D-065 PR 1: 12018 → 12370 B (+352 B: `services/snapshot` 144 with its defensive index checks, `alive` 42, `alive_core` 54, the `app/comms` supervision and the extra input), bss unchanged.
 
 ## Coverage (D-046: 100 % target for heartbeat/E2E)
 
@@ -95,9 +95,9 @@ D-064 item 4 is now mechanical on the heartbeat side: `heartbeat_fault_active()`
   - 0x081 at its cycle time next to the client, the server and the republisher
   - the boot window: with the ECU silent, INIT, then NORMAL until U0100-00 arms, DEGRADED within one cycle after `VEHICLE_CL250_ECU_ABSENT_TIMEOUT_MS` with `ERROR_COUNT` 1
   - U3000-00's two writers (client status, server supervision): three client stalls past the max age give `ERROR_COUNT` 1, 2, 3, NORMAL after each resume, no extra onset
-- **SIL** (`moto_rtcore_host`, ctest `sil_moto_rtcore_host_demo`): `sim_listener` checks every 0x081 (E2E, NODE_MODE, UPTIME monotonic, gap below the E2E timeout); the demo fails otherwise.
+- **SIL** (`vehicle_rtcore_host`, ctest `sil_vehicle_rtcore_host_demo`): `sim_listener` checks every 0x081 (E2E, NODE_MODE, UPTIME monotonic, gap below the E2E timeout); the demo fails otherwise.
 
-## HIL scenarios (with the board, moto-hil-bench)
+## HIL scenarios (with the board, vehicle-hil-bench)
 
 - `heartbeat_rt_core_reset`: reset rt-core during a ride. Expected: safety-node sees the E2E timeout within 300 ms + one cycle and shows DEGRADED; after the reset the first 0x081 is INIT with a smaller UPTIME, and safety-node returns to rt-core's lean only per its Q-023(4) hysteresis.
 - `heartbeat_ecu_silent_degraded`: silence the restbus ECU. Expected: NODE_MODE DEGRADED within `VEHICLE_CL250_ECU_ABSENT_TIMEOUT_MS` + one cycle, `ERROR_COUNT` +1, NORMAL again within one cycle after the ECU answers.

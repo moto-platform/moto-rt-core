@@ -1,8 +1,8 @@
-# moto-rt-core
+# vehicle-rt-core
 
-Main domain controller firmware for the [moto-platform](https://github.com/moto-platform) motorcycle platform, running on the **Cortex-M7 core of an STM32H755** (NUCLEO-H755ZI-Q, D-072; the Cortex-M4 runs `moto-safety-node`). It owns CAN on both buses, UDS/ISO-TP, logging, sensor fusion and the cornering EKF estimation (see `CLAUDE.md` for the scope and the safety rules).
+Main domain controller firmware for the [vehicle-platform](https://github.com/vehicle-platform) motorcycle platform, running on the **Cortex-M7 core of an STM32H755** (NUCLEO-H755ZI-Q, D-072; the Cortex-M4 runs `vehicle-safety-node`). It owns CAN on both buses, UDS/ISO-TP, logging, sensor fusion and the cornering EKF estimation (see `CLAUDE.md` for the scope and the safety rules).
 
-Signal, CAN and UDS definitions come only from [moto-vehicle-defs](https://github.com/moto-platform/moto-vehicle-defs) (submodule `external/moto-vehicle-defs`, pinned to `v0.8.0`).
+Signal, CAN and UDS definitions come only from [vehicle-defs](https://github.com/vehicle-platform/vehicle-defs) (submodule `external/vehicle-defs`, pinned to `v0.8.0`).
 
 ## Layout
 
@@ -15,10 +15,10 @@ src/services/    timebase, can_if (CAN RX routing + D-020 vehicle guard), vehicl
 src/features/    independent function modules (uds/: ISO-TP core + link glue, UDS client =
                  the CL250 vehicle poller, UDS server = rt-core's diagnostics on the
                  platform bus only)
-src/app/         host/ = moto_rtcore_host SIL program; target task setup -- not yet
+src/app/         host/ = vehicle_rtcore_host SIL program; target task setup -- not yet
 tests/host/      Unity host tests (ctest)
 cmake/           arm-none-eabi toolchain file
-external/        moto-vehicle-defs (generated C in gen/c/rt_core/)
+external/        vehicle-defs (generated C in gen/c/rt_core/)
 ```
 
 ## Build and test
@@ -33,7 +33,7 @@ cmake --preset target-m7-debug && cmake --build --preset target-m7-debug
 ```
 
 The host tests run with AddressSanitizer and UndefinedBehaviorSanitizer. The native
-build also produces `build/host-tests/src/moto_rtcore_host`: rt-core as a host program
+build also produces `build/host-tests/src/vehicle_rtcore_host`: rt-core as a host program
 (SIL, D-034). It runs the UDS client against an in-process bus with a simulated CL250
 ECU and prints the signal table once a second. The UDS server answers on a separate
 in-process platform bus; `--uds-scenario` drives a scripted diagnostic session against it.

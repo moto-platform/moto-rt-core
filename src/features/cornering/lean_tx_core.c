@@ -74,8 +74,8 @@ void lean_tx_msg(const lean_record_t* rec, bool comms_fault, uint32_t now_ms,
     msg->lean_angle_quality = platform_ekf_lean_lean_angle_quality_encode((float)q);
 }
 
-bool lean_tx_frame(const struct platform_ekf_lean_t* msg, const moto_e2e_tx_state_t* committed,
-                   moto_e2e_tx_state_t* next, uint8_t out[PLATFORM_EKF_LEAN_LENGTH])
+bool lean_tx_frame(const struct platform_ekf_lean_t* msg, const vehicle_e2e_tx_state_t* committed,
+                   vehicle_e2e_tx_state_t* next, uint8_t out[PLATFORM_EKF_LEAN_LENGTH])
 {
     if ((msg == NULL) || (committed == NULL) || (next == NULL) || (out == NULL)) {
         return false;
@@ -84,5 +84,5 @@ bool lean_tx_frame(const struct platform_ekf_lean_t* msg, const moto_e2e_tx_stat
         return false;
     }
     *next = *committed;
-    return platform_ekf_lean_e2e_protect(out, PLATFORM_EKF_LEAN_LENGTH, next) == MOTO_E2E_OK;
+    return platform_ekf_lean_e2e_protect(out, PLATFORM_EKF_LEAN_LENGTH, next) == VEHICLE_E2E_OK;
 }

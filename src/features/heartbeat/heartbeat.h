@@ -25,7 +25,7 @@ extern "C" {
 
 typedef struct {
     com_cycle_t cycle;
-    moto_e2e_tx_state_t e2e; /* committed: advanced only by accepted frames */
+    vehicle_e2e_tx_state_t e2e; /* committed: advanced only by accepted frames */
     heartbeat_uptime_t uptime;
     com_msg_stats_t stats;
     bool stepped; /* a step completed: frames built later are not INIT */

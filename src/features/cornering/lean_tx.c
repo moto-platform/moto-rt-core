@@ -19,7 +19,7 @@ bool lean_tx_open(lean_tx_t* tx, lean_link_t* link, const alive_counter_t* regis
         return false;
     }
     (void)memset(tx, 0, sizeof *tx);
-    moto_e2e_tx_init(&tx->e2e);
+    vehicle_e2e_tx_init(&tx->e2e);
     if ((link == NULL) || (registered == NULL) || (registered != lean_link_alive(link))) {
         return false; /* fail-closed: no supervised EKF behind this link */
     }
@@ -90,7 +90,7 @@ void lean_tx_step(lean_tx_t* tx, uint32_t now_ms)
         snapshot_consumer_fault(&link->out_snap) || snapshot_producer_fault(&link->speed_snap);
 
     struct platform_ekf_lean_t msg;
-    moto_e2e_tx_state_t next;
+    vehicle_e2e_tx_state_t next;
     uint8_t data[PLATFORM_EKF_LEAN_LENGTH];
     lean_tx_msg(rec, comms_fault, now_ms, &msg);
     const bool built = lean_tx_frame(&msg, &tx->e2e, &next, data);

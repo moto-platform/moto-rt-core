@@ -9,7 +9,7 @@
  * any of it.
  *
  * Layout, flags, widths and maxima all come from gen/ (PLATFORM_UDS_LEAN_HEALTH_*), the
- * rules from the DID in moto-vehicle-defs uds/dids.yaml (read the comment block above
+ * rules from the DID in vehicle-defs uds/dids.yaml (read the comment block above
  * max_age_ms: it is the safety review's race-freedom contract):
  *   - EKF-side fields (offset learned / rejected, reject count, unlearned seconds, the
  *     speed-consumer fault latch) travel in the EKF's existing lean record through the

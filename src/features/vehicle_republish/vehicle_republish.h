@@ -29,7 +29,7 @@ typedef com_msg_stats_t vehicle_republish_msg_stats_t;
 typedef struct {
     com_cycle_t speed_cycle;
     com_cycle_t engine_cycle;
-    moto_e2e_tx_state_t speed_e2e; /* committed: advanced only by accepted frames */
+    vehicle_e2e_tx_state_t speed_e2e; /* committed: advanced only by accepted frames */
     vehicle_republish_msg_stats_t speed;
     vehicle_republish_msg_stats_t engine;
     bool opened; /* 0x021's dedicated buffer was registered: the only state that sends */

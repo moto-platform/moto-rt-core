@@ -8,7 +8,7 @@ Status:
   - the link glue that binds it to a CAN port and an ID pair (`isotp_link.{h,c}`)
   - the UDS client, the CL250 vehicle poller (`uds_client.{h,c}`, `uds_client_core.{h,c}`, Ç3)
   - the UDS server on the platform bus (`uds_server.{h,c}`, `uds_server_core.{h,c}`, Ç3, D-040)
-- ISO 14229 codes come from gen/ `uds_iso14229.h` (moto-vehicle-defs v0.3.2, D-040); the server contract (IDs, timing, services, DIDs, DTCs) from gen/ `platform_uds.h`.
+- ISO 14229 codes come from gen/ `uds_iso14229.h` (vehicle-defs v0.3.2, D-040); the server contract (IDs, timing, services, DIDs, DTCs) from gen/ `platform_uds.h`.
 
 ## ISO-TP core (`isotp_core.h`)
 
@@ -164,7 +164,7 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
   - **Step margin (D-053, ISSUES E-9, E-10; defs v0.3.3).** The client takes an answer, and judges its timeliness, at the next `uds_client_step()` after it arrives, before that step's timeout check. With P = B (defs v0.3.2: 0xF40D and 0xF40C at 100 ms), an ECU that kept answering just inside B, seen by a step that ran past sent + B, was slow on every read, never timed out and was never skipped, so it could hold the slot back to back (safety review MINOR-2 on D-052). Since defs v0.3.3 every `poll_period_ms` is at least `RESPONSE_TIMEOUT_BASE_MS` + `CLIENT_STEP_MAX_MS` (10 ms, provisional; the codegen refuses a table that breaks it), so any answer the client accepts is seen by sent + B + S − 1 < sent + P: its DID is not due yet, so the DIDs due meanwhile go first, and unless an earlier timed-out read stamps it, it is in time. ISO 14229-2 lets the client timer include its own processing latency; ISO 26262-6 freedom from interference in timing: one DID's slow answers must not deny the slot to the others.
     - The rule holds while two steps are at most S apart (timebase ticks). The core measures the gap between two `uds_client_core_poll()` calls (one per step, also while latched, with `rx_busy` or with `tx_ready` false), counts every gap above `VEHICLE_CL250_CLIENT_STEP_MAX_MS` (`stats.step_overruns`) and keeps the longest (`stats.step_gap_max_ms`) for the D-029 bench (safety review MINOR-2 on D-053). It does not act on them: a longer gap reopens the E-9 hole for the read it hits (due again at once at S + 1, slow from S + 2), so a count above zero means the target needs a larger `client_step_max_ms` and longer periods.
     - Definition (safety review MINOR-1 on E-10): every step counts, as in the defs yaml comment. D-053 item 5 says "with `rx_busy` false"; a step with `rx_busy` splits such a gap in two, so an overrun across it can be missed. That cannot open the hole today: with Single Frame answers only (Q-020), `rx_busy` during a pending read means its own segmented answer, which ends as "service unavailable" and is never judged against B ("Not covered"). Anchoring the gap on `rx_busy`-free steps only would turn every N_Cr episode into a huge step gap and spoil the bench number.
-    - Read-out: `uds_client_stats()` and the SIL summary of `moto_rtcore_host`. No platform DID, DTC or XCP path exposes them yet (safety review MINOR-2 on E-10, ISSUES follow-up with the H7); until then the target value needs a debugger.
+    - Read-out: `uds_client_stats()` and the SIL summary of `vehicle_rtcore_host`. No platform DID, DTC or XCP path exposes them yet (safety review MINOR-2 on E-10, ISSUES follow-up with the H7); until then the target value needs a debugger.
     - Tests: `test_an_answer_seen_at_sent_plus_b_plus_s_minus_1_is_in_time_and_the_due_did_goes`, `test_step_gaps_up_to_s_with_answers_inside_b_give_no_slow_or_back_to_back_read` (10 seeds, 20 s, step gaps 1..S, answers 1..B − 1 ms after the request, taken at the first step after their arrival: no slow answer, no timeout, no DID read again in the step of its own answer), `test_an_answer_after_the_timeout_step_is_unexpected`, `test_a_step_gap_above_s_is_the_counted_residual` (S + 1: in time but read again back to back; S + 2: slow; both counted), `test_step_gaps_above_the_gen_step_max_are_counted` (wrap, `rx_busy`, `tx_ready` false, latch, init).
     - Cost: +12 B RAM (the two counters and the last poll time; the flag fits the padding), +52 B flash (`-O2`).
   - **Poll period at least the base timeout (D-052, ISSUES E-8 (1), (2); defs v0.3.2; one step more since D-053).** defs refuses a DID with `poll_period_ms` < `response_timeout_base_ms` (+ `client_step_max_ms` since D-053) and polled 0xF40C at 100 ms (`stale_after_ms` 300) in v0.3.2, 110 ms (330) since v0.3.3 (provisional; the legacy 50 ms is `legacy_poll_period_ms`). A read answered within the base timeout without 0x78 then ends before its DID is due again, so the DIDs due meanwhile go first. Its codegen fault-mode check covers any one faulty DID, normal ones included, and holds the slot for B + S per faulty read since D-053: 0xF40D 220/300, 0xF40C 260/330, 0xF411 480/600, 0xF405 1740/2400, 0xF442 2270/2400 ms (defs v0.3.3; v0.3.2: 200/300, 240/300, 460/600, 1380/2400, 2160/2400).
@@ -256,7 +256,7 @@ Every request still passes `vehicle_cl250_request_allowed()` in the link and the
 | m5 | The latch reason was not exposed | Fixed: `uds_client_fault()` |
 | m6 | `uds_client_sample_t s` was not initialised | Fixed |
 | m7 | A permanent NRC is polled at full rate | Documented (legacy, user decision) |
-| m8 | `moto_rtcore_host --allow-real-bus` is now a full tester | Fixed: the warning text says so, and the summary prints the fault |
+| m8 | `vehicle_rtcore_host --allow-real-bus` is now a full tester | Fixed: the warning text says so, and the summary prints the fault |
 | — | N_As, bus-off backoff | Done in Ç1 (`services/can_sm`, D-054); the H7 FDCAN driver itself waits for the board (Q-019) |
 
 - Checks after the fixes (2026-09-29):
@@ -323,7 +323,7 @@ Any other NRC or a malformed answer only ends the run. conn's BOTH_IDS rule and 
 
 **Flow Control.** The link answers a 0x19 First Frame with the one `vehicle_cl250_fc_cts[]` only if FF_DL <= `VEHICLE_CL250_MAX_FF_DL` and its first bytes equal `59 <sub-function>` (+ the DTC for 0x04/0x06). Reads and the session keep 64 B (`UDS_CLIENT_READ_MAX_FF_DL`), so the table-DID behaviour of D-059 is unchanged. The receive buffer is 255 B (`UDS_CLIENT_RX_BUF = VEHICLE_CL250_MAX_FF_DL`, 36 CFs, asserted against `VEHICLE_CL250_FC_MAX_CF_BURST`).
 
-**Sink (D-069 item 6, D-080 item 5).** `uds_client_set_dtc_sink(client, sink, ctx)`: every complete positive 0x19 answer is passed raw to `sink(ctx, info, data, len)` from inside `uds_client_step()` (comms task), before `isotp_link_rx_release()`. `info` names the step, sub-function, DTC (0x04/0x06), trigger and run number. The sink must not block, must not call back into the client and must copy the bytes (valid only during the call); `len <= VEHICLE_CL250_MAX_FF_DL`. H7 port: the sink runs inside the comms pass, whose step gaps D-053 watches (`stats.step_overruns`), so it must be a bounded copy into a static ring that a lower-priority task drains; flash or UART writes never run there. TODO: replaced by the `services/` logging manager when it exists; without a sink the answers are not logged. The host program prints them as `[DTC]` lines (`--dtcs N` stores N synthetic DTCs in the simulated ECU; SIL test `sil_moto_rtcore_host_dtc_run`).
+**Sink (D-069 item 6, D-080 item 5).** `uds_client_set_dtc_sink(client, sink, ctx)`: every complete positive 0x19 answer is passed raw to `sink(ctx, info, data, len)` from inside `uds_client_step()` (comms task), before `isotp_link_rx_release()`. `info` names the step, sub-function, DTC (0x04/0x06), trigger and run number. The sink must not block, must not call back into the client and must copy the bytes (valid only during the call); `len <= VEHICLE_CL250_MAX_FF_DL`. H7 port: the sink runs inside the comms pass, whose step gaps D-053 watches (`stats.step_overruns`), so it must be a bounded copy into a static ring that a lower-priority task drains; flash or UART writes never run there. TODO: replaced by the `services/` logging manager when it exists; without a sink the answers are not logged. The host program prints them as `[DTC]` lines (`--dtcs N` stores N synthetic DTCs in the simulated ECU; SIL test `sil_vehicle_rtcore_host_dtc_run`).
 
 **Memory.** `dtc_snapshot_core_t` is 60 B on the M7 (72 B on the host with 4 B enums), of which the run and epoch state is 44 B (asserted <= 64 B; 8 DTCs x 3 B, the rest counters and flags) and 16 B the stats. `uds_client_core_t` is 1192 B on the M7 (it was 1120 B; the DTC state, the answer info and flags). `uds_client_t` is 1608 B on the M7 (it was 1328 B): +191 B for the 255 B receive buffer. No heap, all loops bounded by the DTC cap or a frame length (arm-none-eabi-gcc -mcpu=cortex-m7, 2026-10-24).
 
@@ -333,7 +333,7 @@ Any other NRC or a malformed answer only ends the run. conn's BOTH_IDS rule and 
 
 **Responsibility.** rt-core's own diagnostic server on the platform bus (FDCAN2), for a workshop tool, the Raspi or the HIL host (Ç3, D-040). It serves rt-core's DIDs and DTCs. It never opens, reads or writes the vehicle bus: the link is opened with `isotp_link_open()`, which refuses `CAN_PORT_VEHICLE`, and nothing was added to the vehicle port or the `can_if` guard (D-020, D-037).
 - `uds_server_core` is the pure state machine: no HAL, services or RTOS, time passed in, data through a provider table. Tested in `tests/host/test_uds_server_core.c`.
-- `uds_server` is the glue: the platform ISO-TP link, the functional receiver, `services/timebase`, and the providers (`services/diag`, `services/vehicle_signals`). Tested end to end in `tests/host/test_uds_server.c`, and in SIL by `moto_rtcore_host --uds-scenario`.
+- `uds_server` is the glue: the platform ISO-TP link, the functional receiver, `services/timebase`, and the providers (`services/diag`, `services/vehicle_signals`). Tested end to end in `tests/host/test_uds_server.c`, and in SIL by `vehicle_rtcore_host --uds-scenario`.
 - It never includes `uds_client.h`. The client publishes its state through `services/diag`, so either module can be removed without breaking the other (architecture-guard, 2026-09-30).
 
 **Addressing and transport** (all from gen/ `platform_uds.h`):
@@ -352,7 +352,7 @@ Any other NRC or a malformed answer only ends the run. conn's BOTH_IDS rule and 
 
 **DIDs:**
 - 0xF186 active session, served by the core
-- 0xF189 SW version: `MOTO_RTCORE_VERSION` = the CMake project version, NUL-padded to 12 bytes
+- 0xF189 SW version: `VEHICLE_RTCORE_VERSION` = the CMake project version, NUL-padded to 12 bytes
 - 0xFD00 vehicle-tester status: byte 0 = ECU present / session up / latched bits, byte 1 = latch reason
 - 0xFD01 uptime in seconds since `uds_server_open()`
 - 0xFD02 rt-core health (D-055), 23 bytes, big-endian, gen/ `PLATFORM_UDS_RT_CORE_HEALTH_*` offsets:
@@ -480,7 +480,7 @@ Any other NRC or a malformed answer only ends the run. conn's BOTH_IDS rule and 
 - vss-schema-guardian: CLEAN (defs v0.4.0).
 - safety-reviewer: no blocker; R1-R7 of D-055 met. Applied: MINOR-1 (every counter's gen/ `*_MAX` is asserted equal to the clamp value), MINOR-2 (tests: port counters above 0xFFFF read 0xFFFF, through a host-only `vbus_add_bus_off_events()` hook; a latched client keeps `STEP_STATS_FRESH`), NIT-1 (`can_sm_state_known()` and `can_sm_state()` agree only within the comms task). Open: NIT-2 (defs codegen comments STATE `*_MAX` as a counter limit); the HIL `uds_server_health_flood` below. A 4 × 0xFD02 answer is 101 B (15 frames on 0x718); E2E frames not waiting behind it on the H7 still needs the D-054 item 6 dedicated TX buffers.
 
-## Proposed HIL scenarios (moto-hil-bench, once the host schema exists)
+## Proposed HIL scenarios (vehicle-hil-bench, once the host schema exists)
 
 - `isotp_vehicle_segmented_response_fc` (vehicle bus, D-059):
   - The simulated ECU answers a 0x22 request with a First Frame of 20 bytes.

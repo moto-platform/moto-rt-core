@@ -47,7 +47,7 @@
 #include "hal/host/can_port_host.h"
 #include "hal/host/imu_host.h"
 #include "hal/host/vbus.h"
-#include "moto_e2e.h"
+#include "vehicle_e2e.h"
 #include "platform.h"
 #include "platform_e2e.h"
 #include "services/can_if.h"
@@ -205,8 +205,8 @@ static bool frame_is_invalid(const uint8_t* data)
     m.lean_angle_state = PLATFORM_EKF_LEAN_LEAN_ANGLE_STATE_INVALID_CHOICE;
     m.lean_angle = 0;
     m.lean_angle_quality = 0u;
-    m.e2_e_crc = data[MOTO_E2E_CRC_OFFSET];
-    m.e2_e_counter = (uint8_t)(data[MOTO_E2E_COUNTER_OFFSET] & MOTO_E2E_COUNTER_MASK);
+    m.e2_e_crc = data[VEHICLE_E2E_CRC_OFFSET];
+    m.e2_e_counter = (uint8_t)(data[VEHICLE_E2E_COUNTER_OFFSET] & VEHICLE_E2E_COUNTER_MASK);
     uint8_t ref[PLATFORM_EKF_LEAN_LENGTH];
     if (platform_ekf_lean_pack(ref, &m, sizeof ref) != (int)PLATFORM_EKF_LEAN_LENGTH) {
         cres.pack_failed++;
@@ -306,7 +306,7 @@ static void check_health_did(uint32_t now)
     cres.health_fresh += fresh ? 1u : 0u;
 }
 
-static void drain(uint32_t now, moto_e2e_rx_state_t* rx)
+static void drain(uint32_t now, vehicle_e2e_rx_state_t* rx)
 {
     can_frame_t got;
     while (vbus_recv(&bus_p, node_peer, &got) == CAN_PORT_OK) {
@@ -315,10 +315,10 @@ static void drain(uint32_t now, moto_e2e_rx_state_t* rx)
         }
         cres.frames++;
         cres.frames_off_phase += (((now + phase_k) % CYCLE_MS) == 0u) ? 0u : 1u;
-        const moto_e2e_status_t st =
-            moto_e2e_check(PLATFORM_EKF_LEAN_E2E_DATA_ID, PLATFORM_EKF_LEAN_E2E_MAX_DELTA_COUNTER,
+        const vehicle_e2e_status_t st =
+            vehicle_e2e_check(PLATFORM_EKF_LEAN_E2E_DATA_ID, PLATFORM_EKF_LEAN_E2E_MAX_DELTA_COUNTER,
                            PLATFORM_EKF_LEAN_E2E_TIMEOUT_MS, got.data, got.dlc, rx, now);
-        cres.e2e_bad += ((st == MOTO_E2E_OK) || (st == MOTO_E2E_INITIAL)) ? 0u : 1u;
+        cres.e2e_bad += ((st == VEHICLE_E2E_OK) || (st == VEHICLE_E2E_INITIAL)) ? 0u : 1u;
         if (frame_is_invalid(got.data)) {
             cres.frames_invalid++;
             cres.invalid_after_valid += (cres.first_valid_ms != 0u) ? 1u : 0u;
@@ -335,8 +335,8 @@ static void drain(uint32_t now, moto_e2e_rx_state_t* rx)
 static void* comms_thread(void* arg)
 {
     (void)arg;
-    moto_e2e_rx_state_t rx;
-    moto_e2e_rx_init(&rx);
+    vehicle_e2e_rx_state_t rx;
+    vehicle_e2e_rx_init(&rx);
     uint32_t last_record_stamp = 0u;
     uint32_t last_alive = 0u;
     bool seen_learnt = false;

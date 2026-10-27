@@ -16,7 +16,7 @@
  *   - Anything else gets a negative response.
  * Fault hooks for tests: silent, NRC 0x78 bursts, a segmented (First Frame) answer, a
  * fixed NRC for one DID, and a session drop. It is a stand-in until the live vehicle
- * model of moto-hil-bench (D-035) exists; not firmware.
+ * model of vehicle-hil-bench (D-035) exists; not firmware.
  */
 
 #include "features/uds/isotp_core.h"

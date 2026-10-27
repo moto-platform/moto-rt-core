@@ -45,8 +45,8 @@ void vehicle_republish_engine_msg(const vehicle_signal_sample_t samples[VEHICLE_
  * failed (out untouched beyond its length).
  */
 bool vehicle_republish_speed_frame(const struct platform_vehicle_speed_t* msg,
-                                   const moto_e2e_tx_state_t* committed,
-                                   moto_e2e_tx_state_t* next,
+                                   const vehicle_e2e_tx_state_t* committed,
+                                   vehicle_e2e_tx_state_t* next,
                                    uint8_t out[PLATFORM_VEHICLE_SPEED_LENGTH]);
 
 /* Packs 0x110 (no E2E: state range). */

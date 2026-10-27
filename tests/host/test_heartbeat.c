@@ -27,7 +27,7 @@ static uint8_t node_dut;
 static uint8_t node_peer;
 static uint8_t node_vehicle;
 static heartbeat_t hb;
-static moto_e2e_rx_state_t rx;
+static vehicle_e2e_rx_state_t rx;
 static bool client_running; /* the test writes a healthy tester status every pass */
 static bool client_latched;
 
@@ -47,7 +47,7 @@ void setUp(void)
     TEST_ASSERT_EQUAL(CAN_PORT_OK, can_if_apply_filters(CAN_PORT_PLATFORM));
     can_sm_step(CAN_PORT_VEHICLE);
     can_sm_step(CAN_PORT_PLATFORM);
-    moto_e2e_rx_init(&rx);
+    vehicle_e2e_rx_init(&rx);
     client_running = true;
     client_latched = false;
 }
@@ -93,12 +93,12 @@ static void drain(seen_t* s)
         TEST_ASSERT_EQUAL(PLATFORM_HEARTBEAT_RT_CORE_IS_EXTENDED != 0, f.extended);
         TEST_ASSERT_EQUAL_UINT8(PLATFORM_HEARTBEAT_RT_CORE_LENGTH, f.dlc);
         s->frames++;
-        const moto_e2e_status_t st = moto_e2e_check(
+        const vehicle_e2e_status_t st = vehicle_e2e_check(
             PLATFORM_HEARTBEAT_RT_CORE_E2E_DATA_ID, PLATFORM_HEARTBEAT_RT_CORE_E2E_MAX_DELTA_COUNTER,
             PLATFORM_HEARTBEAT_RT_CORE_E2E_TIMEOUT_MS, f.data, f.dlc, &rx, timebase_now_ms());
-        s->e2e_ok += (st == MOTO_E2E_OK) ? 1u : 0u;
-        s->e2e_initial += (st == MOTO_E2E_INITIAL) ? 1u : 0u;
-        s->e2e_other += ((st != MOTO_E2E_OK) && (st != MOTO_E2E_INITIAL)) ? 1u : 0u;
+        s->e2e_ok += (st == VEHICLE_E2E_OK) ? 1u : 0u;
+        s->e2e_initial += (st == VEHICLE_E2E_INITIAL) ? 1u : 0u;
+        s->e2e_other += ((st != VEHICLE_E2E_OK) && (st != VEHICLE_E2E_INITIAL)) ? 1u : 0u;
         sim_listener_heartbeat_decode(f.data, &s->last); /* gen/ pack as the layout oracle */
         s->init += (s->last.node_mode == PLATFORM_HEARTBEAT_RT_CORE_NODE_MODE_INIT_CHOICE) ? 1u : 0u;
         s->normal += (s->last.node_mode == PLATFORM_HEARTBEAT_RT_CORE_NODE_MODE_NORMAL_CHOICE) ? 1u : 0u;
@@ -244,7 +244,7 @@ static void test_a_latched_vehicle_port_degrades_without_the_server_monitor(void
     TEST_ASSERT_EQUAL_UINT8(PLATFORM_HEARTBEAT_RT_CORE_NODE_MODE_NORMAL_CHOICE, s.last.node_mode);
     latch_vehicle_port();
     memset(&s, 0, sizeof s);
-    moto_e2e_rx_init(&rx);
+    vehicle_e2e_rx_init(&rx);
     run(&s, 2u * PLATFORM_HEARTBEAT_RT_CORE_CYCLE_TIME_MS);
     TEST_ASSERT_FALSE(diag_fault_active()); /* U0001-88 is reported by the server only */
     TEST_ASSERT_EQUAL_UINT32(0u, s.normal);

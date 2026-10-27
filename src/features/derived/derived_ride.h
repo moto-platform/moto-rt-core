@@ -19,7 +19,7 @@
  * integral and the means keep `double` accumulators (a long ride would lose small
  * increments in float32; the M7 has a double-precision FPU); results are float32.
  *
- * Semantics follow the moto-server reference (derived/summary.py): "last valid" signals take
+ * Semantics follow the vehicle-server reference (derived/summary.py): "last valid" signals take
  * the last valid class-A output of the ride; means and the first/last values are over every
  * DID sample of the ride; the fuel integral holds a sample until the next one but never
  * beyond that DID's own stale_after_ms (D-087), and the segment still open at the close adds

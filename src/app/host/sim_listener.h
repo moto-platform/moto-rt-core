@@ -5,7 +5,7 @@
  * Platform-bus listener (host SIL only, not firmware): watches what rt-core's
  * republisher (features/vehicle_republish, ISSUES D-5, D-056) puts on the simulated
  * platform bus. For 0x021 VehicleSpeed it runs the receiver side of the E2E check
- * (gen/ moto_e2e_check() with the message's DataID, max delta and timeout), as CONN or
+ * (gen/ vehicle_e2e_check() with the message's DataID, max delta and timeout), as CONN or
  * LINUX would; for 0x021 and 0x110 VehicleEngine it counts frames and the longest gap
  * between two of them. For the heartbeat 0x081 (features/heartbeat, D-064) it runs the
  * E2E check as SAFETY would and checks NODE_MODE (INIT only on the first frame, then
@@ -14,7 +14,7 @@
  */
 
 #include "hal/host/vbus.h"
-#include "moto_e2e.h"
+#include "vehicle_e2e.h"
 #include "platform.h"
 
 #include <stdbool.h>
@@ -33,11 +33,11 @@ typedef struct {
     uint8_t node;
     sim_listener_msg_t speed;
     sim_listener_msg_t engine;
-    moto_e2e_rx_state_t speed_rx;
+    vehicle_e2e_rx_state_t speed_rx;
     uint32_t speed_e2e_ok;      /* OK (and the first INITIAL) */
     uint32_t speed_e2e_bad;     /* any other status on a received frame */
     sim_listener_msg_t heartbeat;
-    moto_e2e_rx_state_t heartbeat_rx;
+    vehicle_e2e_rx_state_t heartbeat_rx;
     uint32_t heartbeat_e2e_ok;  /* OK (and the first INITIAL) */
     uint32_t heartbeat_e2e_bad; /* any other status on a received frame */
     uint32_t heartbeat_normal;  /* frames with NODE_MODE NORMAL */

@@ -20,7 +20,7 @@
  * dropped too.
  *
  * Data (provider of the core):
- *   0xF189 SW version   MOTO_RTCORE_VERSION from the build (CMake project VERSION)
+ *   0xF189 SW version   VEHICLE_RTCORE_VERSION from the build (CMake project VERSION)
  *   0xFD00 tester state services/diag (written by the UDS client glue)
  *   0xFD01 uptime       seconds since uds_server_open()
  *   0xFD03 lean health  services/lean_health (the comms task's copy of the EKF's last

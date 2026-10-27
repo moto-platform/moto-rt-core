@@ -21,7 +21,7 @@ static void send_speed(vehicle_republish_t* r, uint32_t now)
 {
     vehicle_signal_sample_t s;
     struct platform_vehicle_speed_t msg;
-    moto_e2e_tx_state_t next;
+    vehicle_e2e_tx_state_t next;
     uint8_t data[PLATFORM_VEHICLE_SPEED_LENGTH];
 
     read_sample(VEHICLE_CL250_IDX_VEHICLE_SPEED, now, &s);
@@ -64,7 +64,7 @@ bool vehicle_republish_open(vehicle_republish_t* r)
         return false;
     }
     (void)memset(r, 0, sizeof *r);
-    moto_e2e_tx_init(&r->speed_e2e);
+    vehicle_e2e_tx_init(&r->speed_e2e);
     r->opened = (can_if_register_tx_dedicated(CAN_PORT_PLATFORM, PLATFORM_VEHICLE_SPEED_FRAME_ID,
                                               PLATFORM_VEHICLE_SPEED_IS_EXTENDED != 0) == CAN_IF_OK);
     return r->opened;
