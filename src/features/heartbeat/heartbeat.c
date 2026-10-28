@@ -28,7 +28,7 @@ static bool fault_active(uint32_t now, bool ekf_stalled)
 static void send(heartbeat_t* hb, uint32_t now, bool ekf_stalled)
 {
     struct platform_heartbeat_rt_core_t msg;
-    moto_e2e_tx_state_t next;
+    vehicle_e2e_tx_state_t next;
     uint8_t data[PLATFORM_HEARTBEAT_RT_CORE_LENGTH];
 
     heartbeat_msg(!hb->stepped, fault_active(now, ekf_stalled), diag_fault_onsets(), &hb->uptime, &msg);
@@ -52,7 +52,7 @@ bool heartbeat_open(heartbeat_t* hb)
         return false;
     }
     (void)memset(hb, 0, sizeof *hb);
-    moto_e2e_tx_init(&hb->e2e);
+    vehicle_e2e_tx_init(&hb->e2e);
     heartbeat_uptime_init(&hb->uptime, timebase_now_ms());
     hb->opened = (can_if_register_tx_dedicated(CAN_PORT_PLATFORM, PLATFORM_HEARTBEAT_RT_CORE_FRAME_ID,
                                                PLATFORM_HEARTBEAT_RT_CORE_IS_EXTENDED != 0) == CAN_IF_OK);

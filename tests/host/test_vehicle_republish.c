@@ -20,7 +20,7 @@ static uint8_t node_dut;
 static uint8_t node_peer;
 static uint8_t node_vehicle;
 static vehicle_republish_t rep;
-static moto_e2e_rx_state_t rx;
+static vehicle_e2e_rx_state_t rx;
 
 void setUp(void)
 {
@@ -37,7 +37,7 @@ void setUp(void)
     TEST_ASSERT_TRUE(vehicle_republish_open(&rep));
     TEST_ASSERT_EQUAL(CAN_PORT_OK, can_if_apply_filters(CAN_PORT_PLATFORM));
     can_sm_step(CAN_PORT_PLATFORM);
-    moto_e2e_rx_init(&rx);
+    vehicle_e2e_rx_init(&rx);
 }
 
 void tearDown(void)
@@ -72,12 +72,12 @@ static void drain(seen_t* s)
         if (f.id == PLATFORM_VEHICLE_SPEED_FRAME_ID) {
             s->speed++;
             s->last_speed = f;
-            const moto_e2e_status_t st =
-                moto_e2e_check(PLATFORM_VEHICLE_SPEED_E2E_DATA_ID, PLATFORM_VEHICLE_SPEED_E2E_MAX_DELTA_COUNTER,
+            const vehicle_e2e_status_t st =
+                vehicle_e2e_check(PLATFORM_VEHICLE_SPEED_E2E_DATA_ID, PLATFORM_VEHICLE_SPEED_E2E_MAX_DELTA_COUNTER,
                                PLATFORM_VEHICLE_SPEED_E2E_TIMEOUT_MS, f.data, f.dlc, &rx, timebase_now_ms());
-            s->e2e_ok += (st == MOTO_E2E_OK) ? 1u : 0u;
-            s->e2e_initial += (st == MOTO_E2E_INITIAL) ? 1u : 0u;
-            s->e2e_other += ((st != MOTO_E2E_OK) && (st != MOTO_E2E_INITIAL)) ? 1u : 0u;
+            s->e2e_ok += (st == VEHICLE_E2E_OK) ? 1u : 0u;
+            s->e2e_initial += (st == VEHICLE_E2E_INITIAL) ? 1u : 0u;
+            s->e2e_other += ((st != VEHICLE_E2E_OK) && (st != VEHICLE_E2E_INITIAL)) ? 1u : 0u;
         } else if (f.id == PLATFORM_VEHICLE_ENGINE_FRAME_ID) {
             s->engine++;
             s->last_engine = f;
@@ -102,8 +102,8 @@ static void expected_speed(uint8_t out[PLATFORM_VEHICLE_SPEED_LENGTH], uint8_t c
     TEST_ASSERT_TRUE(vehicle_signals_get(VEHICLE_CL250_IDX_VEHICLE_SPEED, timebase_now_ms() - 1u, &s));
     struct platform_vehicle_speed_t msg;
     vehicle_republish_speed_msg(&s, &msg);
-    moto_e2e_tx_state_t c = {counter};
-    moto_e2e_tx_state_t n;
+    vehicle_e2e_tx_state_t c = {counter};
+    vehicle_e2e_tx_state_t n;
     TEST_ASSERT_TRUE(vehicle_republish_speed_frame(&msg, &c, &n, out));
 }
 
@@ -167,8 +167,8 @@ static void test_the_frames_carry_the_current_samples(void)
     struct platform_vehicle_speed_t inv;
     vehicle_republish_speed_msg(&now_s, &inv);
     uint8_t iwant[PLATFORM_VEHICLE_SPEED_LENGTH];
-    moto_e2e_tx_state_t c = {(uint8_t)((s.speed - 1u) & MOTO_E2E_COUNTER_MASK)};
-    moto_e2e_tx_state_t n;
+    vehicle_e2e_tx_state_t c = {(uint8_t)((s.speed - 1u) & VEHICLE_E2E_COUNTER_MASK)};
+    vehicle_e2e_tx_state_t n;
     TEST_ASSERT_TRUE(vehicle_republish_speed_frame(&inv, &c, &n, iwant));
     TEST_ASSERT_EQUAL_MEMORY(iwant, s.last_speed.data, sizeof iwant);
 }
@@ -277,14 +277,14 @@ static void test_the_speed_is_valid_up_to_stale_after_ms_and_invalid_one_ms_late
     vehicle_republish_speed_msg(&at, &msg);
     TEST_ASSERT_EQUAL_UINT8(PLATFORM_VEHICLE_SPEED_VEHICLE_SPEED_VALID_VALID_CHOICE, msg.vehicle_speed_valid);
     uint8_t want[PLATFORM_VEHICLE_SPEED_LENGTH];
-    expected_speed(want, (uint8_t)((s.speed - 1u) & MOTO_E2E_COUNTER_MASK));
+    expected_speed(want, (uint8_t)((s.speed - 1u) & VEHICLE_E2E_COUNTER_MASK));
     TEST_ASSERT_EQUAL_MEMORY(want, s.last_speed.data, sizeof want);
 
     at = speed_at_next_frame(&s, stale + 1u);
     TEST_ASSERT_EQUAL(VEHICLE_SIGNAL_STALE, at.state);
     vehicle_republish_speed_msg(&at, &msg);
     TEST_ASSERT_EQUAL_UINT8(PLATFORM_VEHICLE_SPEED_VEHICLE_SPEED_VALID_INVALID_CHOICE, msg.vehicle_speed_valid);
-    expected_speed(want, (uint8_t)((s.speed - 1u) & MOTO_E2E_COUNTER_MASK));
+    expected_speed(want, (uint8_t)((s.speed - 1u) & VEHICLE_E2E_COUNTER_MASK));
     TEST_ASSERT_EQUAL_MEMORY(want, s.last_speed.data, sizeof want);
 }
 

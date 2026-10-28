@@ -1,7 +1,7 @@
 #!/bin/sh
 # SIL check for D-080: the host program with N stored synthetic DTCs must complete the
 # key-on run (count, list, then 0x04 and 0x06 per DTC) and print every raw answer.
-# Usage: sil_dtc_check.sh <moto_rtcore_host> [dtcs]
+# Usage: sil_dtc_check.sh <vehicle_rtcore_host> [dtcs]
 set -e
 exe="$1"
 n="${2:-2}"

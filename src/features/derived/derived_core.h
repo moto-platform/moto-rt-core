@@ -12,7 +12,7 @@
  * the anomaly safety net. The module is not safety-critical, but it shares a CPU with the
  * EKF: no blocking, every loop is bounded by a compile-time size, static memory only.
  *
- * Sampling rule (D-070 item 1, the moto-server reference engine.py / context.py): an
+ * Sampling rule (D-070 item 1, the vehicle-server reference engine.py / context.py): an
  * input's value at time t is its last sample at or before t, and counts only while its age
  * is within its own stale_after_ms: for a DID input the DID's (vehicle_cl250_dids[], D-070),
  * for a derived input the producer's (vehicle_cl250_derived[]). The event signal is judged
@@ -63,7 +63,7 @@ extern "C" {
 
 /*
  * Algorithm parameters and unit conversions ported from the reference
- * (moto-server src/moto_server/derived/formulas.py and context.py). Vehicle facts come
+ * (vehicle-server src/vehicle_server/derived/formulas.py and context.py). Vehicle facts come
  * from gen/ vehicle_cl250_constants.h only. Each "algorithm parameter" is provisional
  * (D-070 item 6); the others are unit conversions or physics constants.
  */

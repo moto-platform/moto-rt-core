@@ -22,9 +22,9 @@ set(CMAKE_SIZE         ${_prefix}size)
 # with a static library instead.
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
-set(MOTO_CPU_FLAGS "-mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 -mfloat-abi=hard")
-set(CMAKE_C_FLAGS_INIT "${MOTO_CPU_FLAGS} -ffunction-sections -fdata-sections -fno-common")
-set(CMAKE_ASM_FLAGS_INIT "${MOTO_CPU_FLAGS}")
+set(VEHICLE_CPU_FLAGS "-mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 -mfloat-abi=hard")
+set(CMAKE_C_FLAGS_INIT "${VEHICLE_CPU_FLAGS} -ffunction-sections -fdata-sections -fno-common")
+set(CMAKE_ASM_FLAGS_INIT "${VEHICLE_CPU_FLAGS}")
 set(CMAKE_EXE_LINKER_FLAGS_INIT "--specs=nano.specs -Wl,--gc-sections")
 
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)

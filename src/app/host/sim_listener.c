@@ -63,8 +63,8 @@ bool sim_listener_init(sim_listener_t* l, vbus_t* bus)
 {
     memset(l, 0, sizeof *l);
     l->bus = bus;
-    moto_e2e_rx_init(&l->speed_rx);
-    moto_e2e_rx_init(&l->heartbeat_rx);
+    vehicle_e2e_rx_init(&l->speed_rx);
+    vehicle_e2e_rx_init(&l->heartbeat_rx);
     return vbus_attach(bus, &l->node);
 }
 
@@ -83,13 +83,13 @@ static void count(sim_listener_msg_t* m, uint32_t now_ms, bool length_ok)
 static void check_heartbeat(sim_listener_t* l, const can_frame_t* f, uint32_t now_ms)
 {
     count(&l->heartbeat, now_ms, f->dlc == PLATFORM_HEARTBEAT_RT_CORE_LENGTH);
-    const moto_e2e_status_t st =
-        moto_e2e_check(PLATFORM_HEARTBEAT_RT_CORE_E2E_DATA_ID,
+    const vehicle_e2e_status_t st =
+        vehicle_e2e_check(PLATFORM_HEARTBEAT_RT_CORE_E2E_DATA_ID,
                        PLATFORM_HEARTBEAT_RT_CORE_E2E_MAX_DELTA_COUNTER,
                        PLATFORM_HEARTBEAT_RT_CORE_E2E_TIMEOUT_MS, f->data, f->dlc,
                        &l->heartbeat_rx, now_ms);
     const bool first = (l->heartbeat.frames == 1u);
-    if ((st == MOTO_E2E_OK) || (first && (st == MOTO_E2E_INITIAL))) {
+    if ((st == VEHICLE_E2E_OK) || (first && (st == VEHICLE_E2E_INITIAL))) {
         l->heartbeat_e2e_ok++;
     } else {
         l->heartbeat_e2e_bad++;
@@ -123,13 +123,13 @@ void sim_listener_step(sim_listener_t* l, uint32_t now_ms)
         }
         if (f.id == PLATFORM_VEHICLE_SPEED_FRAME_ID) {
             count(&l->speed, now_ms, f.dlc == PLATFORM_VEHICLE_SPEED_LENGTH);
-            const moto_e2e_status_t st =
-                moto_e2e_check(PLATFORM_VEHICLE_SPEED_E2E_DATA_ID,
+            const vehicle_e2e_status_t st =
+                vehicle_e2e_check(PLATFORM_VEHICLE_SPEED_E2E_DATA_ID,
                                PLATFORM_VEHICLE_SPEED_E2E_MAX_DELTA_COUNTER,
                                PLATFORM_VEHICLE_SPEED_E2E_TIMEOUT_MS, f.data, f.dlc, &l->speed_rx,
                                now_ms);
-            const bool first = (l->speed.frames == 1u) && (st == MOTO_E2E_INITIAL);
-            if ((st == MOTO_E2E_OK) || first) {
+            const bool first = (l->speed.frames == 1u) && (st == VEHICLE_E2E_INITIAL);
+            if ((st == VEHICLE_E2E_OK) || first) {
                 l->speed_e2e_ok++;
             } else {
                 l->speed_e2e_bad++;

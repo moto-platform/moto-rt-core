@@ -18,7 +18,7 @@
 #include "hal/host/can_port_host.h"
 #include "hal/host/hal_time_host.h"
 #include "hal/host/imu_host.h"
-#include "moto_e2e.h"
+#include "vehicle_e2e.h"
 #include "platform.h"
 #include "platform_e2e.h"
 #include "uds_iso14229.h"
@@ -53,7 +53,7 @@ static lean_tx_t tx;
 static sim_ecu_t ecu;
 static uint32_t imu_pushed;
 static int16_t imu_z = Z_OFFSET; /* raw z the IMU fake streams (a straight line by default) */
-static moto_e2e_rx_state_t rx;
+static vehicle_e2e_rx_state_t rx;
 
 typedef struct {
     uint32_t hb_frames;
@@ -100,7 +100,7 @@ void setUp(void)
     comms_ekf_init(&ekf);
     lean_link_init(&link);
     lean_ekf_init(&lean, &link);
-    moto_e2e_rx_init(&rx);
+    vehicle_e2e_rx_init(&rx);
 }
 
 void tearDown(void)
@@ -127,8 +127,8 @@ static bool frame_is_invalid(const uint8_t* data)
     m.lean_angle_state = PLATFORM_EKF_LEAN_LEAN_ANGLE_STATE_INVALID_CHOICE;
     m.lean_angle = 0;
     m.lean_angle_quality = 0u;
-    m.e2_e_crc = data[MOTO_E2E_CRC_OFFSET];
-    m.e2_e_counter = (uint8_t)(data[MOTO_E2E_COUNTER_OFFSET] & MOTO_E2E_COUNTER_MASK);
+    m.e2_e_crc = data[VEHICLE_E2E_CRC_OFFSET];
+    m.e2_e_counter = (uint8_t)(data[VEHICLE_E2E_COUNTER_OFFSET] & VEHICLE_E2E_COUNTER_MASK);
     uint8_t ref[PLATFORM_EKF_LEAN_LENGTH];
     TEST_ASSERT_EQUAL_INT((int)PLATFORM_EKF_LEAN_LENGTH, platform_ekf_lean_pack(ref, &m, sizeof ref));
     return memcmp(ref, data, sizeof ref) == 0;
@@ -144,8 +144,8 @@ static bool frame_matches(const uint8_t* data, uint8_t state, int16_t lean_raw)
         m.lean_angle_state = state;
         m.lean_angle = lean_raw;
         m.lean_angle_quality = q;
-        m.e2_e_crc = data[MOTO_E2E_CRC_OFFSET];
-        m.e2_e_counter = (uint8_t)(data[MOTO_E2E_COUNTER_OFFSET] & MOTO_E2E_COUNTER_MASK);
+        m.e2_e_crc = data[VEHICLE_E2E_CRC_OFFSET];
+        m.e2_e_counter = (uint8_t)(data[VEHICLE_E2E_COUNTER_OFFSET] & VEHICLE_E2E_COUNTER_MASK);
         uint8_t ref[PLATFORM_EKF_LEAN_LENGTH];
         TEST_ASSERT_EQUAL_INT((int)PLATFORM_EKF_LEAN_LENGTH, platform_ekf_lean_pack(ref, &m, sizeof ref));
         if (memcmp(ref, data, sizeof ref) == 0) {
@@ -200,12 +200,12 @@ static seen_t run(uint32_t ms, uint32_t speed_kmh, uint32_t divider)
                 s.hb_normal += (hb.node_mode == PLATFORM_HEARTBEAT_RT_CORE_NODE_MODE_NORMAL_CHOICE) ? 1u : 0u;
                 s.hb_degraded += (hb.node_mode == PLATFORM_HEARTBEAT_RT_CORE_NODE_MODE_DEGRADED_CHOICE) ? 1u : 0u;
             } else if (got.id == PLATFORM_EKF_LEAN_FRAME_ID) {
-                const moto_e2e_status_t st = moto_e2e_check(
+                const vehicle_e2e_status_t st = vehicle_e2e_check(
                     PLATFORM_EKF_LEAN_E2E_DATA_ID, PLATFORM_EKF_LEAN_E2E_MAX_DELTA_COUNTER,
                     PLATFORM_EKF_LEAN_E2E_TIMEOUT_MS, got.data, got.dlc, &rx, now);
-                s.lean_e2e_bad += ((st == MOTO_E2E_OK) || (st == MOTO_E2E_INITIAL)) ? 0u : 1u;
-                s.lean_e2e_ok += (st == MOTO_E2E_OK) ? 1u : 0u;
-                s.lean_e2e_initial += (st == MOTO_E2E_INITIAL) ? 1u : 0u;
+                s.lean_e2e_bad += ((st == VEHICLE_E2E_OK) || (st == VEHICLE_E2E_INITIAL)) ? 0u : 1u;
+                s.lean_e2e_ok += (st == VEHICLE_E2E_OK) ? 1u : 0u;
+                s.lean_e2e_initial += (st == VEHICLE_E2E_INITIAL) ? 1u : 0u;
                 if ((s.lean_frames > 0u) && ((now - s.lean_last_ms) > s.lean_gap_max_ms)) {
                     s.lean_gap_max_ms = now - s.lean_last_ms;
                 }
@@ -314,7 +314,7 @@ static void test_a_foreign_registered_counter_does_not_open_0x020_MAJOR_3(void)
 static void test_a_refused_frame_is_retried_and_the_counter_advances_only_when_accepted(void)
 {
     ride_to_estimated();
-    const moto_e2e_tx_state_t before = tx.e2e;
+    const vehicle_e2e_tx_state_t before = tx.e2e;
     vbus_set_tx_blocked(&bus_p, node_platform, true);
     const seen_t b = run(EKF_CYCLE_MS + 5u, 54u, 1u); /* due once, refused in every pass */
     TEST_ASSERT_EQUAL_UINT32(0u, b.lean_frames);
@@ -331,7 +331,7 @@ static void test_a_refused_frame_is_retried_and_the_counter_advances_only_when_a
 static void test_a_bus_off_drops_cycles_without_advancing_the_counter_and_the_receiver_resyncs(void)
 {
     ride_to_estimated();
-    const moto_e2e_tx_state_t before = tx.e2e;
+    const vehicle_e2e_tx_state_t before = tx.e2e;
     vbus_set_bus_off(&bus_p, node_platform, true);
     const seen_t b = run(5u * EKF_CYCLE_MS, 54u, 1u);
     TEST_ASSERT_EQUAL_UINT32(0u, b.lean_frames);
@@ -715,7 +715,7 @@ static void trace_run(poll_mode_t mode, lean_trace_t* tr, uds_poll_t* up)
             }
             if ((got.id == PLATFORM_EKF_LEAN_FRAME_ID) && (tr->n < POLL_FRAMES)) {
                 tr->t[tr->n] = now;
-                tr->c[tr->n] = (uint8_t)(got.data[MOTO_E2E_COUNTER_OFFSET] & MOTO_E2E_COUNTER_MASK);
+                tr->c[tr->n] = (uint8_t)(got.data[VEHICLE_E2E_COUNTER_OFFSET] & VEHICLE_E2E_COUNTER_MASK);
                 tr->invalid[tr->n] = frame_is_invalid(got.data) ? 1u : 0u;
                 tr->n++;
             }
@@ -742,7 +742,7 @@ static void assert_same_trace(const lean_trace_t* plain, const lean_trace_t* pol
     assert_no_invalid(polled);
     for (uint32_t i = 1u; i < plain->n; i++) { /* counter +1 per frame, fixed cycle */
         TEST_ASSERT_EQUAL_UINT32(EKF_CYCLE_MS, polled->t[i] - polled->t[i - 1u]);
-        TEST_ASSERT_EQUAL_UINT8((polled->c[i - 1u] + 1u) & MOTO_E2E_COUNTER_MASK, polled->c[i]);
+        TEST_ASSERT_EQUAL_UINT8((polled->c[i - 1u] + 1u) & VEHICLE_E2E_COUNTER_MASK, polled->c[i]);
     }
 }
 

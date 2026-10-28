@@ -123,25 +123,25 @@ static void test_frames_pass_the_receiver_e2e_check_and_the_counter_moves_only_w
     heartbeat_uptime_t up = {42000u, 0u};
     struct platform_heartbeat_rt_core_t msg;
     heartbeat_msg(false, false, 7u, &up, &msg);
-    moto_e2e_tx_state_t committed;
-    moto_e2e_tx_init(&committed);
-    moto_e2e_rx_state_t rx;
-    moto_e2e_rx_init(&rx);
+    vehicle_e2e_tx_state_t committed;
+    vehicle_e2e_tx_init(&committed);
+    vehicle_e2e_rx_state_t rx;
+    vehicle_e2e_rx_init(&rx);
     uint8_t a[PLATFORM_HEARTBEAT_RT_CORE_LENGTH];
     uint8_t b[PLATFORM_HEARTBEAT_RT_CORE_LENGTH];
-    moto_e2e_tx_state_t next;
+    vehicle_e2e_tx_state_t next;
 
     TEST_ASSERT_TRUE(heartbeat_frame(&msg, &committed, &next, a));
-    TEST_ASSERT_EQUAL(MOTO_E2E_INITIAL,
-                      moto_e2e_check(PLATFORM_HEARTBEAT_RT_CORE_E2E_DATA_ID, PLATFORM_HEARTBEAT_RT_CORE_E2E_MAX_DELTA_COUNTER,
+    TEST_ASSERT_EQUAL(VEHICLE_E2E_INITIAL,
+                      vehicle_e2e_check(PLATFORM_HEARTBEAT_RT_CORE_E2E_DATA_ID, PLATFORM_HEARTBEAT_RT_CORE_E2E_MAX_DELTA_COUNTER,
                                      PLATFORM_HEARTBEAT_RT_CORE_E2E_TIMEOUT_MS, a, sizeof a, &rx, 0u));
     /* not committed (refused write): the retry carries the same counter */
     TEST_ASSERT_TRUE(heartbeat_frame(&msg, &committed, &next, b));
     TEST_ASSERT_EQUAL_UINT8_ARRAY(a, b, sizeof a);
     committed = next;
     TEST_ASSERT_TRUE(heartbeat_frame(&msg, &committed, &next, b));
-    TEST_ASSERT_EQUAL(MOTO_E2E_OK,
-                      moto_e2e_check(PLATFORM_HEARTBEAT_RT_CORE_E2E_DATA_ID, PLATFORM_HEARTBEAT_RT_CORE_E2E_MAX_DELTA_COUNTER,
+    TEST_ASSERT_EQUAL(VEHICLE_E2E_OK,
+                      vehicle_e2e_check(PLATFORM_HEARTBEAT_RT_CORE_E2E_DATA_ID, PLATFORM_HEARTBEAT_RT_CORE_E2E_MAX_DELTA_COUNTER,
                                      PLATFORM_HEARTBEAT_RT_CORE_E2E_TIMEOUT_MS, b, sizeof b, &rx,
                                      PLATFORM_HEARTBEAT_RT_CORE_CYCLE_TIME_MS));
     const struct platform_heartbeat_rt_core_t got = unpack(b);
@@ -150,8 +150,8 @@ static void test_frames_pass_the_receiver_e2e_check_and_the_counter_moves_only_w
     TEST_ASSERT_EQUAL_UINT16(42u, got.uptime);
     /* another DataID (a masquerading sender) fails the CRC */
     TEST_ASSERT_TRUE(heartbeat_frame(&msg, &next, &committed, b));
-    TEST_ASSERT_EQUAL(MOTO_E2E_WRONG_CRC,
-                      moto_e2e_check(PLATFORM_VEHICLE_SPEED_E2E_DATA_ID, PLATFORM_HEARTBEAT_RT_CORE_E2E_MAX_DELTA_COUNTER,
+    TEST_ASSERT_EQUAL(VEHICLE_E2E_WRONG_CRC,
+                      vehicle_e2e_check(PLATFORM_VEHICLE_SPEED_E2E_DATA_ID, PLATFORM_HEARTBEAT_RT_CORE_E2E_MAX_DELTA_COUNTER,
                                      PLATFORM_HEARTBEAT_RT_CORE_E2E_TIMEOUT_MS, b, sizeof b, &rx,
                                      2u * PLATFORM_HEARTBEAT_RT_CORE_CYCLE_TIME_MS));
 }
@@ -160,9 +160,9 @@ static void test_the_frame_builder_refuses_null_arguments(void)
 {
     struct platform_heartbeat_rt_core_t msg;
     memset(&msg, 0, sizeof msg);
-    moto_e2e_tx_state_t c;
-    moto_e2e_tx_state_t n;
-    moto_e2e_tx_init(&c);
+    vehicle_e2e_tx_state_t c;
+    vehicle_e2e_tx_state_t n;
+    vehicle_e2e_tx_init(&c);
     uint8_t data[PLATFORM_HEARTBEAT_RT_CORE_LENGTH];
     TEST_ASSERT_FALSE(heartbeat_frame(NULL, &c, &n, data));
     TEST_ASSERT_FALSE(heartbeat_frame(&msg, NULL, &n, data));

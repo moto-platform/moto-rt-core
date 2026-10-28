@@ -66,8 +66,8 @@ void lean_tx_msg(const lean_record_t* rec, bool comms_fault, uint32_t now_ms,
 /* Packs msg and protects it with the gen/ E2E on a copy of the committed state: *next
  * holds the advanced state, to be committed only when the port accepts the frame (D-056
  * item 5). False on NULL or a packing/E2E failure. */
-bool lean_tx_frame(const struct platform_ekf_lean_t* msg, const moto_e2e_tx_state_t* committed,
-                   moto_e2e_tx_state_t* next, uint8_t out[PLATFORM_EKF_LEAN_LENGTH]);
+bool lean_tx_frame(const struct platform_ekf_lean_t* msg, const vehicle_e2e_tx_state_t* committed,
+                   vehicle_e2e_tx_state_t* next, uint8_t out[PLATFORM_EKF_LEAN_LENGTH]);
 
 #ifdef __cplusplus
 }

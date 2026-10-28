@@ -5,7 +5,7 @@
  * D-080: the DTC freeze-frame reader of the vehicle tester (ReadDTCInformation 0x19,
  * ISO 14229-1 clause 12.3) as a pure state machine. It never transmits: uds_client_core
  * asks it for the next request, sends that through the D-020 gates and feeds the
- * answer back. It is the C port of moto-connectivity-node's DtcSnapshot (D-023), without
+ * answer back. It is the C port of vehicle-connectivity-node's DtcSnapshot (D-023), without
  * the text sink: the raw answers go to the caller (uds_client_core_take_dtc_answer()).
  *
  * A run (D-080 item 2): 0x19 0x01 <mask> (count); only if the count is > 0, 0x19 0x02

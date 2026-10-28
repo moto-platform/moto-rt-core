@@ -2,7 +2,7 @@
  * Class-B ride summaries (D-070 parts 2-3, D-087 item 2) in the pure core:
  *
  * 1. Golden replay of the class-B vectors (the _b.h files in tests/host/vectors, written by the
- *    moto-server reference). The rides table is the epoch-marker table: at start_ms of ride N
+ *    vehicle-server reference). The rides table is the epoch-marker table: at start_ms of ride N
  *    the test opens a stop epoch (counter N + 1), at end_ms it closes it (ECU absent) and
  *    compares the closed values of that ride: valid flag and flag code exact, values within
  *    the per-signal tolerance (resolution / 2, never widened). The single-ride scenarios

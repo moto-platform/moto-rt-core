@@ -12,14 +12,14 @@
 
 #include <stddef.h>
 
-#ifndef MOTO_RTCORE_VERSION
-#error "MOTO_RTCORE_VERSION (CMake project VERSION) must be defined by the build"
+#ifndef VEHICLE_RTCORE_VERSION
+#error "VEHICLE_RTCORE_VERSION (CMake project VERSION) must be defined by the build"
 #endif
 
 _Static_assert(PLATFORM_UDS_FRAME_DLC == ISOTP_CAN_DL, "platform frames are 8 bytes");
 _Static_assert(PLATFORM_UDS_PHYS_REQUEST_ID <= CAN_PORT_STD_ID_MAX, "11-bit platform IDs");
 _Static_assert(PLATFORM_UDS_FUNCTIONAL_REQUEST_ID <= CAN_PORT_STD_ID_MAX, "11-bit platform IDs");
-_Static_assert(sizeof(MOTO_RTCORE_VERSION) <= PLATFORM_UDS_DID_SW_VERSION_LENGTH,
+_Static_assert(sizeof(VEHICLE_RTCORE_VERSION) <= PLATFORM_UDS_DID_SW_VERSION_LENGTH,
                "version must fit DID 0xF189");
 _Static_assert(PLATFORM_UDS_DID_VEHICLE_TESTER_STATUS_LENGTH == 2u, "0xFD00 layout");
 /* 0xFD02 (D-055): one state mapping for both ports, flags in one byte, u16 step counters.
@@ -181,7 +181,7 @@ static uds_server_data_t read_health(uint8_t* out, uint16_t len, uint32_t now)
 
 static uds_server_data_t read_sw_version(uint8_t* out, uint16_t len)
 {
-    static const char version[] = MOTO_RTCORE_VERSION;
+    static const char version[] = VEHICLE_RTCORE_VERSION;
     const uint16_t chars = (uint16_t)(sizeof(version) - 1u); /* without the NUL */
     for (uint16_t i = 0u; i < len; i++) {
         out[i] = (i < chars) ? (uint8_t)version[i] : 0u;

@@ -240,38 +240,38 @@ static void test_speed_frames_pass_the_receiver_e2e_check_and_the_counter_moves_
     const vehicle_signal_sample_t s = sample(VEHICLE_SIGNAL_VALID, 42.0f, 80u);
     struct platform_vehicle_speed_t msg;
     vehicle_republish_speed_msg(&s, &msg);
-    moto_e2e_tx_state_t committed;
-    moto_e2e_tx_init(&committed);
-    moto_e2e_rx_state_t rx;
-    moto_e2e_rx_init(&rx);
+    vehicle_e2e_tx_state_t committed;
+    vehicle_e2e_tx_init(&committed);
+    vehicle_e2e_rx_state_t rx;
+    vehicle_e2e_rx_init(&rx);
     uint32_t now = 1000u;
     for (uint32_t i = 0u; i < 40u; i++) { /* more than two counter wraps */
         uint8_t data[PLATFORM_VEHICLE_SPEED_LENGTH];
-        moto_e2e_tx_state_t next;
+        vehicle_e2e_tx_state_t next;
         TEST_ASSERT_TRUE(vehicle_republish_speed_frame(&msg, &committed, &next, data));
-        TEST_ASSERT_EQUAL_UINT8((uint8_t)((committed.counter + 1u) & MOTO_E2E_COUNTER_MASK), next.counter);
-        const moto_e2e_status_t st =
-            moto_e2e_check(PLATFORM_VEHICLE_SPEED_E2E_DATA_ID, PLATFORM_VEHICLE_SPEED_E2E_MAX_DELTA_COUNTER,
+        TEST_ASSERT_EQUAL_UINT8((uint8_t)((committed.counter + 1u) & VEHICLE_E2E_COUNTER_MASK), next.counter);
+        const vehicle_e2e_status_t st =
+            vehicle_e2e_check(PLATFORM_VEHICLE_SPEED_E2E_DATA_ID, PLATFORM_VEHICLE_SPEED_E2E_MAX_DELTA_COUNTER,
                            PLATFORM_VEHICLE_SPEED_E2E_TIMEOUT_MS, data, sizeof data, &rx, now);
-        TEST_ASSERT_EQUAL((i == 0u) ? MOTO_E2E_INITIAL : MOTO_E2E_OK, st);
+        TEST_ASSERT_EQUAL((i == 0u) ? VEHICLE_E2E_INITIAL : VEHICLE_E2E_OK, st);
         committed = next; /* the port accepted it */
         now += PLATFORM_VEHICLE_SPEED_CYCLE_TIME_MS;
     }
     /* a refused write does not commit: the retry carries the same counter, no gap */
     uint8_t a[PLATFORM_VEHICLE_SPEED_LENGTH];
     uint8_t b[PLATFORM_VEHICLE_SPEED_LENGTH];
-    moto_e2e_tx_state_t na;
-    moto_e2e_tx_state_t nb;
+    vehicle_e2e_tx_state_t na;
+    vehicle_e2e_tx_state_t nb;
     TEST_ASSERT_TRUE(vehicle_republish_speed_frame(&msg, &committed, &na, a));
     TEST_ASSERT_TRUE(vehicle_republish_speed_frame(&msg, &committed, &nb, b));
     TEST_ASSERT_EQUAL_MEMORY(a, b, sizeof a);
     /* a corrupted byte or the wrong DataID is caught */
     b[2] ^= 0x01u;
-    TEST_ASSERT_EQUAL(MOTO_E2E_WRONG_CRC,
-                      moto_e2e_check(PLATFORM_VEHICLE_SPEED_E2E_DATA_ID, PLATFORM_VEHICLE_SPEED_E2E_MAX_DELTA_COUNTER,
+    TEST_ASSERT_EQUAL(VEHICLE_E2E_WRONG_CRC,
+                      vehicle_e2e_check(PLATFORM_VEHICLE_SPEED_E2E_DATA_ID, PLATFORM_VEHICLE_SPEED_E2E_MAX_DELTA_COUNTER,
                                      PLATFORM_VEHICLE_SPEED_E2E_TIMEOUT_MS, b, sizeof b, &rx, now));
-    TEST_ASSERT_EQUAL(MOTO_E2E_WRONG_CRC,
-                      moto_e2e_check(PLATFORM_EKF_LEAN_E2E_DATA_ID, PLATFORM_VEHICLE_SPEED_E2E_MAX_DELTA_COUNTER,
+    TEST_ASSERT_EQUAL(VEHICLE_E2E_WRONG_CRC,
+                      vehicle_e2e_check(PLATFORM_EKF_LEAN_E2E_DATA_ID, PLATFORM_VEHICLE_SPEED_E2E_MAX_DELTA_COUNTER,
                                      PLATFORM_VEHICLE_SPEED_E2E_TIMEOUT_MS, a, sizeof a, &rx, now));
 }
 
@@ -281,8 +281,8 @@ static void test_frame_builders_refuse_null_arguments(void)
     struct platform_vehicle_engine_t em;
     memset(&sm, 0, sizeof sm);
     memset(&em, 0, sizeof em);
-    moto_e2e_tx_state_t c = {0u};
-    moto_e2e_tx_state_t n = {0u};
+    vehicle_e2e_tx_state_t c = {0u};
+    vehicle_e2e_tx_state_t n = {0u};
     uint8_t data[8];
     TEST_ASSERT_FALSE(vehicle_republish_speed_frame(NULL, &c, &n, data));
     TEST_ASSERT_FALSE(vehicle_republish_speed_frame(&sm, NULL, &n, data));

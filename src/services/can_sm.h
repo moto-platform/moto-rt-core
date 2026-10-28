@@ -38,7 +38,7 @@ extern "C" {
 #define CAN_SM_VEHICLE_BUS_OFF_LATCH 5u
 
 /* D-054, provisional: the platform port uses the vehicle bus-off schedule as local
- * values until the platform bus timing exists in moto-vehicle-defs. */
+ * values until the platform bus timing exists in vehicle-defs. */
 #define CAN_SM_PLATFORM_BACKOFF_INITIAL_MS 1000u
 #define CAN_SM_PLATFORM_BACKOFF_MAX_MS 30000u
 

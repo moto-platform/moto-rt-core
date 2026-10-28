@@ -173,7 +173,7 @@ The rules apply in order. The first that fails sends INVALID with LEAN 0 and QUA
 ### Memory (M7 release, `arm-none-eabi-size`, 2026-10-14)
 
 - **RAM** (static, no heap): `lean_link_t` 104 B, `lean_ekf_t` 156 B (includes `lean_core_t` and `imu_t`), `lean_tx_t` 32 B.
-- **Flash** (text): `lean.c.obj` 454 B, `lean_tx.c.obj` 366 B, `lean_tx_core.c.obj` 246 B. Total `moto_rtcore_logic` + `moto_rtcore_fw` text: 16108 B.
+- **Flash** (text): `lean.c.obj` 454 B, `lean_tx.c.obj` 366 B, `lean_tx_core.c.obj` 246 B. Total `vehicle_rtcore_logic` + `vehicle_rtcore_fw` text: 16108 B.
 
 ### Tests
 
@@ -240,8 +240,8 @@ The rules apply in order. The first that fails sends INVALID with LEAN 0 and QUA
 ## Memory and timing
 
 - **RAM:** `lean_core_t` is 36 B, owned by the caller (static in the PR 3 glue). There is no heap and no loop. Each step does a fixed number of float operations: one `sinf`, one `cosf` and one `sqrtf`, plus up to four divisions, each by a value checked to be positive (MISRA Dir 4.1, Dir 4.11).
-- **Flash** (M7 release, `arm-none-eabi-size`, 2026-10-10): `lean_core.c.obj` has text 1372 B and bss 0. Total `moto_rtcore_logic` + `moto_rtcore_fw` text: 12370 → 13742 B. The libm functions (`sinf`, `cosf`; `sqrtf` becomes VSQRT with `-fno-math-errno`) are linked with the firmware in PR 3.
-- **Build:** `-fno-math-errno` is set on `moto_rtcore_logic`. `lean_core.c` refuses to build with `-ffast-math` (`__FAST_MATH__`) or without `-fno-math-errno` (`__NO_MATH_ERRNO__`), because `isfinite()` and the NaN-false comparisons need IEEE semantics.
+- **Flash** (M7 release, `arm-none-eabi-size`, 2026-10-10): `lean_core.c.obj` has text 1372 B and bss 0. Total `vehicle_rtcore_logic` + `vehicle_rtcore_fw` text: 12370 → 13742 B. The libm functions (`sinf`, `cosf`; `sqrtf` becomes VSQRT with `-fno-math-errno`) are linked with the firmware in PR 3.
+- **Build:** `-fno-math-errno` is set on `vehicle_rtcore_logic`. `lean_core.c` refuses to build with `-ffast-math` (`__FAST_MATH__`) or without `-fno-math-errno` (`__NO_MATH_ERRNO__`), because `isfinite()` and the NaN-false comparisons need IEEE semantics.
 
 ## Coverage (D-046)
 
@@ -279,7 +279,7 @@ The rules apply in order. The first that fails sends INVALID with LEAN 0 and QUA
 - **QUALITY map:** the boundaries (1°, just above 1°, 3°, 5°, just above 5°), negative values, NaN and Inf, and monotonicity.
 - **NULL arguments.**
 
-## HIL scenarios (with the board, moto-hil-bench)
+## HIL scenarios (with the board, vehicle-hil-bench)
 
 - `lean_steady_turn`: replay a coordinated turn (IMU and speed restbus) at +30° and at −30°, 15 m/s. Expected: 0x020 ESTIMATED within 1 s with the right sign, |error| ≤ 1°, QUALITY ≥ 90. The sign check catches an IMU mounted wrong (x and z both inverted would read a consistent but mirrored lean); the H7 `hal/imu` port's mounting matrix is also checked on the bench.
 - `lean_imu_dead`: unpower the IMU while the EKF runs. Expected: 0x020 INVALID for good and safety-node's D-042 fallback active; NODE_MODE stays NORMAL. After E-17 (a): the 0xFD03 `LEAN_HEALTH` report (D-067) shows the cause.

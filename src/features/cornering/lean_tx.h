@@ -26,7 +26,7 @@ extern "C" {
 typedef struct {
     lean_link_t* link;          /* bound by lean_tx_open() */
     com_cycle_t cycle;
-    moto_e2e_tx_state_t e2e;    /* committed: advanced only by accepted frames */
+    vehicle_e2e_tx_state_t e2e;    /* committed: advanced only by accepted frames */
     com_msg_stats_t stats;
     bool have_record;           /* an EKF record was published since boot (0xFD03) */
     bool opened;                /* the only state that publishes speeds or sends 0x020 */

@@ -16,7 +16,7 @@ extern "C" {
 
 /* A measured ratio matches a gear when it is within this relative distance of the gear's
  * ratio. Algorithm parameter, provisional (D-070 item 6); same value as the reference
- * (moto-server derived/formulas.py:62 GEAR_MATCH_TOLERANCE). */
+ * (vehicle-server derived/formulas.py:62 GEAR_MATCH_TOLERANCE). */
 #define DERIVED_GEAR_MATCH_TOLERANCE (0.05f)
 
 /* The gear 1..VEHICLE_CL250_GEAR_COUNT whose ratio is nearest to `measured_ratio`

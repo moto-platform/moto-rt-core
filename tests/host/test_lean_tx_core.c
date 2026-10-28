@@ -7,7 +7,7 @@
  */
 #include "features/cornering/lean_core.h"
 #include "features/cornering/lean_tx_core.h"
-#include "moto_e2e.h"
+#include "vehicle_e2e.h"
 #include "platform.h"
 #include "platform_e2e.h"
 
@@ -177,26 +177,26 @@ static void test_the_frame_is_packed_and_e2e_protected_on_a_copy(void)
 {
     const lean_record_t r = rec(-55.01f, 77u, LEAN_OUT_ESTIMATED, NOW);
     const struct platform_ekf_lean_t m = msg_for(&r, false, NOW);
-    moto_e2e_tx_state_t committed;
-    moto_e2e_tx_init(&committed);
-    const moto_e2e_tx_state_t before = committed;
-    moto_e2e_tx_state_t next;
+    vehicle_e2e_tx_state_t committed;
+    vehicle_e2e_tx_init(&committed);
+    const vehicle_e2e_tx_state_t before = committed;
+    vehicle_e2e_tx_state_t next;
     uint8_t data[PLATFORM_EKF_LEAN_LENGTH];
     TEST_ASSERT_TRUE(lean_tx_frame(&m, &committed, &next, data));
     TEST_ASSERT_EQUAL_MEMORY(&before, &committed, sizeof committed); /* committed untouched */
 
-    moto_e2e_rx_state_t rx;
+    vehicle_e2e_rx_state_t rx;
     (void)memset(&rx, 0, sizeof rx);
-    moto_e2e_rx_init(&rx);
+    vehicle_e2e_rx_init(&rx);
     /* the first frame resyncs the receiver, the next one (counter + 1) is OK */
-    TEST_ASSERT_EQUAL(MOTO_E2E_INITIAL, moto_e2e_check(PLATFORM_EKF_LEAN_E2E_DATA_ID,
+    TEST_ASSERT_EQUAL(VEHICLE_E2E_INITIAL, vehicle_e2e_check(PLATFORM_EKF_LEAN_E2E_DATA_ID,
                                                        PLATFORM_EKF_LEAN_E2E_MAX_DELTA_COUNTER,
                                                        PLATFORM_EKF_LEAN_E2E_TIMEOUT_MS, data,
                                                        sizeof data, &rx, NOW));
-    moto_e2e_tx_state_t after = next;
+    vehicle_e2e_tx_state_t after = next;
     uint8_t second[PLATFORM_EKF_LEAN_LENGTH];
     TEST_ASSERT_TRUE(lean_tx_frame(&m, &next, &after, second));
-    TEST_ASSERT_EQUAL(MOTO_E2E_OK, moto_e2e_check(PLATFORM_EKF_LEAN_E2E_DATA_ID,
+    TEST_ASSERT_EQUAL(VEHICLE_E2E_OK, vehicle_e2e_check(PLATFORM_EKF_LEAN_E2E_DATA_ID,
                                                   PLATFORM_EKF_LEAN_E2E_MAX_DELTA_COUNTER,
                                                   PLATFORM_EKF_LEAN_E2E_TIMEOUT_MS, second,
                                                   sizeof second, &rx, NOW + 20u));
@@ -206,14 +206,14 @@ static void test_the_frame_is_packed_and_e2e_protected_on_a_copy(void)
     expect.lean_angle_state = PLATFORM_EKF_LEAN_LEAN_ANGLE_STATE_CLAMPED_CHOICE;
     expect.lean_angle = -5500;
     expect.lean_angle_quality = 77u;
-    moto_e2e_tx_state_t next2;
+    vehicle_e2e_tx_state_t next2;
     uint8_t ref[PLATFORM_EKF_LEAN_LENGTH];
     TEST_ASSERT_TRUE(lean_tx_frame(&expect, &committed, &next2, ref));
     TEST_ASSERT_EQUAL_MEMORY(ref, data, sizeof data);
     TEST_ASSERT_EQUAL_MEMORY(&next2, &next, sizeof next);
     /* a corrupted byte fails the receiver's check */
     data[3] ^= 0x01u;
-    TEST_ASSERT_FALSE(moto_e2e_is_valid(moto_e2e_check(PLATFORM_EKF_LEAN_E2E_DATA_ID,
+    TEST_ASSERT_FALSE(vehicle_e2e_is_valid(vehicle_e2e_check(PLATFORM_EKF_LEAN_E2E_DATA_ID,
                                                        PLATFORM_EKF_LEAN_E2E_MAX_DELTA_COUNTER,
                                                        PLATFORM_EKF_LEAN_E2E_TIMEOUT_MS, data,
                                                        sizeof data, &rx, NOW + 40u)));

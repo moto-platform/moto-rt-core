@@ -1,6 +1,6 @@
 /*
  * Class-B ride accumulators and closed values (D-070, D-087). See derived_ride.h. The
- * formulas follow moto-server src/moto_server/derived/summary.py.
+ * formulas follow vehicle-server src/vehicle_server/derived/summary.py.
  */
 #include "features/derived/derived_ride.h"
 

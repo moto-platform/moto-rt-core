@@ -41,7 +41,7 @@ Every ID, length, scale, range, choice, cycle time and E2E parameter comes from 
 
 ## E2E (D-056 item 5)
 
-- The module owns 0x021's `moto_e2e_tx_state_t`. `vehicle_republish_speed_frame()` protects a copy, and the glue commits it only when `can_if_write()` returned `CAN_PORT_OK`.
+- The module owns 0x021's `vehicle_e2e_tx_state_t`. `vehicle_republish_speed_frame()` protects a copy, and the glue commits it only when `can_if_write()` returned `CAN_PORT_OK`.
 - A refused write leaves no counter gap, and its retry carries the same counter.
 - A frame replaced in its buffer shows up at the receiver as a counter gap. A gap longer than the 3-cycle timeout makes the receiver resync as INITIAL, never OK (D-026).
 - A replace that comes too late lets the old frame out. The new one follows with the next counter, so there is no gap.
@@ -59,8 +59,8 @@ Every ID, length, scale, range, choice, cycle time and E2E parameter comes from 
 ## Memory
 
 - **RAM:** `vehicle_republish_t` (two cycles, one E2E state, six counters) is 44 B, owned by the caller. bss does not change. Stack per step is about 150 B (five samples and one frame). There is no heap, and loops are bounded by `VEHICLE_CL250_DID_COUNT`.
-- **Flash** (M7 release, `arm-none-eabi-size` of `moto_rtcore_logic` + `moto_rtcore_fw`, 2026-10-03): text 10108 → 10904 B (+796 B; +936 B over v0.7.0) for the core, the glue and the comms change (host-only code is not in these libraries).
-  - The gen/ functions the linker keeps from `moto_defs_gen` add about 792 B: the two pack/init functions, 6 encode and 5 `is_in_phys_range` functions, the 0x021 E2E protect, and the CRC.
+- **Flash** (M7 release, `arm-none-eabi-size` of `vehicle_rtcore_logic` + `vehicle_rtcore_fw`, 2026-10-03): text 10108 → 10904 B (+796 B; +936 B over v0.7.0) for the core, the glue and the comms change (host-only code is not in these libraries).
+  - The gen/ functions the linker keeps from `vehicle_defs_gen` add about 792 B: the two pack/init functions, 6 encode and 5 `is_in_phys_range` functions, the 0x021 E2E protect, and the CRC.
   - The whole gen `platform.c` archive is 4 KB, but `--gc-sections` drops the unused functions.
 
 ## Coverage (D-046)
@@ -90,9 +90,9 @@ Every ID, length, scale, range, choice, cycle time and E2E parameter comes from 
   - a refused open sends nothing; the counters saturate
   - nothing on the vehicle bus
 - **`tests/host/test_can_sm.c`:** the comms pass sends both messages at their cycle times next to the UDS client and server.
-- **SIL** (`moto_rtcore_host`, ctest `sil_moto_rtcore_host_demo`): `app/host/sim_listener` checks every 0x021 with the receiver E2E check, the lengths, and that no gap reaches the 0x021 E2E timeout. The demo fails otherwise.
+- **SIL** (`vehicle_rtcore_host`, ctest `sil_vehicle_rtcore_host_demo`): `app/host/sim_listener` checks every 0x021 with the receiver E2E check, the lengths, and that no gap reaches the 0x021 E2E timeout. The demo fails otherwise.
 
-HIL scenarios (with the board, moto-hil-bench):
+HIL scenarios (with the board, vehicle-hil-bench):
 - `republisher_speed_stale_invalid`: silence 0xF40D on the restbus ECU. Within 300 ms plus one cycle, 0x021 turns INVALID with AGE 2550 and never shows a small AGE.
 - `republisher_platform_stall`: plus the hal README dedicated-buffer scenarios.
 - `republisher_error_passive_age`: rt-core alone on FDCAN2 without ACK, then ACK restored. The wire time of every 0x021 against its AGE: wire age ≤ AGE + one cycle + jitter, and the first frame after the gap is INITIAL.

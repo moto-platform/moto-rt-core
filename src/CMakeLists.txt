@@ -1,6 +1,6 @@
 # Pure, HAL-free logic: built by every preset, unit-tested on the host (tests/host)
 # and cross-compiled for the Cortex-M7. Nothing here may include HAL/RTOS headers.
-add_library(moto_rtcore_logic STATIC
+add_library(vehicle_rtcore_logic STATIC
     features/uds/isotp_core.c
     features/uds/dtc_snapshot_core.c
     features/uds/uds_client_core.c
@@ -19,35 +19,35 @@ add_library(moto_rtcore_logic STATIC
     features/derived/derived_gear.c
     features/derived/derived_ride.c
 )
-target_include_directories(moto_rtcore_logic PUBLIC
+target_include_directories(vehicle_rtcore_logic PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 # The UDS cores and the republisher core use the generated tables, gates, timings,
 # platform pack functions and E2E (pure C).
-target_link_libraries(moto_rtcore_logic PUBLIC moto_defs_gen)
-target_compile_options(moto_rtcore_logic PRIVATE ${MOTO_WARNINGS})
+target_link_libraries(vehicle_rtcore_logic PUBLIC vehicle_defs_gen)
+target_compile_options(vehicle_rtcore_logic PRIVATE ${VEHICLE_WARNINGS})
 # The lean core (D-065 item 1) uses sinf/cosf/sqrtf: no errno side effect, IEEE semantics
 # kept (never -ffast-math; lean_core.c refuses to build otherwise), and libm.
-target_compile_options(moto_rtcore_logic PRIVATE -fno-math-errno)
-target_link_libraries(moto_rtcore_logic PUBLIC m)
+target_compile_options(vehicle_rtcore_logic PRIVATE -fno-math-errno)
+target_link_libraries(vehicle_rtcore_logic PUBLIC m)
 
-# Generated moto-vehicle-defs code for this node (D-003): the CL250 DID table, the
+# Generated vehicle-defs code for this node (D-003): the CL250 DID table, the
 # D-020 request/frame gates, the platform UDS tables, and the platform.dbc pack/encode
 # functions with the E2E protection (D-005, D-026). Built with its own flags.
-add_library(moto_defs_gen STATIC
-    ${MOTO_DEFS_GEN}/vehicle_cl250.c
-    ${MOTO_DEFS_GEN}/vehicle_cl250_derived.c
-    ${MOTO_DEFS_GEN}/platform_uds.c
-    ${MOTO_DEFS_GEN}/platform.c
-    ${MOTO_DEFS_GEN}/platform_e2e.c
-    ${MOTO_DEFS_GEN}/moto_e2e.c
+add_library(vehicle_defs_gen STATIC
+    ${VEHICLE_DEFS_GEN}/vehicle_cl250.c
+    ${VEHICLE_DEFS_GEN}/vehicle_cl250_derived.c
+    ${VEHICLE_DEFS_GEN}/platform_uds.c
+    ${VEHICLE_DEFS_GEN}/platform.c
+    ${VEHICLE_DEFS_GEN}/platform_e2e.c
+    ${VEHICLE_DEFS_GEN}/vehicle_e2e.c
 )
-target_include_directories(moto_defs_gen PUBLIC ${MOTO_DEFS_GEN})
+target_include_directories(vehicle_defs_gen PUBLIC ${VEHICLE_DEFS_GEN})
 
 # Firmware code above the HAL: services/ and the feature glue. It only uses the HAL
 # interfaces (hal/can_port.h, hal/hal_time.h, hal/hal_atomic.h, hal/imu.h), so the same objects serve the host
 # program and the H7; each platform links its own hal/ implementation.
-add_library(moto_rtcore_fw STATIC
+add_library(vehicle_rtcore_fw STATIC
     services/timebase.c
     services/can_if.c
     services/can_sm.c
@@ -70,34 +70,34 @@ add_library(moto_rtcore_fw STATIC
     features/derived/derived.c
     app/comms.c
 )
-target_link_libraries(moto_rtcore_fw PUBLIC moto_rtcore_logic moto_defs_gen)
+target_link_libraries(vehicle_rtcore_fw PUBLIC vehicle_rtcore_logic vehicle_defs_gen)
 # DID 0xF189 (SW version) reports the CMake project version (D-036, D-040).
-target_compile_definitions(moto_rtcore_fw PRIVATE MOTO_RTCORE_VERSION="${PROJECT_VERSION}")
-target_compile_options(moto_rtcore_fw PRIVATE ${MOTO_WARNINGS})
+target_compile_definitions(vehicle_rtcore_fw PRIVATE VEHICLE_RTCORE_VERSION="${PROJECT_VERSION}")
+target_compile_options(vehicle_rtcore_fw PRIVATE ${VEHICLE_WARNINGS})
 
 # Host platform layer + SIL program (D-034): native builds only.
 if(NOT CMAKE_CROSSCOMPILING)
-    add_library(moto_rtcore_hal_host STATIC
+    add_library(vehicle_rtcore_hal_host STATIC
         hal/host/vbus.c
         hal/host/can_port_host.c
         hal/host/hal_time_host.c
         hal/host/hal_atomic_host.c
         hal/host/imu_host.c
     )
-    target_link_libraries(moto_rtcore_hal_host PUBLIC moto_rtcore_logic)
-    target_compile_definitions(moto_rtcore_hal_host PRIVATE _POSIX_C_SOURCE=200809L)
-    target_compile_options(moto_rtcore_hal_host PRIVATE ${MOTO_WARNINGS})
+    target_link_libraries(vehicle_rtcore_hal_host PUBLIC vehicle_rtcore_logic)
+    target_compile_definitions(vehicle_rtcore_hal_host PRIVATE _POSIX_C_SOURCE=200809L)
+    target_compile_options(vehicle_rtcore_hal_host PRIVATE ${VEHICLE_WARNINGS})
 
-    add_library(moto_rtcore_sim STATIC
+    add_library(vehicle_rtcore_sim STATIC
         app/host/sim_ecu.c
         app/host/sim_tester.c
         app/host/sim_listener.c
     )
-    target_link_libraries(moto_rtcore_sim PUBLIC moto_rtcore_hal_host moto_defs_gen)
-    target_compile_options(moto_rtcore_sim PRIVATE ${MOTO_WARNINGS})
+    target_link_libraries(vehicle_rtcore_sim PUBLIC vehicle_rtcore_hal_host vehicle_defs_gen)
+    target_compile_options(vehicle_rtcore_sim PRIVATE ${VEHICLE_WARNINGS})
 
-    add_executable(moto_rtcore_host app/host/main.c)
-    target_link_libraries(moto_rtcore_host PRIVATE moto_rtcore_fw moto_rtcore_sim moto_rtcore_hal_host)
-    target_compile_definitions(moto_rtcore_host PRIVATE _POSIX_C_SOURCE=200809L)
-    target_compile_options(moto_rtcore_host PRIVATE ${MOTO_WARNINGS})
+    add_executable(vehicle_rtcore_host app/host/main.c)
+    target_link_libraries(vehicle_rtcore_host PRIVATE vehicle_rtcore_fw vehicle_rtcore_sim vehicle_rtcore_hal_host)
+    target_compile_definitions(vehicle_rtcore_host PRIVATE _POSIX_C_SOURCE=200809L)
+    target_compile_options(vehicle_rtcore_host PRIVATE ${VEHICLE_WARNINGS})
 endif()

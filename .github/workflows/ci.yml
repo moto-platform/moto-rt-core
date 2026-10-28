@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      # moto-vehicle-defs is public (D-033), so the submodule needs no extra secret.
+      # vehicle-defs is public (D-033), so the submodule needs no extra secret.
       - uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -20,9 +20,9 @@ jobs:
       # D-003/D-036: consumers pin defs to a release tag, never a branch commit.
       - name: Defs pin must be a release tag
         run: |
-          git -C external/moto-vehicle-defs fetch --quiet --depth=1 origin '+refs/tags/*:refs/tags/*'
-          tag=$(git -C external/moto-vehicle-defs tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true)
-          test -n "$tag" || { echo "::error::external/moto-vehicle-defs is not pinned to a vX.Y.Z release tag"; exit 1; }
+          git -C external/vehicle-defs fetch --quiet --depth=1 origin '+refs/tags/*:refs/tags/*'
+          tag=$(git -C external/vehicle-defs tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true)
+          test -n "$tag" || { echo "::error::external/vehicle-defs is not pinned to a vX.Y.Z release tag"; exit 1; }
           echo "defs pin: $tag"
 
       - name: Install toolchains
@@ -34,7 +34,7 @@ jobs:
           arm-none-eabi-gcc --version | head -1
 
       # The blocking MISRA step needs a fixed cppcheck: Ubuntu's apt cppcheck (2.13) misses
-      # findings that 2.22 reports (15.6 on misra/canary.c). Same build as moto-vehicle-defs.
+      # findings that 2.22 reports (15.6 on misra/canary.c). Same build as vehicle-defs.
       - name: Restore cppcheck 2.22.0
         id: cppcheck
         uses: actions/cache/restore@v4
@@ -100,8 +100,8 @@ jobs:
             cmake --preset "$p"
             cmake --build --preset "$p"
           done
-          arm-none-eabi-size -t build/target-m7-release/src/libmoto_rtcore_logic.a \
-            build/target-m7-release/src/libmoto_rtcore_fw.a
+          arm-none-eabi-size -t build/target-m7-release/src/libvehicle_rtcore_logic.a \
+            build/target-m7-release/src/libvehicle_rtcore_fw.a
 
       # features/ talk to CAN through services/can_if, which carries the vehicle-bus
       # guard (D-020); a direct hal/ include would bypass it.
@@ -160,7 +160,7 @@ jobs:
         run: |
           cppcheck --std=c11 --enable=warning,performance,portability \
             --error-exitcode=1 --inline-suppr --suppress=missingIncludeSystem \
-            -I src -I external/moto-vehicle-defs/gen/c/rt_core src
+            -I src -I external/vehicle-defs/gen/c/rt_core src
 
       # Blocking: cppcheck style + the MISRA C:2012 addon (rule numbers without rule
       # texts). Deviations are recorded in misra/README.md and listed in
@@ -181,7 +181,7 @@ jobs:
           cppcheck --std=c11 --enable=style --addon=misra --inline-suppr \
             --error-exitcode=1 --suppressions-list=misra/suppressions.txt \
             --suppress=missingIncludeSystem '--suppress=*:*external/*' -i src/hal/host -i src/app/host \
-            -I src -I external/moto-vehicle-defs/gen/c/rt_core src
+            -I src -I external/vehicle-defs/gen/c/rt_core src
 
   # The lock-free cross-task exchange (D-065 item 2: services/snapshot, services/alive)
   # under ThreadSanitizer, which cannot share a build with ASan. Includes the two-thread

@@ -62,8 +62,8 @@ void vehicle_republish_engine_msg(const vehicle_signal_sample_t samples[VEHICLE_
 }
 
 bool vehicle_republish_speed_frame(const struct platform_vehicle_speed_t* msg,
-                                   const moto_e2e_tx_state_t* committed,
-                                   moto_e2e_tx_state_t* next,
+                                   const vehicle_e2e_tx_state_t* committed,
+                                   vehicle_e2e_tx_state_t* next,
                                    uint8_t out[PLATFORM_VEHICLE_SPEED_LENGTH])
 {
     if ((msg == NULL) || (committed == NULL) || (next == NULL) || (out == NULL)) {
@@ -74,7 +74,7 @@ bool vehicle_republish_speed_frame(const struct platform_vehicle_speed_t* msg,
         return false;
     }
     *next = *committed;
-    return platform_vehicle_speed_e2e_protect(out, PLATFORM_VEHICLE_SPEED_LENGTH, next) == MOTO_E2E_OK;
+    return platform_vehicle_speed_e2e_protect(out, PLATFORM_VEHICLE_SPEED_LENGTH, next) == VEHICLE_E2E_OK;
 }
 
 bool vehicle_republish_engine_frame(const struct platform_vehicle_engine_t* msg,
