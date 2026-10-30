@@ -12,4 +12,4 @@ Baseline at the switch to blocking (2026-09-29, cppcheck 2.22): 53 Ã— 15.5, 16 Ã
 
 CI builds cppcheck 2.22.0, the version of this baseline, and caches it. Before the MISRA step it checks that the addon reports 10.8, 15.6 and 17.7 on `misra/canary.c`. The step used to run Ubuntu's apt cppcheck 2.13, which does not report 15.6 there.
 
-**Generated code:** `external/vehicle-defs/gen/c/rt_core/` (the D-020 gates, E2E) is excluded here (`--suppress=*:*external/*`). It is MISRA-checked, blocking, in vehicle-defs CI since vehicle-defs#16 (D-046 item 2, its own register in `misra/README.md` there). That gate is not in a release yet; this repo pins defs v0.2.0, so the pinned copy predates it.
+**Generated code:** `external/vehicle-defs/gen/c/rt_core/` (the D-020 gates, E2E) is excluded here (`--suppress=*:*external/*`). It is MISRA-checked, blocking, in vehicle-defs CI since vehicle-defs#16 (D-046 item 2, its own register in `misra/README.md` there). The pinned copy carries that register and its canary under `external/vehicle-defs/misra/`.

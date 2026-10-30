@@ -2,7 +2,7 @@
 
 Main domain controller firmware for the [vehicle-platform](https://github.com/vehicle-platform) motorcycle platform, running on the **Cortex-M7 core of an STM32H755** (NUCLEO-H755ZI-Q, D-072; the Cortex-M4 runs `vehicle-safety-node`). It owns CAN on both buses, UDS/ISO-TP, logging, sensor fusion and the cornering EKF estimation (see `CLAUDE.md` for the scope and the safety rules).
 
-Signal, CAN and UDS definitions come only from [vehicle-defs](https://github.com/vehicle-platform/vehicle-defs) (submodule `external/vehicle-defs`, pinned to `v0.8.0`).
+Signal, CAN and UDS definitions come only from [vehicle-defs](https://github.com/vehicle-platform/vehicle-defs) (submodule `external/vehicle-defs`, pinned to a tag; `vehicle-workspace/manifest.yaml` records the known-good combination).
 
 ## Layout
 
@@ -10,8 +10,8 @@ Signal, CAN and UDS definitions come only from [vehicle-defs](https://github.com
 src/hal/         HAL-free interfaces (can_port, hal_time); host/ = host platform layer
                  (in-process bus, SocketCAN, monotonic ms); stm32/ once the board is chosen
 src/services/    timebase, can_if (CAN RX routing + D-020 vehicle guard), vehicle_signals
-                 (last sample per DID), diag (DTC memory + vehicle-tester status);
-                 signal pool, com, log -- not yet
+                 (last sample per DID), diag (DTC memory + vehicle-tester status), com
+                 (cyclic send path, services/com.h); signal pool, log -- not yet
 src/features/    independent function modules (uds/: ISO-TP core + link glue, UDS client =
                  the CL250 vehicle poller, UDS server = rt-core's diagnostics on the
                  platform bus only)
