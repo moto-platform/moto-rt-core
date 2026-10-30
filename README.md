@@ -2,7 +2,7 @@
 
 Main domain controller firmware for the [vehicle-platform](https://github.com/vehicle-platform) motorcycle platform, running on the **Cortex-M7 core of an STM32H755** (NUCLEO-H755ZI-Q, D-072; the Cortex-M4 runs `vehicle-safety-node`). It owns CAN on both buses, UDS/ISO-TP, logging, sensor fusion and the cornering EKF estimation (see `CLAUDE.md` for the scope and the safety rules).
 
-Signal, CAN and UDS definitions come only from [vehicle-defs](https://github.com/vehicle-platform/vehicle-defs) (submodule `external/vehicle-defs`, pinned to the tag recorded in `vehicle-workspace/manifest.yaml`).
+Signal, CAN and UDS definitions come only from [vehicle-defs](https://github.com/vehicle-platform/vehicle-defs) (submodule `external/vehicle-defs`, pinned to a tag; `vehicle-workspace/manifest.yaml` records the known-good combination).
 
 ## Layout
 

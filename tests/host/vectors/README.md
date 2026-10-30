@@ -16,9 +16,8 @@ cd vehicle-server && uv run vehicle-server golden --out ../vehicle-rt-core/tests
   version it came from). The expected outputs use that version's derived `stale_after_ms`
   (the age limit of a derived input) and, for a non-event DID input, that DID's own
   `stale_after_ms` of the gen vehicle table (D-070), so the features/derived test that
-  compares against them needs a pin with the same derived table. This repo pins v0.19.1, a
-  rename-only commit on top of v0.19.0 (D-089) with the same tables, so the table matches;
-  `test_derived_vectors` checks the shape only; `test_derived_core` (features/derived, C3)
+  compares against them needs a pin with the same derived table (the rename-only v0.19.1 of
+  D-089 keeps it); `test_derived_vectors` checks the shape only; `test_derived_core` (features/derived, C3)
   replays the scenarios through the core, compares every row and fingerprints the gen table
   the vectors depend on.
 - Provenance: the banner of each file carries the defs version and a content SHA-256; vehicle-server
